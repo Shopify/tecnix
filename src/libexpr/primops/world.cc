@@ -1,18 +1,16 @@
 #include "nix/expr/primops.hh"
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval-settings.hh"
-#include "nix/expr/json-to-value.hh"
 #include "nix/fetchers/git-utils.hh"
 #include "nix/store/store-api.hh"
 #include "nix/fetchers/fetch-to-store.hh"
 
+#include <nlohmann/json.hpp>
+
 namespace nix {
 
-// ============================================================================
-// builtins.worldManifest
-// Returns the parsed manifest.json from //.meta
-// ============================================================================
-static void prim_worldManifest(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+// Helper to read the manifest JSON content
+static std::string readManifestContent(EvalState & state, const PosIdx pos)
 {
     auto fullPath = CanonPath("/.meta/manifest.json");
 
@@ -23,9 +21,7 @@ static void prim_worldManifest(EvalState & state, const PosIdx pos, Value ** arg
             auto checkoutPath = state.settings.worldCheckoutPath.get();
             auto checkoutFullPath = CanonPath(checkoutPath + fullPath.abs());
             if ((*checkoutAccessor)->pathExists(checkoutFullPath)) {
-                auto content = (*checkoutAccessor)->readFile(checkoutFullPath);
-                parseJSON(state, content, v);
-                return;
+                return (*checkoutAccessor)->readFile(checkoutFullPath);
             }
         }
     }
@@ -36,21 +32,67 @@ static void prim_worldManifest(EvalState & state, const PosIdx pos, Value ** arg
         state.error<EvalError>("manifest.json does not exist at //.meta/manifest.json in world")
             .atPos(pos).debugThrow();
 
-    auto content = accessor->readFile(fullPath);
-    parseJSON(state, content, v);
+    return accessor->readFile(fullPath);
+}
+
+// ============================================================================
+// builtins.worldManifest
+// Returns path -> zoneId mapping from //.meta/manifest.json
+// ============================================================================
+static void prim_worldManifest(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto content = readManifestContent(state, pos);
+    auto json = nlohmann::json::parse(content);
+
+    auto attrs = state.buildBindings(json.size());
+    for (auto & [path, value] : json.items()) {
+        auto & id = value.at("id");
+        attrs.alloc(state.symbols.create(path)).mkString(id.get<std::string>(), state.mem);
+    }
+    v.mkAttrs(attrs);
 }
 
 static RegisterPrimOp primop_worldManifest({
     .name = "worldManifest",
     .args = {},
     .doc = R"(
-      Get the world manifest as a Nix attrset.
+      Get the world manifest as a Nix attrset mapping zone paths to zone IDs.
 
-      Reads and parses //.meta/manifest.json from the world repository.
+      Example: `builtins.worldManifest."//areas/tools/dev"` returns `"W-123456"`.
 
       Requires `--world-git-dir` and `--world-sha` to be set.
     )",
     .fun = prim_worldManifest,
+});
+
+// ============================================================================
+// builtins.worldManifestInverted
+// Returns zoneId -> path mapping (inverse of worldManifest)
+// ============================================================================
+static void prim_worldManifestInverted(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto content = readManifestContent(state, pos);
+    auto json = nlohmann::json::parse(content);
+
+    auto attrs = state.buildBindings(json.size());
+    for (auto & [path, value] : json.items()) {
+        auto & id = value.at("id");
+        attrs.alloc(state.symbols.create(id.get<std::string>())).mkString(path, state.mem);
+    }
+    v.mkAttrs(attrs);
+}
+
+static RegisterPrimOp primop_worldManifestInverted({
+    .name = "worldManifestInverted",
+    .args = {},
+    .doc = R"(
+      Get the inverted world manifest as a Nix attrset mapping zone IDs to zone paths.
+
+      Example: `builtins.worldManifestInverted."W-123456"` returns `"//areas/tools/dev"`.
+
+      Requires `--world-git-dir` and `--world-sha` to be set.
+    )",
+    .fun = prim_worldManifestInverted,
 });
 
 // ============================================================================
