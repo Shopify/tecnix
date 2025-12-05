@@ -45,6 +45,11 @@ json printValueAsJSON(
             out = v.path().path.abs();
         break;
 
+    case nWorldPath:
+        // For now, world paths are not copied to store, just output as strings
+        out = v.worldPathStrView();
+        break;
+
     case nNull:
         // already initialized as null
         break;

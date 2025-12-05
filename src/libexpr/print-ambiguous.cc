@@ -28,6 +28,9 @@ void printAmbiguous(
     case nPath:
         str << v.path().to_string(); // !!! escaping?
         break;
+    case nWorldPath:
+        str << v.worldPathStrView();
+        break;
     case nNull:
         str << "null";
         break;

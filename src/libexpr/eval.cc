@@ -154,6 +154,8 @@ std::string_view showType(ValueType type, bool withArticle)
         return WA("an", "external value");
     case nFloat:
         return WA("a", "float");
+    case nWorldPath:
+        return WA("a", "world path");
     case nThunk:
         return WA("a", "thunk");
     }
@@ -2565,6 +2567,11 @@ BackedStringView EvalState::coerceToString(
         }
     }
 
+    if (v.type() == nWorldPath) {
+        // World paths are not copied to store; return the path string
+        return std::string(v.worldPathStrView());
+    }
+
     if (v.type() == nAttrs) {
         auto maybeString = tryAttrsToString(pos, v, context, coerceMore, copyToStore);
         if (maybeString)
@@ -2672,6 +2679,10 @@ SourcePath EvalState::coerceToPath(const PosIdx pos, Value & v, NixStringContext
     /* Handle path values directly, without coercing to a string. */
     if (v.type() == nPath)
         return v.path();
+
+    /* Handle world path values directly. */
+    if (v.type() == nWorldPath)
+        return SourcePath(ref(v.worldPathAccessor()->shared_from_this()), CanonPath(v.worldPathStrView()));
 
     /* Similarly, handle __toString where the result may be a path
        value. */

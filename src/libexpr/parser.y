@@ -137,14 +137,14 @@ static Expr * makeCall(Exprs & exprs, PosIdx pos, Expr * fn, Expr * arg) {
 %type <std::vector<std::pair<AttrName, PosIdx>>> attrs
 %type <std::vector<std::pair<PosIdx, Expr *>>> string_parts_interpolated
 %type <std::vector<std::pair<PosIdx, std::variant<Expr *, StringToken>>>> ind_string_parts
-%type <Expr *> path_start
+%type <Expr *> path_start wpath_start
 %type <ToBeStringyExpr> string_parts string_attr
 %type <StringToken> attr
 %token <StringToken> ID
 %token <StringToken> STR IND_STR
 %token <NixInt> INT_LIT
 %token <NixFloat> FLOAT_LIT
-%token <StringToken> PATH HPATH SPATH PATH_END
+%token <StringToken> PATH HPATH SPATH PATH_END WPATH WPATH_END
 %token <StringToken> URI
 %token IF THEN ELSE ASSERT WITH LET IN_KW REC INHERIT EQ NEQ AND OR IMPL OR_KW
 %token PIPE_FROM PIPE_INTO /* <| and |> */
@@ -306,6 +306,11 @@ expr_simple
       $2.insert($2.begin(), {state->at(@1), $1});
       $$ = state->exprs.add<ExprConcatStrings>(state->exprs.alloc, CUR_POS, false, $2);
   }
+  | wpath_start WPATH_END
+  | wpath_start string_parts_interpolated WPATH_END {
+      $2.insert($2.begin(), {state->at(@1), $1});
+      $$ = state->exprs.add<ExprWorldPath>(state->exprs.alloc, CUR_POS, $2);
+  }
   | SPATH {
       std::string_view path($1.p + 1, $1.l - 2);
       $$ = state->exprs.add<ExprCall>(CUR_POS,
@@ -386,6 +391,13 @@ path_start
     }
     Path path(getHome().string() + std::string($1.p + 1, $1.l - 1));
     $$ = state->exprs.add<ExprPath>(state->exprs.alloc, ref<SourceAccessor>(state->rootFS), path);
+  }
+  ;
+
+wpath_start
+  : WPATH {
+    std::string_view literal({$1.p, $1.l});
+    $$ = state->exprs.add<ExprWorldPath>(state->exprs.alloc, CUR_POS, literal);
   }
   ;
 

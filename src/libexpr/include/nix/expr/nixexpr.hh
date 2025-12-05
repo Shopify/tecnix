@@ -221,6 +221,51 @@ struct ExprPath : Expr
     COMMON_METHODS
 };
 
+/**
+ * A world path expression (//path/in/world).
+ *
+ * Unlike ExprPath, this tracks the zone and enforces zone boundaries.
+ * World paths are resolved against the world git repository.
+ */
+struct ExprWorldPath : Expr
+{
+    PosIdx pos;
+
+    // For simple paths: the literal world path string
+    std::optional<std::string> literalPath;
+
+    // For interpolated paths: the parts to concatenate
+    std::span<std::pair<PosIdx, Expr *>> parts;
+
+    // Simple world path constructor
+    ExprWorldPath(std::pmr::polymorphic_allocator<char> & alloc,
+                  const PosIdx & pos,
+                  std::string_view path)
+        : pos(pos)
+        , literalPath(std::string(path))
+        , parts()
+    {}
+
+    // Interpolated world path constructor
+    ExprWorldPath(std::pmr::polymorphic_allocator<char> & alloc,
+                  const PosIdx & pos,
+                  std::span<std::pair<PosIdx, Expr *>> parts)
+        : pos(pos)
+        , literalPath(std::nullopt)
+        , parts({alloc.allocate_object<std::pair<PosIdx, Expr *>>(parts.size()),
+                 parts.size()})
+    {
+        std::ranges::copy(parts, this->parts.begin());
+    }
+
+    PosIdx getPos() const override
+    {
+        return pos;
+    }
+
+    COMMON_METHODS
+};
+
 typedef uint32_t Level;
 typedef uint32_t Displacement;
 

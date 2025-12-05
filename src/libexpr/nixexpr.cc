@@ -48,6 +48,59 @@ void ExprPath::show(const SymbolTable & symbols, std::ostream & str) const
     str << v.pathStrView();
 }
 
+void ExprWorldPath::show(const SymbolTable & symbols, std::ostream & str) const
+{
+    if (literalPath) {
+        str << *literalPath;
+    } else {
+        str << "(world path with interpolation)";
+    }
+}
+
+void ExprWorldPath::bindVars(EvalState & es, const std::shared_ptr<const StaticEnv> & env)
+{
+    for (auto & [pos, e] : parts)
+        e->bindVars(es, env);
+}
+
+void ExprWorldPath::eval(EvalState & state, Env & env, Value & v)
+{
+    using WorldPathData = detail::ValueBase::WorldPathData;
+
+    // Get the world accessor - prefer checkout accessor if available, else use git accessor
+    SourceAccessor * worldAccessor = nullptr;
+    if (auto checkout = state.getWorldCheckoutAccessor()) {
+        worldAccessor = &**checkout;
+    } else {
+        worldAccessor = &*state.getWorldGitAccessor();
+    }
+
+    if (literalPath) {
+        auto & pathStr = StringData::make(state.mem, *literalPath);
+        auto * data = new (state.mem.allocBytes(sizeof(WorldPathData))) WorldPathData{&pathStr, nullptr};
+        v.mkWorldPath(worldAccessor, data);
+    } else {
+        // Handle interpolated paths - concatenate parts
+        std::string fullPath;
+        for (auto & [partPos, partExpr] : parts) {
+            Value partVal;
+            partExpr->eval(state, env, partVal);
+            // Handle world path parts specially (they come from the prefix)
+            if (partVal.isWorldPath()) {
+                fullPath += partVal.worldPathStrView();
+            } else {
+                NixStringContext context;
+                auto s = state.coerceToString(partPos, partVal, context,
+                    "while evaluating world path segment", false, false, false);
+                fullPath += *s;
+            }
+        }
+        auto & pathStr = StringData::make(state.mem, fullPath);
+        auto * data = new (state.mem.allocBytes(sizeof(WorldPathData))) WorldPathData{&pathStr, nullptr};
+        v.mkWorldPath(worldAccessor, data);
+    }
+}
+
 void ExprVar::show(const SymbolTable & symbols, std::ostream & str) const
 {
     str << symbols[name];

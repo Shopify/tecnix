@@ -14,6 +14,9 @@
 %x INPATH
 %x INPATH_SLASH
 %x PATH_START
+%x INWPATH
+%x INWPATH_SLASH
+%x WPATH_START
 
 %top {
 #include "parser-tab.hh" // YYSTYPE
@@ -109,6 +112,8 @@ HPATH       \~(\/{PATH_CHAR}+)+\/?
 HPATH_START \~\/
 SPATH       \<{PATH_CHAR}+(\/{PATH_CHAR}+)*\>
 URI         [a-zA-Z][a-zA-Z0-9\+\-\.]*\:[a-zA-Z0-9\%\/\?\:\@\&\=\+\$\,\-\_\.\!\~\*\']+
+WPATH       \/\/({PATH_CHAR}+\/?)+
+WPATH_SEG   \/\/{PATH_CHAR}*\/
 
 
 %%
@@ -133,6 +138,80 @@ or          { return OR_KW; }
 \&\&        { return AND; }
 \|\|        { return OR; }
 \-\>        { return IMPL; }
+
+\/\/\$\{ {
+  PUSH_STATE(WPATH_START);
+  yyless(0);
+  yylloc->unstash();
+}
+
+{WPATH_SEG}\$\{ {
+  PUSH_STATE(WPATH_START);
+  yyless(0);
+  yylloc->unstash();
+}
+
+<WPATH_START>\/\/ {
+  POP_STATE();
+  PUSH_STATE(INWPATH);
+  yylval->emplace<StringToken>(yytext, (size_t) yyleng);
+  return WPATH;
+}
+
+<WPATH_START>{WPATH_SEG} {
+  POP_STATE();
+  PUSH_STATE(INWPATH_SLASH);
+  yylval->emplace<StringToken>(yytext, (size_t) yyleng);
+  return WPATH;
+}
+
+<WPATH_START>{ANY} |
+<WPATH_START><<EOF>> {
+  unreachable();
+}
+
+{WPATH} {
+  if (yytext[yyleng-1] == '/')
+    PUSH_STATE(INWPATH_SLASH);
+  else
+    PUSH_STATE(INWPATH);
+  yylval->emplace<StringToken>(yytext, (size_t) yyleng);
+  return WPATH;
+}
+
+<INWPATH,INWPATH_SLASH>\$\{ {
+  POP_STATE();
+  PUSH_STATE(INWPATH);
+  PUSH_STATE(DEFAULT);
+  return DOLLAR_CURLY;
+}
+
+<INWPATH,INWPATH_SLASH>{PATH}|{PATH_SEG}|{PATH_CHAR}+ {
+  POP_STATE();
+  if (yytext[yyleng-1] == '/')
+      PUSH_STATE(INWPATH_SLASH);
+  else
+      PUSH_STATE(INWPATH);
+  yylval->emplace<StringToken>(yytext, (size_t) yyleng);
+  return STR;
+}
+
+<INWPATH>{ANY} |
+<INWPATH><<EOF>> {
+  POP_STATE();
+  yyless(0);
+  yylloc->unstash();
+  return WPATH_END;
+}
+
+<INWPATH_SLASH>{ANY} |
+<INWPATH_SLASH><<EOF>> {
+  throw ParseError(ErrorInfo{
+      .msg = HintFmt("world path has a trailing slash"),
+      .pos = state->positions[CUR_POS],
+  });
+}
+
 \/\/        { return UPDATE; }
 \+\+        { return CONCAT; }
 \<\|        { requireExperimentalFeature(Xp::PipeOperators, state->positions[CUR_POS]);

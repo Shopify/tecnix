@@ -89,6 +89,10 @@ static void printValueAsXML(
         doc.writeEmptyElement("path", singletonAttrs("value", v.path().to_string()));
         break;
 
+    case nWorldPath:
+        doc.writeEmptyElement("worldpath", singletonAttrs("value", std::string(v.worldPathStrView())));
+        break;
+
     case nNull:
         doc.writeEmptyElement("null");
         break;

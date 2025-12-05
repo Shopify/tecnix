@@ -214,6 +214,8 @@ ValueType nix_get_type(nix_c_context * context, const nix_value * value)
             return NIX_TYPE_FUNCTION;
         case nExternal:
             return NIX_TYPE_EXTERNAL;
+        case nWorldPath:
+            return NIX_TYPE_WORLDPATH;
         }
         return NIX_TYPE_NULL;
     }

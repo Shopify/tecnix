@@ -261,6 +261,15 @@ private:
             output << ANSI_NORMAL;
     }
 
+    void printWorldPath(Value & v)
+    {
+        if (options.ansiColors)
+            output << ANSI_GREEN;
+        output << v.worldPathStrView();
+        if (options.ansiColors)
+            output << ANSI_NORMAL;
+    }
+
     void printNull()
     {
         if (options.ansiColors)
@@ -562,6 +571,10 @@ private:
 
             case nPath:
                 printPath(v);
+                break;
+
+            case nWorldPath:
+                printWorldPath(v);
                 break;
 
             case nNull:

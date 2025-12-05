@@ -55,6 +55,7 @@ typedef enum {
     tListN,
     tString,
     tPath,
+    tWorldPath,
 } InternalType;
 
 /**
@@ -74,6 +75,7 @@ typedef enum {
     nList,
     nFunction,
     nExternal,
+    nWorldPath,
 } ValueType;
 
 class Bindings;
@@ -380,6 +382,36 @@ struct ValueBase
         const StringData * path;
     };
 
+    /**
+     * Zone context for world paths, containing zone ID and zone path.
+     * Allocated on the GC heap like string context.
+     */
+    struct WorldZoneContext
+    {
+        const StringData * zoneId;    // e.g., "W-123456"
+        const StringData * zonePath;  // e.g., "//areas/tools/dev"
+    };
+
+    /**
+     * Data for a world path value, allocated on the GC heap.
+     * Contains the path string and optional zone context.
+     */
+    struct WorldPathData
+    {
+        const StringData * path;
+        const WorldZoneContext * zone;  // May be null if zone not yet resolved
+    };
+
+    /**
+     * A world path value (//path/in/world) with zone tracking.
+     * Stored as accessor pointer + WorldPathData pointer to fit in 16 bytes.
+     */
+    struct WorldPath
+    {
+        SourceAccessor * accessor;
+        const WorldPathData * data;
+    };
+
     struct Null
     {};
 
@@ -433,6 +465,7 @@ struct PayloadTypeToInternalType
     MACRO(bool, boolean, tBool)                                     \
     MACRO(ValueBase::StringWithContext, string, tString)            \
     MACRO(ValueBase::Path, path, tPath)                             \
+    MACRO(ValueBase::WorldPath, worldPath, tWorldPath)              \
     MACRO(ValueBase::Null, null_, tNull)                            \
     MACRO(Bindings *, attrs, tAttrs)                                \
     MACRO(ValueBase::List, bigList, tListN)                         \
@@ -588,6 +621,7 @@ class alignas(16) ValueStorage<ptrSize, std::enable_if_t<detail::useBitPackedVal
         pdListN, //< layout: Single untaggable field.
         pdString,
         pdPath,
+        pdWorldPath,
         pdPairOfPointers, //< layout: Pair of pointers payload
     };
 
@@ -620,7 +654,7 @@ class alignas(16) ValueStorage<ptrSize, std::enable_if_t<detail::useBitPackedVal
     template<PrimaryDiscriminator discriminator, typename T, typename U>
     void setUntaggablePayload(T * firstPtrField, U untaggableField) noexcept
     {
-        static_assert(discriminator >= pdListN && discriminator <= pdPath);
+        static_assert(discriminator >= pdListN && discriminator <= pdWorldPath);
         auto firstFieldPayload = std::bit_cast<PackedPointer>(firstPtrField);
         assertAligned(firstFieldPayload);
         payload[0] = static_cast<int>(discriminator) | firstFieldPayload;
@@ -667,6 +701,7 @@ protected:
         case pdListN:
         case pdString:
         case pdPath:
+        case pdWorldPath:
             return static_cast<InternalType>(tListN + (pd - pdListN));
         case pdPairOfPointers:
             return static_cast<InternalType>(tListSmall + (payload[1] & discriminatorMask));
@@ -747,6 +782,12 @@ protected:
         path.path = std::bit_cast<const StringData *>(payload[1]);
     }
 
+    void getStorage(WorldPath & worldPath) const noexcept
+    {
+        worldPath.accessor = untagPointer<decltype(worldPath.accessor)>(payload[0]);
+        worldPath.data = std::bit_cast<const WorldPathData *>(payload[1]);
+    }
+
     void setStorage(NixInt integer) noexcept
     {
         setSingleDWordPayload<tInt>(integer.value);
@@ -795,6 +836,11 @@ protected:
     void setStorage(Path path) noexcept
     {
         setUntaggablePayload<pdPath>(path.accessor, path.path);
+    }
+
+    void setStorage(WorldPath worldPath) noexcept
+    {
+        setUntaggablePayload<pdWorldPath>(worldPath.accessor, worldPath.data);
     }
 };
 
@@ -1107,6 +1153,8 @@ public:
             return nExternal;
         case tFloat:
             return nFloat;
+        case tWorldPath:
+            return nWorldPath;
         case tThunk:
         case tApp:
             return nThunk;
@@ -1158,6 +1206,11 @@ public:
     inline void mkPath(SourceAccessor * accessor, const StringData & path) noexcept
     {
         setStorage(Path{.accessor = accessor, .path = &path});
+    }
+
+    inline void mkWorldPath(SourceAccessor * accessor, const WorldPathData * data) noexcept
+    {
+        setStorage(WorldPath{.accessor = accessor, .data = data});
     }
 
     inline void mkNull() noexcept
@@ -1342,6 +1395,36 @@ public:
     SourceAccessor * pathAccessor() const noexcept
     {
         return getStorage<Path>().accessor;
+    }
+
+    bool isWorldPath() const noexcept
+    {
+        return isa<tWorldPath>();
+    }
+
+    SourceAccessor * worldPathAccessor() const noexcept
+    {
+        return getStorage<WorldPath>().accessor;
+    }
+
+    const WorldPathData * worldPathData() const noexcept
+    {
+        return getStorage<WorldPath>().data;
+    }
+
+    std::string_view worldPathStrView() const noexcept
+    {
+        return getStorage<WorldPath>().data->path->view();
+    }
+
+    const char * worldPathStr() const noexcept
+    {
+        return getStorage<WorldPath>().data->path->c_str();
+    }
+
+    const WorldZoneContext * worldZone() const noexcept
+    {
+        return getStorage<WorldPath>().data->zone;
     }
 };
 

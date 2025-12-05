@@ -565,6 +565,9 @@ static void prim_typeOf(EvalState & state, const PosIdx pos, Value ** args, Valu
     case nFloat:
         v.mkStringNoCopy("float"_sds);
         break;
+    case nWorldPath:
+        v.mkStringNoCopy("worldpath"_sds);
+        break;
     case nThunk:
         unreachable();
     }
@@ -693,6 +696,22 @@ static RegisterPrimOp primop_isPath({
       Return `true` if *e* evaluates to a path, and `false` otherwise.
     )",
     .fun = prim_isPath,
+});
+
+/* Determine whether the argument is a world path. */
+static void prim_isWorldPath(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    state.forceValue(*args[0], pos);
+    v.mkBool(args[0]->type() == nWorldPath);
+}
+
+static RegisterPrimOp primop_isWorldPath({
+    .name = "__isWorldPath",
+    .args = {"e"},
+    .doc = R"(
+      Return `true` if *e* evaluates to a world path (//path), and `false` otherwise.
+    )",
+    .fun = prim_isWorldPath,
 });
 
 template<typename Callable>
