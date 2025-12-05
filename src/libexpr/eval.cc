@@ -24,6 +24,7 @@
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/fetchers/tarball.hh"
 #include "nix/fetchers/input-cache.hh"
+#include "nix/fetchers/git-utils.hh"
 #include "nix/util/current-process.hh"
 #include "nix/store/async-path-writer.hh"
 #include "nix/expr/parallel-eval.hh"
@@ -330,6 +331,7 @@ EvalState::EvalState(
     , importResolutionCache(make_ref<decltype(importResolutionCache)::element_type>())
     , fileEvalCache(make_ref<decltype(fileEvalCache)::element_type>())
     , regexCache(makeRegexCache())
+    , worldTreeShaCache(make_ref<decltype(worldTreeShaCache)::element_type>())
 #if NIX_USE_BOEHMGC
     , baseEnvP(std::allocate_shared<Env *>(traceable_allocator<Env *>(), &mem.allocEnv(BASE_ENV_SIZE)))
     , baseEnv(**baseEnvP)
@@ -420,6 +422,237 @@ void EvalState::allowAndSetStorePathString(const StorePath & storePath, Value & 
     allowPath(storePath);
 
     mkStorePathString(storePath, v);
+}
+
+ref<GitRepo> EvalState::getWorldRepo() const
+{
+    if (!worldRepo) {
+        auto gitDir = settings.tectonixGitDir.get();
+        if (gitDir.empty())
+            throw Error("--tectonix-git-dir must be specified to use tectonix builtins");
+
+        // Expand ~ to home directory
+        if (hasPrefix(gitDir, "~/"))
+            gitDir = getHome() + gitDir.substr(1);
+
+        worldRepo = GitRepo::openRepo(std::filesystem::path(gitDir), {.bare = true});
+    }
+    return *worldRepo;
+}
+
+ref<SourceAccessor> EvalState::getWorldGitAccessor() const
+{
+    if (!worldGitAccessor) {
+        auto sha = settings.tectonixGitSha.get();
+        if (sha.empty())
+            throw Error("--tectonix-git-sha must be specified to use tectonix builtins");
+
+        auto repo = getWorldRepo();
+        auto hash = Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
+
+        if (!repo->hasObject(hash))
+            throw Error("tectonix-git-sha '%s' not found in repository", sha);
+
+        GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+        worldGitAccessor = repo->getAccessor(hash, opts, "world");
+    }
+    return *worldGitAccessor;
+}
+
+std::optional<ref<SourceAccessor>> EvalState::getWorldCheckoutAccessor() const
+{
+    if (!isTectonixSourceAvailable())
+        return std::nullopt;
+
+    if (!worldCheckoutAccessor) {
+        auto checkoutPath = settings.tectonixCheckoutPath.get();
+        // Use the global filesystem accessor with the checkout path as root
+        worldCheckoutAccessor = getFSSourceAccessor();
+    }
+    return *worldCheckoutAccessor;
+}
+
+bool EvalState::isTectonixSourceAvailable() const
+{
+    return !settings.tectonixCheckoutPath.get().empty();
+}
+
+Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
+{
+    // Normalize path (remove leading //)
+    std::string path(worldPath);
+    if (hasPrefix(path, "//"))
+        path = path.substr(2);
+
+    // Check cache first
+    if (auto cached = getConcurrent(*worldTreeShaCache, path))
+        return *cached;
+
+    // Compute by walking from root
+    auto repo = getWorldRepo();
+    auto sha = settings.tectonixGitSha.get();
+    auto commitSha = Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
+
+    // Get the root tree SHA from the commit
+    auto rootTreeSha = repo->getCommitTree(commitSha);
+
+    // Walk path components, caching intermediate results
+    Hash currentSha = rootTreeSha;
+    std::string currentPath;
+
+    // Create an accessor for path validation
+    GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+    auto accessor = repo->getAccessor(commitSha, opts, "world-tree");
+
+    for (auto & component : tokenizeString<std::vector<std::string>>(path, "/")) {
+        if (component.empty()) continue;
+
+        std::string nextPath = currentPath.empty() ? component : currentPath + "/" + component;
+
+        // Check if this level is cached
+        if (auto cached = getConcurrent(*worldTreeShaCache, nextPath)) {
+            currentSha = *cached;
+            currentPath = nextPath;
+            continue;
+        }
+
+        // Need to compute: get tree entry for this component
+        auto fullPath = CanonPath("/" + nextPath);
+        auto stat = accessor->maybeLstat(fullPath);
+
+        if (!stat || stat->type != SourceAccessor::Type::tDirectory)
+            throw Error("path '%s' does not exist or is not a directory in world", nextPath);
+
+        // Get the tree SHA for this subtree
+        currentSha = repo->getSubtreeSha(currentSha, component);
+
+        // Cache this level
+        worldTreeShaCache->try_emplace(nextPath, currentSha);
+        currentPath = nextPath;
+    }
+
+    return currentSha;
+}
+
+const std::set<std::string> & EvalState::getTectonixSparseCheckoutRoots() const
+{
+    if (tectonixSparseCheckoutRoots)
+        return *tectonixSparseCheckoutRoots;
+
+    std::set<std::string> roots;
+
+    if (isTectonixSourceAvailable()) {
+        auto checkoutPath = settings.tectonixCheckoutPath.get();
+
+        // Read .git to find the actual git directory
+        // It can be either a directory or a file containing "gitdir: <path>"
+        auto dotGitPath = std::filesystem::path(checkoutPath) / ".git";
+        std::filesystem::path gitDir;
+
+        if (std::filesystem::is_directory(dotGitPath)) {
+            gitDir = dotGitPath;
+        } else if (std::filesystem::is_regular_file(dotGitPath)) {
+            auto gitdirContent = readFile(dotGitPath.string());
+            // Parse "gitdir: <path>\n"
+            if (hasPrefix(gitdirContent, "gitdir: ")) {
+                auto path = trim(gitdirContent.substr(8));
+                gitDir = std::filesystem::path(path);
+                // Handle relative paths
+                if (gitDir.is_relative())
+                    gitDir = std::filesystem::path(checkoutPath) / gitDir;
+            }
+        }
+
+        if (!gitDir.empty()) {
+            // Read sparse-checkout-roots
+            auto sparseRootsPath = gitDir / "info" / "sparse-checkout-roots";
+            if (std::filesystem::exists(sparseRootsPath)) {
+                auto content = readFile(sparseRootsPath.string());
+                for (auto & line : tokenizeString<std::vector<std::string>>(content, "\n")) {
+                    auto trimmed = trim(line);
+                    if (!trimmed.empty())
+                        roots.insert(std::string(trimmed));
+                }
+            }
+        }
+    }
+
+    tectonixSparseCheckoutRoots = std::move(roots);
+    return *tectonixSparseCheckoutRoots;
+}
+
+const std::map<std::string, bool> & EvalState::getTectonixDirtyZones() const
+{
+    if (tectonixDirtyZones)
+        return *tectonixDirtyZones;
+
+    std::map<std::string, bool> dirtyZones;
+
+    if (isTectonixSourceAvailable()) {
+        // Get sparse checkout roots (zone IDs)
+        auto & sparseRoots = getTectonixSparseCheckoutRoots();
+
+        if (!sparseRoots.empty()) {
+            // Read manifest to get zone ID -> zone path mapping
+            auto gitDir = settings.tectonixGitDir.get();
+            if (hasPrefix(gitDir, "~/"))
+                gitDir = getHome() + gitDir.substr(1);
+
+            auto sha = settings.tectonixGitSha.get();
+            if (!gitDir.empty() && !sha.empty()) {
+                auto repo = getWorldRepo();
+                auto hash = Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
+
+                if (repo->hasObject(hash)) {
+                    GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+                    auto accessor = repo->getAccessor(hash, opts, "world");
+
+                    auto manifestPath = CanonPath("/.meta/manifest.json");
+                    if (accessor->pathExists(manifestPath)) {
+                        auto manifestContent = accessor->readFile(manifestPath);
+                        auto manifest = nlohmann::json::parse(manifestContent);
+
+                        // Build map of zone ID -> zone path for sparse roots only
+                        std::map<std::string, std::string> zoneIdToPath;
+                        for (auto & [path, value] : manifest.items()) {
+                            auto & id = value.at("id").get_ref<const std::string &>();
+                            if (sparseRoots.count(id))
+                                zoneIdToPath[id] = path;
+                        }
+
+                        // Initialize all sparse-checked-out zones as not dirty
+                        for (auto & [zoneId, zonePath] : zoneIdToPath) {
+                            dirtyZones[zonePath] = false;
+                        }
+
+                        // Get dirty files by diffing tree against workdir (works with ODB-only repo)
+                        auto checkoutPath = settings.tectonixCheckoutPath.get();
+                        auto dirtyFiles = repo->getDirtyFilesAgainstTree(hash, checkoutPath);
+
+                        for (const auto & dirtyFile : dirtyFiles) {
+                            auto filePath = dirtyFile.abs();
+
+                            // Find which zone this file belongs to
+                            for (auto & [zonePath, dirty] : dirtyZones) {
+                                // Normalize zone path for comparison (remove leading //)
+                                std::string normalizedZonePath = zonePath;
+                                if (hasPrefix(normalizedZonePath, "//"))
+                                    normalizedZonePath = normalizedZonePath.substr(1); // keep one /
+
+                                if (hasPrefix(filePath, normalizedZonePath + "/") || filePath == normalizedZonePath) {
+                                    dirtyZones[zonePath] = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tectonixDirtyZones = std::move(dirtyZones);
+    return *tectonixDirtyZones;
 }
 
 inline static bool isJustSchemePrefix(std::string_view prefix)

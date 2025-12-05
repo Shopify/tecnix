@@ -26,6 +26,7 @@
 
 #include <map>
 #include <optional>
+#include <set>
 #include <functional>
 
 namespace nix {
@@ -52,6 +53,7 @@ enum RepairFlag : bool;
 struct MemorySourceAccessor;
 struct MountedSourceAccessor;
 struct AsyncPathWriter;
+struct GitRepo;
 
 namespace eval_cache {
 class EvalCache;
@@ -513,6 +515,24 @@ private:
      */
     const ref<RegexCache> regexCache;
 
+    /** Lazy-initialized git repository for world builtins */
+    mutable std::optional<ref<GitRepo>> worldRepo;
+
+    /** Lazy-initialized source accessor for world git content */
+    mutable std::optional<ref<SourceAccessor>> worldGitAccessor;
+
+    /** Lazy-initialized source accessor for world checkout (source-available mode) */
+    mutable std::optional<ref<SourceAccessor>> worldCheckoutAccessor;
+
+    /** Cache: world path → tree SHA (lazy computed, cached at each path level) */
+    const ref<boost::concurrent_flat_map<std::string, Hash>> worldTreeShaCache;
+
+    /** Lazy-initialized set of zone IDs in sparse checkout */
+    mutable std::optional<std::set<std::string>> tectonixSparseCheckoutRoots;
+
+    /** Lazy-initialized map of zone path → dirty status (only for sparse-checked-out zones) */
+    mutable std::optional<std::map<std::string, bool>> tectonixDirtyZones;
+
 public:
 
     /**
@@ -543,6 +563,27 @@ public:
     {
         return lookupPath;
     }
+
+    /** Get the world git repository, initializing lazily */
+    ref<GitRepo> getWorldRepo() const;
+
+    /** Get accessor for world git content at worldSha */
+    ref<SourceAccessor> getWorldGitAccessor() const;
+
+    /** Get accessor for world checkout (only in source-available mode) */
+    std::optional<ref<SourceAccessor>> getWorldCheckoutAccessor() const;
+
+    /** Get tree SHA for a world path, with lazy caching */
+    Hash getWorldTreeSha(std::string_view worldPath) const;
+
+    /** Check if we're in source-available mode */
+    bool isTectonixSourceAvailable() const;
+
+    /** Get set of zone IDs in sparse checkout (source-available mode only) */
+    const std::set<std::string> & getTectonixSparseCheckoutRoots() const;
+
+    /** Get map of zone path → dirty status (only for sparse-checked-out zones) */
+    const std::map<std::string, bool> & getTectonixDirtyZones() const;
 
     /**
      * Return a `SourcePath` that refers to `path` in the root

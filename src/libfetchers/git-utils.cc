@@ -20,6 +20,7 @@
 #include <git2/commit.h>
 #include <git2/config.h>
 #include <git2/describe.h>
+#include <git2/diff.h>
 #include <git2/errors.h>
 #include <git2/global.h>
 #include <git2/indexer.h>
@@ -108,6 +109,13 @@ static void initLibGit2()
     std::call_once(initialized, []() {
         if (git_libgit2_init() < 0)
             throw Error("initialising libgit2: %s", git_error_last()->message);
+
+        // Register support for additional git extensions.
+        // This allows opening repos with extensions that libgit2 doesn't natively support,
+        // as long as we don't actually need the extension's functionality.
+        // "refstorage" is used by reftables - we can ignore it since we only access objects by SHA.
+        const char * extensions[] = { "refstorage" };
+        git_libgit2_opts(GIT_OPT_SET_EXTENSIONS, extensions, 1);
     });
 }
 
@@ -264,6 +272,23 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         , options(_options)
     {
         initLibGit2();
+
+        if (options.odbOnly) {
+            /* Open only the object database, bypassing full repository validation.
+               This is useful for repositories with unsupported extensions like reftables.
+               We create a fake repository wrapping the ODB for API compatibility. */
+
+            git_odb * odb = nullptr;
+            if (git_odb_open(&odb, (path / "objects").string().c_str()))
+                throw Error("opening Git object database %s: %s", path / "objects", git_error_last()->message);
+
+            // git_repository_wrap_odb takes ownership of the ODB
+            if (git_repository_wrap_odb(Setter(repo), odb))
+                throw Error("wrapping Git object database: %s", git_error_last()->message);
+
+            // No mempack backend needed for read-only ODB access
+            return;
+        }
 
         initRepoAtomically(path, options);
         if (git_repository_open(Setter(repo), path.string().c_str()))
@@ -595,6 +620,66 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         return true;
     }
 
+    Hash getSubtreeSha(const Hash & treeSha, const std::string & entryName) override
+    {
+        git_tree * tree = nullptr;
+        auto oid = hashToOID(treeSha);
+
+        if (git_tree_lookup(&tree, *this, &oid))
+            throw Error("looking up tree %s: %s", treeSha.gitRev(), git_error_last()->message);
+
+        Finally freeTree([&]() { git_tree_free(tree); });
+
+        auto entry = git_tree_entry_byname(tree, entryName.c_str());
+        if (!entry)
+            throw Error("entry '%s' not found in tree %s", entryName, treeSha.gitRev());
+
+        return toHash(*git_tree_entry_id(entry));
+    }
+
+    Hash getCommitTree(const Hash & commitSha) override
+    {
+        auto oid = hashToOID(commitSha);
+        auto obj = lookupObject(*this, oid);
+        auto tree = peelObject<Object>(obj.get(), GIT_OBJECT_TREE);
+        return toHash(*git_object_id(tree.get()));
+    }
+
+    std::set<CanonPath> getDirtyFilesAgainstTree(const Hash & commitSha, const std::filesystem::path & workdirPath) override
+    {
+        std::set<CanonPath> dirtyFiles;
+
+        // Set workdir on the repo
+        if (git_repository_set_workdir(repo.get(), workdirPath.string().c_str(), 0))
+            throw Error("setting workdir on repository: %s", git_error_last()->message);
+
+        // Get tree from commit
+        auto oid = hashToOID(commitSha);
+        auto obj = lookupObject(*this, oid);
+        auto tree = peelObject<Tree>(obj.get(), GIT_OBJECT_TREE);
+
+        // Create diff between tree and workdir, using index for faster stat cache
+        git_diff * diff = nullptr;
+        git_diff_options opts = GIT_DIFF_OPTIONS_INIT;
+        opts.flags = GIT_DIFF_INCLUDE_UNTRACKED | GIT_DIFF_RECURSE_UNTRACKED_DIRS;
+
+        if (git_diff_tree_to_workdir_with_index(&diff, repo.get(), tree.get(), &opts))
+            throw Error("creating diff: %s", git_error_last()->message);
+
+        // Collect dirty file paths
+        size_t numDeltas = git_diff_num_deltas(diff);
+        for (size_t i = 0; i < numDeltas; i++) {
+            const git_diff_delta * delta = git_diff_get_delta(diff, i);
+            // Use new_file path for adds/modifies, old_file for deletes
+            const char * path = delta->new_file.path ? delta->new_file.path : delta->old_file.path;
+            if (path)
+                dirtyFiles.insert(CanonPath(path));
+        }
+
+        git_diff_free(diff);
+        return dirtyFiles;
+    }
+
     /**
      * A 'GitSourceAccessor' with no regard for export-ignore.
      */
@@ -876,8 +961,18 @@ struct GitSourceAccessor : SourceAccessor
 
                     for (size_t n = 0; n < count; ++n) {
                         auto entry = git_tree_entry_byindex(tree.get(), n);
+                        auto mode = git_tree_entry_filemode(entry);
+                        std::optional<Type> type;
+                        if (mode == GIT_FILEMODE_TREE)
+                            type = Type::tDirectory;
+                        else if (mode == GIT_FILEMODE_BLOB || mode == GIT_FILEMODE_BLOB_EXECUTABLE)
+                            type = Type::tRegular;
+                        else if (mode == GIT_FILEMODE_LINK)
+                            type = Type::tSymlink;
+                        else if (mode == GIT_FILEMODE_COMMIT)
+                            type = Type::tDirectory; // submodule
                         // FIXME: add to cache
-                        res.emplace(std::string(git_tree_entry_name(entry)), DirEntry{});
+                        res.emplace(std::string(git_tree_entry_name(entry)), type);
                     }
 
                     return res;
