@@ -24,6 +24,7 @@
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/fetchers/tarball.hh"
 #include "nix/fetchers/input-cache.hh"
+#include "nix/fetchers/git-utils.hh"
 #include "nix/util/current-process.hh"
 
 #include "parser-tab.hh"
@@ -304,6 +305,8 @@ EvalState::EvalState(
     , importResolutionCache(make_ref<decltype(importResolutionCache)::element_type>())
     , fileEvalCache(make_ref<decltype(fileEvalCache)::element_type>())
     , regexCache(makeRegexCache())
+    , worldTreeShaCache(make_ref<decltype(worldTreeShaCache)::element_type>())
+    , worldZoneDirtyCache(make_ref<decltype(worldZoneDirtyCache)::element_type>())
 #if NIX_USE_BOEHMGC
     , baseEnvP(std::allocate_shared<Env *>(traceable_allocator<Env *>(), &mem.allocEnv(BASE_ENV_SIZE)))
     , baseEnv(**baseEnvP)
@@ -393,6 +396,144 @@ void EvalState::allowAndSetStorePathString(const StorePath & storePath, Value & 
     allowPath(storePath);
 
     mkStorePathString(storePath, v);
+}
+
+ref<GitRepo> EvalState::getWorldRepo() const
+{
+    if (!worldRepo) {
+        auto gitDir = settings.worldGitDir.get();
+        if (gitDir.empty())
+            throw Error("--world-git-dir must be specified to use world builtins");
+
+        // Expand ~ to home directory
+        if (hasPrefix(gitDir, "~/"))
+            gitDir = getHome() + gitDir.substr(1);
+
+        worldRepo = GitRepo::openRepo(std::filesystem::path(gitDir), false, true);
+    }
+    return *worldRepo;
+}
+
+ref<SourceAccessor> EvalState::getWorldGitAccessor() const
+{
+    if (!worldGitAccessor) {
+        auto sha = settings.worldSha.get();
+        if (sha.empty())
+            throw Error("--world-sha must be specified to use world builtins");
+
+        auto repo = getWorldRepo();
+        auto hash = Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
+
+        if (!repo->hasObject(hash))
+            throw Error("world-sha '%s' not found in repository", sha);
+
+        GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+        worldGitAccessor = repo->getAccessor(hash, opts, "world");
+    }
+    return *worldGitAccessor;
+}
+
+std::optional<ref<SourceAccessor>> EvalState::getWorldCheckoutAccessor() const
+{
+    if (!isWorldSourceAvailable())
+        return std::nullopt;
+
+    if (!worldCheckoutAccessor) {
+        auto checkoutPath = settings.worldCheckoutPath.get();
+        // Use the global filesystem accessor with the checkout path as root
+        worldCheckoutAccessor = getFSSourceAccessor();
+    }
+    return *worldCheckoutAccessor;
+}
+
+bool EvalState::isWorldSourceAvailable() const
+{
+    return !settings.worldCheckoutPath.get().empty();
+}
+
+Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
+{
+    // Normalize path (remove leading //)
+    std::string path(worldPath);
+    if (hasPrefix(path, "//"))
+        path = path.substr(2);
+
+    // Check cache first
+    if (auto cached = getConcurrent(*worldTreeShaCache, path))
+        return *cached;
+
+    // Compute by walking from root
+    auto repo = getWorldRepo();
+    auto sha = settings.worldSha.get();
+    auto rootSha = Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
+
+    // Walk path components, caching intermediate results
+    Hash currentSha = rootSha;
+    std::string currentPath;
+
+    // First we need to get the tree SHA from the commit
+    // The commit object points to a tree, so we need to look that up
+    GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+    auto accessor = repo->getAccessor(rootSha, opts, "world-tree");
+
+    for (auto & component : tokenizeString<std::vector<std::string>>(path, "/")) {
+        if (component.empty()) continue;
+
+        std::string nextPath = currentPath.empty() ? component : currentPath + "/" + component;
+
+        // Check if this level is cached
+        if (auto cached = getConcurrent(*worldTreeShaCache, nextPath)) {
+            currentSha = *cached;
+            currentPath = nextPath;
+            continue;
+        }
+
+        // Need to compute: get tree entry for this component
+        auto fullPath = CanonPath("/" + nextPath);
+        auto stat = accessor->maybeLstat(fullPath);
+
+        if (!stat || stat->type != SourceAccessor::Type::tDirectory)
+            throw Error("path '%s' does not exist or is not a directory in world", nextPath);
+
+        // Get the tree SHA for this subtree
+        currentSha = repo->getSubtreeSha(currentSha, component);
+
+        // Cache this level
+        worldTreeShaCache->try_emplace(nextPath, currentSha);
+        currentPath = nextPath;
+    }
+
+    return currentSha;
+}
+
+bool EvalState::isZoneDirty(std::string_view zonePath) const
+{
+    if (!isWorldSourceAvailable())
+        return false;
+
+    std::string path(zonePath);
+    if (hasPrefix(path, "//"))
+        path = path.substr(2);
+
+    // Check cache
+    if (auto cached = getConcurrent(*worldZoneDirtyCache, path))
+        return *cached;
+
+    // Get workdir info (already cached by GitRepo::getCachedWorkdirInfo)
+    auto checkoutPath = settings.worldCheckoutPath.get();
+    auto workdirInfo = GitRepo::getCachedWorkdirInfo(checkoutPath);
+
+    // Check if any dirty files are under this zone path
+    bool dirty = false;
+    for (const auto & dirtyFile : workdirInfo.dirtyFiles) {
+        if (hasPrefix(dirtyFile.abs(), "/" + path + "/") || dirtyFile.abs() == "/" + path) {
+            dirty = true;
+            break;
+        }
+    }
+
+    worldZoneDirtyCache->try_emplace(std::string(path), dirty);
+    return dirty;
 }
 
 inline static bool isJustSchemePrefix(std::string_view prefix)

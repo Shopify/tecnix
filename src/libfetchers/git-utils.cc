@@ -572,6 +572,23 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         return true;
     }
 
+    Hash getSubtreeSha(const Hash & treeSha, const std::string & entryName) override
+    {
+        git_tree * tree = nullptr;
+        auto oid = hashToOID(treeSha);
+
+        if (git_tree_lookup(&tree, *this, &oid))
+            throw Error("looking up tree %s: %s", treeSha.gitRev(), git_error_last()->message);
+
+        Finally freeTree([&]() { git_tree_free(tree); });
+
+        auto entry = git_tree_entry_byname(tree, entryName.c_str());
+        if (!entry)
+            throw Error("entry '%s' not found in tree %s", entryName, treeSha.gitRev());
+
+        return toHash(*git_tree_entry_id(entry));
+    }
+
     /**
      * A 'GitSourceAccessor' with no regard for export-ignore.
      */

@@ -95,6 +95,9 @@ struct GitRepo
 
     virtual bool hasObject(const Hash & oid) = 0;
 
+    /** Get the SHA of a subtree entry within a tree object */
+    virtual Hash getSubtreeSha(const Hash & treeSha, const std::string & entryName) = 0;
+
     virtual ref<SourceAccessor>
     getAccessor(const Hash & rev, const GitAccessorOptions & options, std::string displayPrefix) = 0;
 

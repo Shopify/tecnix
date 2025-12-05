@@ -361,6 +361,41 @@ struct EvalSettings : Config
           The default value is chosen to balance performance and memory usage. On 32 bit systems
           where memory is scarce, the default is a large value to reduce the amount of allocations.
     )"};
+
+    Setting<std::string> worldGitDir{
+        this,
+        "",
+        "world-git-dir",
+        R"(
+          Path to the git directory for world builtins (e.g., `~/world/git`).
+
+          This enables the world builtins (`builtins.worldTreeSha`, `builtins.worldTree`,
+          `builtins.worldFile`, `builtins.worldZoneSrc`, `builtins.worldDir`) which provide
+          native access to files from a git repository during Nix evaluation.
+        )"};
+
+    Setting<std::string> worldSha{
+        this,
+        "",
+        "world-sha",
+        R"(
+          Git commit SHA to use for world builtins.
+
+          This specifies the commit to read from when using world builtins.
+          Typically set to HEAD of the world repository.
+        )"};
+
+    Setting<std::string> worldCheckoutPath{
+        this,
+        "",
+        "world-checkout-path",
+        R"(
+          Path to checkout directory for source-available mode.
+
+          When set, uncommitted files in the checkout are preferred over git content
+          for world builtins. This enables local development workflows where changes
+          are visible before committing.
+        )"};
 };
 
 /**

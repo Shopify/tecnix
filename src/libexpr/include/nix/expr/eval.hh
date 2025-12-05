@@ -51,6 +51,7 @@ struct SingleDerivedPath;
 enum RepairFlag : bool;
 struct MemorySourceAccessor;
 struct MountedSourceAccessor;
+struct GitRepo;
 
 namespace eval_cache {
 class EvalCache;
@@ -508,6 +509,21 @@ private:
      */
     const ref<RegexCache> regexCache;
 
+    /** Lazy-initialized git repository for world builtins */
+    mutable std::optional<ref<GitRepo>> worldRepo;
+
+    /** Lazy-initialized source accessor for world git content */
+    mutable std::optional<ref<SourceAccessor>> worldGitAccessor;
+
+    /** Lazy-initialized source accessor for world checkout (source-available mode) */
+    mutable std::optional<ref<SourceAccessor>> worldCheckoutAccessor;
+
+    /** Cache: world path → tree SHA (lazy computed, cached at each path level) */
+    const ref<boost::concurrent_flat_map<std::string, Hash>> worldTreeShaCache;
+
+    /** Cache: zone path → whether zone has uncommitted changes */
+    const ref<boost::concurrent_flat_map<std::string, bool>> worldZoneDirtyCache;
+
 public:
 
     /**
@@ -538,6 +554,24 @@ public:
     {
         return lookupPath;
     }
+
+    /** Get the world git repository, initializing lazily */
+    ref<GitRepo> getWorldRepo() const;
+
+    /** Get accessor for world git content at worldSha */
+    ref<SourceAccessor> getWorldGitAccessor() const;
+
+    /** Get accessor for world checkout (only in source-available mode) */
+    std::optional<ref<SourceAccessor>> getWorldCheckoutAccessor() const;
+
+    /** Get tree SHA for a world path, with lazy caching */
+    Hash getWorldTreeSha(std::string_view worldPath) const;
+
+    /** Check if a zone has uncommitted changes (source-available mode only) */
+    bool isZoneDirty(std::string_view zonePath) const;
+
+    /** Check if we're in source-available mode */
+    bool isWorldSourceAvailable() const;
 
     /**
      * Return a `SourcePath` that refers to `path` in the root
