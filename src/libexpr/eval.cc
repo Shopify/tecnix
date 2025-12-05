@@ -2568,8 +2568,15 @@ BackedStringView EvalState::coerceToString(
     }
 
     if (v.type() == nWorldPath) {
-        // World paths are not copied to store; return the path string
-        return std::string(v.worldPathStrView());
+        if (copyToStore) {
+            // Create a SourcePath from the world accessor and path, then copy to store
+            auto sourcePath = SourcePath(
+                ref(v.worldPathAccessor()->shared_from_this()),
+                CanonPath(v.worldPathStrView()));
+            return store->printStorePath(copyPathToStore(context, sourcePath));
+        } else {
+            return std::string(v.worldPathStrView());
+        }
     }
 
     if (v.type() == nAttrs) {
