@@ -64,7 +64,23 @@ struct NixStringContextElem
      */
     using Built = SingleDerivedPath::Built;
 
-    using Raw = std::variant<Opaque, DrvDeep, Built>;
+    /**
+     * Store path originating from a world zone.
+     *
+     * Tracks the zone that a world path came from, enabling zone boundary
+     * enforcement. The zonePath is the world path prefix (e.g., "//areas/tools/dev").
+     *
+     * Encoded in the form `@<zonePath>@<storePath>`.
+     */
+    struct WorldZone
+    {
+        StorePath path;
+        std::string zonePath;  // e.g., "//areas/tools/dev"
+
+        GENERATE_CMP(WorldZone, me->path, me->zonePath);
+    };
+
+    using Raw = std::variant<Opaque, DrvDeep, Built, WorldZone>;
 
     Raw raw;
 
@@ -77,6 +93,7 @@ struct NixStringContextElem
      * - `<path>`
      * - `=<path>`
      * - `!<name>!<path>`
+     * - `@<zonePath>@<path>`
      *
      * @param xpSettings Stop-gap to avoid globals during unit tests.
      */

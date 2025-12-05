@@ -91,6 +91,11 @@ UnresolvedApp InstallableValue::toApp(EvalState & state)
                                 .path = o.path,
                             };
                         },
+                        [&](const NixStringContextElem::WorldZone & w) -> DerivedPath {
+                            return DerivedPath::Opaque{
+                                .path = w.path,
+                            };
+                        },
                     },
                     c.raw));
         }

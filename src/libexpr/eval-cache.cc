@@ -561,6 +561,7 @@ string_t AttrCursor::getStringWithContext()
                                 return b.drvPath->getBaseStorePath();
                             },
                             [&](const NixStringContextElem::Opaque & o) -> const StorePath & { return o.path; },
+                            [&](const NixStringContextElem::WorldZone & w) -> const StorePath & { return w.path; },
                         },
                         c.raw);
                     if (!root->state.store->isValidPath(path)) {

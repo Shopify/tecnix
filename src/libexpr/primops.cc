@@ -97,6 +97,12 @@ StringMap EvalState::realiseContext(const NixStringContext & context, StorePathS
                     if (maybePathsOut)
                         maybePathsOut->emplace(d.drvPath);
                 },
+                [&](const NixStringContextElem::WorldZone & w) {
+                    /* Treat same as Opaque */
+                    ensureValid(w.path);
+                    if (maybePathsOut)
+                        maybePathsOut->emplace(w.path);
+                },
             },
             c.raw);
     }
@@ -1747,6 +1753,7 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
                     drv.inputDrvs.ensureSlot(*b.drvPath).value.insert(b.output);
                 },
                 [&](const NixStringContextElem::Opaque & o) { drv.inputSrcs.insert(o.path); },
+                [&](const NixStringContextElem::WorldZone & w) { drv.inputSrcs.insert(w.path); },
             },
             c.raw);
     }

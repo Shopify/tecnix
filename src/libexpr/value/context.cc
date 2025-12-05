@@ -50,6 +50,20 @@ NixStringContextElem NixStringContextElem::parse(std::string_view s0, const Expe
             .drvPath = StorePath{s.substr(1)},
         };
     }
+    case '@': {
+        // World zone context: @<zonePath>@<storePath>
+        s = s.substr(1);
+        size_t index = s.find("@");
+        if (index == std::string_view::npos) {
+            throw BadNixStringContextElem(s0, "String context element beginning with '@' should have a second '@'");
+        }
+        std::string zonePath{s.substr(0, index)};
+        s = s.substr(index + 1);
+        return NixStringContextElem::WorldZone{
+            .path = StorePath{s},
+            .zonePath = std::move(zonePath),
+        };
+    }
     default: {
         // Ensure no '!'
         if (s.find("!") != std::string_view::npos) {
@@ -89,6 +103,12 @@ std::string NixStringContextElem::to_string() const
             [&](const NixStringContextElem::DrvDeep & d) {
                 res += '=';
                 res += d.drvPath.to_string();
+            },
+            [&](const NixStringContextElem::WorldZone & w) {
+                res += '@';
+                res += w.zonePath;
+                res += '@';
+                res += w.path.to_string();
             },
         },
         raw);

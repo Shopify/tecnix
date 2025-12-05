@@ -133,6 +133,13 @@ static void prim_addDrvOutputDependencies(EvalState & state, const PosIdx pos, V
                      above does not make much sense. */
                     return std::move(c);
                 },
+                [&](const NixStringContextElem::WorldZone & c) -> NixStringContextElem::DrvDeep {
+                    state
+                        .error<EvalError>(
+                            "`addDrvOutputDependencies` cannot act on world zone paths")
+                        .atPos(pos)
+                        .debugThrow();
+                },
             },
             context.begin()->raw)}),
     };
@@ -185,6 +192,7 @@ static void prim_getContext(EvalState & state, const PosIdx pos, Value ** args, 
         bool path = false;
         bool allOutputs = false;
         Strings outputs;
+        std::optional<std::string> worldZone;  // World zone path if from world
     };
 
     NixStringContext context;
@@ -201,6 +209,11 @@ static void prim_getContext(EvalState & state, const PosIdx pos, Value ** args, 
                     contextInfos[std::move(drvPath)].outputs.emplace_back(std::move(b.output));
                 },
                 [&](NixStringContextElem::Opaque && o) { contextInfos[std::move(o.path)].path = true; },
+                [&](NixStringContextElem::WorldZone && w) {
+                    auto & info = contextInfos[w.path];
+                    info.path = true;
+                    info.worldZone = std::move(w.zonePath);
+                },
             },
             ((NixStringContextElem &&) i).raw);
     }
@@ -209,8 +222,9 @@ static void prim_getContext(EvalState & state, const PosIdx pos, Value ** args, 
 
     auto sPath = state.symbols.create("path");
     auto sAllOutputs = state.symbols.create("allOutputs");
+    auto sWorldZone = state.symbols.create("worldZone");
     for (const auto & info : contextInfos) {
-        auto infoAttrs = state.buildBindings(3);
+        auto infoAttrs = state.buildBindings(4);
         if (info.second.path)
             infoAttrs.alloc(sPath).mkBool(true);
         if (info.second.allOutputs)
@@ -221,6 +235,8 @@ static void prim_getContext(EvalState & state, const PosIdx pos, Value ** args, 
                 (list[i] = state.allocValue())->mkString(output, state.mem);
             infoAttrs.alloc(state.s.outputs).mkList(list);
         }
+        if (info.second.worldZone)
+            infoAttrs.alloc(sWorldZone).mkString(*info.second.worldZone, state.mem);
         attrs.alloc(state.store->printStorePath(info.first)).mkAttrs(infoAttrs);
     }
 

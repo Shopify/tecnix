@@ -2569,11 +2569,41 @@ BackedStringView EvalState::coerceToString(
 
     if (v.type() == nWorldPath) {
         if (copyToStore) {
-            // Create a SourcePath from the world accessor and path, then copy to store
+            // Create a SourcePath from the world accessor and path
             auto sourcePath = SourcePath(
                 ref(v.worldPathAccessor()->shared_from_this()),
                 CanonPath(v.worldPathStrView()));
-            return store->printStorePath(copyPathToStore(context, sourcePath));
+
+            // Copy to store (similar to copyPathToStore but with WorldZone context)
+            if (nix::isDerivation(sourcePath.path.abs()))
+                error<EvalError>("file names are not allowed to end in '%1%'", drvExtension).debugThrow();
+
+            auto dstPathCached = getConcurrent(*srcToStore, sourcePath);
+            auto dstPath = dstPathCached ? *dstPathCached : [&]() {
+                auto dstPath = fetchToStore(
+                    fetchSettings,
+                    *store,
+                    sourcePath.resolveSymlinks(SymlinkResolution::Ancestors),
+                    settings.readOnlyMode ? FetchMode::DryRun : FetchMode::Copy,
+                    sourcePath.baseName(),
+                    ContentAddressMethod::Raw::NixArchive,
+                    nullptr,
+                    repair);
+                allowPath(dstPath);
+                srcToStore->try_emplace(sourcePath, dstPath);
+                printMsg(lvlChatty, "copied world source '%1%' -> '%2%'", sourcePath, store->printStorePath(dstPath));
+                return dstPath;
+            }();
+
+            // Add WorldZone context to track zone origin
+            // Use the world path string (e.g., "//areas/tools/dev/zone.nix") as zonePath
+            // TODO: resolve to actual zone prefix from manifest
+            context.insert(NixStringContextElem::WorldZone{
+                .path = dstPath,
+                .zonePath = std::string(v.worldPathStrView()),
+            });
+
+            return store->printStorePath(dstPath);
         } else {
             return std::string(v.worldPathStrView());
         }
@@ -2740,6 +2770,10 @@ std::pair<SingleDerivedPath, std::string_view> EvalState::coerceToSingleDerivedP
                     .debugThrow();
             },
             [&](NixStringContextElem::Built && b) -> SingleDerivedPath { return std::move(b); },
+            [&](NixStringContextElem::WorldZone && w) -> SingleDerivedPath {
+                // Treat world zone context as an opaque store path
+                return SingleDerivedPath::Opaque{.path = std::move(w.path)};
+            },
         },
         ((NixStringContextElem &&) *context.begin()).raw);
     return {
