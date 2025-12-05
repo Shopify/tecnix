@@ -465,16 +465,18 @@ Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
     // Compute by walking from root
     auto repo = getWorldRepo();
     auto sha = settings.worldSha.get();
-    auto rootSha = Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
+    auto commitSha = Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
+
+    // Get the root tree SHA from the commit
+    auto rootTreeSha = repo->getCommitTree(commitSha);
 
     // Walk path components, caching intermediate results
-    Hash currentSha = rootSha;
+    Hash currentSha = rootTreeSha;
     std::string currentPath;
 
-    // First we need to get the tree SHA from the commit
-    // The commit object points to a tree, so we need to look that up
+    // Create an accessor for path validation
     GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
-    auto accessor = repo->getAccessor(rootSha, opts, "world-tree");
+    auto accessor = repo->getAccessor(commitSha, opts, "world-tree");
 
     for (auto & component : tokenizeString<std::vector<std::string>>(path, "/")) {
         if (component.empty()) continue;

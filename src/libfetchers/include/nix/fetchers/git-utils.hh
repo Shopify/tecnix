@@ -98,6 +98,9 @@ struct GitRepo
     /** Get the SHA of a subtree entry within a tree object */
     virtual Hash getSubtreeSha(const Hash & treeSha, const std::string & entryName) = 0;
 
+    /** Get the root tree SHA from a commit SHA */
+    virtual Hash getCommitTree(const Hash & commitSha) = 0;
+
     virtual ref<SourceAccessor>
     getAccessor(const Hash & rev, const GitAccessorOptions & options, std::string displayPrefix) = 0;
 

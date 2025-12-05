@@ -1,11 +1,57 @@
 #include "nix/expr/primops.hh"
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval-settings.hh"
+#include "nix/expr/json-to-value.hh"
 #include "nix/fetchers/git-utils.hh"
 #include "nix/store/store-api.hh"
 #include "nix/fetchers/fetch-to-store.hh"
 
 namespace nix {
+
+// ============================================================================
+// builtins.worldManifest
+// Returns the parsed manifest.json from //.meta
+// ============================================================================
+static void prim_worldManifest(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto fullPath = CanonPath("/.meta/manifest.json");
+
+    // In source-available mode, check checkout first
+    if (state.isWorldSourceAvailable()) {
+        auto checkoutAccessor = state.getWorldCheckoutAccessor();
+        if (checkoutAccessor) {
+            auto checkoutPath = state.settings.worldCheckoutPath.get();
+            auto checkoutFullPath = CanonPath(checkoutPath + fullPath.abs());
+            if ((*checkoutAccessor)->pathExists(checkoutFullPath)) {
+                auto content = (*checkoutAccessor)->readFile(checkoutFullPath);
+                parseJSON(state, content, v);
+                return;
+            }
+        }
+    }
+
+    // Fall back to git
+    auto accessor = state.getWorldGitAccessor();
+    if (!accessor->pathExists(fullPath))
+        state.error<EvalError>("manifest.json does not exist at //.meta/manifest.json in world")
+            .atPos(pos).debugThrow();
+
+    auto content = accessor->readFile(fullPath);
+    parseJSON(state, content, v);
+}
+
+static RegisterPrimOp primop_worldManifest({
+    .name = "worldManifest",
+    .args = {},
+    .doc = R"(
+      Get the world manifest as a Nix attrset.
+
+      Reads and parses //.meta/manifest.json from the world repository.
+
+      Requires `--world-git-dir` and `--world-sha` to be set.
+    )",
+    .fun = prim_worldManifest,
+});
 
 // ============================================================================
 // builtins.worldTreeSha worldPath
@@ -77,15 +123,70 @@ static RegisterPrimOp primop_worldTree({
 });
 
 // ============================================================================
-// builtins.worldFile zonePath pathInZone
+// builtins.worldFile path
 // Returns file contents as a string
 // ============================================================================
 static void prim_worldFile(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    auto worldPath = state.forceStringNoCtx(*args[0], pos,
+        "while evaluating the 'path' argument to builtins.worldFile");
+
+    // Normalize path (remove leading //)
+    std::string path(worldPath);
+    if (hasPrefix(path, "//"))
+        path = path.substr(2);
+
+    auto fullPath = CanonPath("/" + path);
+
+    // In source-available mode, check checkout first
+    if (state.isWorldSourceAvailable()) {
+        auto checkoutAccessor = state.getWorldCheckoutAccessor();
+        if (checkoutAccessor) {
+            auto checkoutPath = state.settings.worldCheckoutPath.get();
+            auto checkoutFullPath = CanonPath(checkoutPath + fullPath.abs());
+            if ((*checkoutAccessor)->pathExists(checkoutFullPath)) {
+                auto content = (*checkoutAccessor)->readFile(checkoutFullPath);
+                v.mkString(content, state.mem);
+                return;
+            }
+        }
+    }
+
+    // Fall back to git
+    auto accessor = state.getWorldGitAccessor();
+    if (!accessor->pathExists(fullPath))
+        state.error<EvalError>("path '%s' does not exist in world", fullPath)
+            .atPos(pos).debugThrow();
+
+    auto content = accessor->readFile(fullPath);
+    v.mkString(content, state.mem);
+}
+
+static RegisterPrimOp primop_worldFile({
+    .name = "worldFile",
+    .args = {"path"},
+    .doc = R"(
+      Read a file from the world repository.
+
+      In source-available mode (--world-checkout-path set), prefers checkout files.
+
+      Example: `builtins.worldFile "//areas/tools/tec/zone.nix"`
+
+      Requires `--world-git-dir` and `--world-sha` to be set.
+    )",
+    .fun = prim_worldFile,
+});
+
+// ============================================================================
+// builtins.worldZoneFile zonePath pathInZone
+// Returns file contents as a string
+// ============================================================================
+static void prim_worldZoneFile(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
     auto zonePath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'zonePath' argument to builtins.worldFile");
+        "while evaluating the 'zonePath' argument to builtins.worldZoneFile");
     auto pathInZone = state.forceStringNoCtx(*args[1], pos,
-        "while evaluating the 'pathInZone' argument to builtins.worldFile");
+        "while evaluating the 'pathInZone' argument to builtins.worldZoneFile");
 
     // Normalize zone path (remove leading //)
     std::string zone(zonePath);
@@ -118,19 +219,19 @@ static void prim_worldFile(EvalState & state, const PosIdx pos, Value ** args, V
     v.mkString(content, state.mem);
 }
 
-static RegisterPrimOp primop_worldFile({
-    .name = "worldFile",
+static RegisterPrimOp primop_worldZoneFile({
+    .name = "worldZoneFile",
     .args = {"zonePath", "pathInZone"},
     .doc = R"(
-      Read a file from the world repository.
+      Read a file from a zone in the world repository.
 
       In source-available mode (--world-checkout-path set), prefers checkout files.
 
-      Example: `builtins.worldFile "//areas/tools/tec" "zone.nix"`
+      Example: `builtins.worldZoneFile "//areas/tools/tec" "zone.nix"`
 
       Requires `--world-git-dir` and `--world-sha` to be set.
     )",
-    .fun = prim_worldFile,
+    .fun = prim_worldZoneFile,
 });
 
 // ============================================================================

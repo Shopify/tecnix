@@ -589,6 +589,14 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         return toHash(*git_tree_entry_id(entry));
     }
 
+    Hash getCommitTree(const Hash & commitSha) override
+    {
+        auto oid = hashToOID(commitSha);
+        auto obj = lookupObject(*this, oid);
+        auto tree = peelObject<Object>(obj.get(), GIT_OBJECT_TREE);
+        return toHash(*git_object_id(tree.get()));
+    }
+
     /**
      * A 'GitSourceAccessor' with no regard for export-ignore.
      */
