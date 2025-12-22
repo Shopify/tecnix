@@ -540,6 +540,12 @@ private:
     mutable SharedSync<std::map<Hash, StorePath>> tectonixZoneCache_;
 
     /**
+     * Cache zone path → virtual store path for lazy checkout zone mounts.
+     * Thread-safe for eval-cores > 1.
+     */
+    mutable SharedSync<std::map<std::string, StorePath>> tectonixCheckoutZoneCache_;
+
+    /**
      * Mount a zone by tree SHA, returning a (potentially virtual) store path.
      * Caches by tree SHA for deduplication across world revisions.
      */
@@ -547,7 +553,7 @@ private:
 
     /**
      * Get zone store path from checkout (for dirty zones).
-     * EXTENSION POINT: Currently always eager. Could be made lazy later.
+     * With lazy-trees enabled, mounts lazily and caches by zone path.
      */
     StorePath getZoneFromCheckout(std::string_view zonePath);
 

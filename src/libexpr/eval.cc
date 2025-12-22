@@ -749,34 +749,60 @@ StorePath EvalState::mountZoneByTreeSha(const Hash & treeSha, std::string_view z
 
 StorePath EvalState::getZoneFromCheckout(std::string_view zonePath)
 {
-    // EXTENSION POINT: Currently always eager.
-    //
-    // To make this lazy later, we'd need to:
-    // 1. Create a filtered accessor over the checkout path
-    // 2. Compute a content key (hash of modified files? mtime-based?)
-    // 3. Cache and mount like mountZoneByTreeSha
-    //
-    // For now: just copy from checkout.
-
     std::string zone(zonePath);
     if (hasPrefix(zone, "//"))
         zone = zone.substr(2);
 
-    auto checkoutAccessor = getWorldCheckoutAccessor();
-    if (!checkoutAccessor)
-        throw Error("checkout accessor not available for dirty zone '%s'", zonePath);
-
-    auto checkoutPath = settings.tectonixCheckoutPath.get();
-    auto fullPath = CanonPath(checkoutPath + "/" + zone);
-
     std::string name = "zone-" + replaceStrings(zone, "/", "-");
+    auto checkoutPath = settings.tectonixCheckoutPath.get();
+    auto fullPath = std::filesystem::path(checkoutPath) / zone;
 
-    auto storePath = fetchToStore(
-        fetchSettings, *store,
-        SourcePath(*checkoutAccessor, fullPath),
-        FetchMode::Copy, name);
+    if (!settings.lazyTrees) {
+        // Eager mode: immediate copy from checkout
+        auto checkoutAccessor = getWorldCheckoutAccessor();
+        if (!checkoutAccessor)
+            throw Error("checkout accessor not available for dirty zone '%s'", zonePath);
 
+        auto storePath = fetchToStore(
+            fetchSettings, *store,
+            SourcePath(*checkoutAccessor, CanonPath(checkoutPath + "/" + zone)),
+            FetchMode::Copy, name);
+
+        allowPath(storePath);
+        return storePath;
+    }
+
+    // Lazy mode: check cache first (thread-safe)
+    {
+        auto cache = tectonixCheckoutZoneCache_.readLock();
+        auto it = cache->find(std::string(zonePath));
+        if (it != cache->end()) {
+            debug("checkout zone cache hit for %s", zonePath);
+            return it->second;
+        }
+    }
+
+    // Not cached: create accessor rooted at zone directory and mount
+    auto accessor = makeFSSourceAccessor(fullPath);
+
+    // Create virtual store path
+    auto storePath = StorePath::random(name);
     allowPath(storePath);
+
+    // Mount accessor at this path
+    storeFS->mount(CanonPath(store->printStorePath(storePath)), accessor);
+
+    // Cache it (thread-safe)
+    {
+        auto cache = tectonixCheckoutZoneCache_.lock();
+        auto [it, inserted] = cache->try_emplace(std::string(zonePath), storePath);
+        if (!inserted) {
+            // Another thread beat us, use their path
+            return it->second;
+        }
+    }
+
+    debug("mounted checkout zone %s at %s", zonePath, store->printStorePath(storePath));
     return storePath;
 }
 
