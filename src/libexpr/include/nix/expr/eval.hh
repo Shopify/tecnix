@@ -533,6 +533,29 @@ private:
     /** Lazy-initialized map of zone path → dirty status (only for sparse-checked-out zones) */
     mutable std::optional<std::map<std::string, bool>> tectonixDirtyZones;
 
+    /**
+     * Cache tree SHA → virtual store path for lazy zone mounts.
+     * Thread-safe for eval-cores > 1.
+     */
+    mutable SharedSync<std::map<Hash, StorePath>> tectonixZoneCache_;
+
+    /**
+     * Lazily-mounted world root store path (for worldRoot builtin).
+     */
+    mutable SharedSync<std::optional<StorePath>> worldRootStorePath_;
+
+    /**
+     * Mount a zone by tree SHA, returning a (potentially virtual) store path.
+     * Caches by tree SHA for deduplication across world revisions.
+     */
+    StorePath mountZoneByTreeSha(const Hash & treeSha, std::string_view zonePath);
+
+    /**
+     * Get zone store path from checkout (for dirty zones).
+     * EXTENSION POINT: Currently always eager. Could be made lazy later.
+     */
+    StorePath getZoneFromCheckout(std::string_view zonePath);
+
 public:
 
     /**
@@ -584,6 +607,21 @@ public:
 
     /** Get map of zone path → dirty status (only for sparse-checked-out zones) */
     const std::map<std::string, bool> & getTectonixDirtyZones() const;
+
+    /**
+     * Get a zone's store path, handling dirty detection and lazy mounting.
+     *
+     * For clean zones with lazy-trees enabled: mounts accessor lazily
+     * For dirty zones: currently eager-copies from checkout (extension point)
+     * For lazy-trees disabled: eager-copies from git
+     */
+    StorePath getZoneStorePath(std::string_view zonePath);
+
+    /**
+     * Get or mount the world root for read-only access.
+     * Used by the worldRoot builtin.
+     */
+    StorePath getOrMountWorldRoot();
 
     /**
      * Return a `SourcePath` that refers to `path` in the root

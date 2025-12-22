@@ -279,56 +279,16 @@ static RegisterPrimOp primop_worldZoneFile({
 // ============================================================================
 // builtins.unsafeTectonixInternalZoneSrc zonePath
 // Returns a store path containing the zone source
+// With lazy-trees enabled, returns a virtual store path that is only
+// materialized when used as a derivation input.
 // ============================================================================
 static void prim_unsafeTectonixInternalZoneSrc(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto zonePath = state.forceStringNoCtx(*args[0], pos,
         "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalZoneSrc");
 
-    // Normalize zone path
-    std::string zone(zonePath);
-    if (hasPrefix(zone, "//"))
-        zone = zone.substr(2);
-
-    auto fullPath = CanonPath("/" + zone);
-    std::string name = "zone-" + replaceStrings(zone, "/", "-");
-
-    // In source-available mode with dirty zone, use checkout
-    auto & dirtyZones = state.getTectonixDirtyZones();
-    auto it = dirtyZones.find(std::string(zonePath));
-    bool isDirty = it != dirtyZones.end() && it->second;
-    if (state.isTectonixSourceAvailable() && isDirty) {
-        auto checkoutAccessor = state.getWorldCheckoutAccessor();
-        if (!checkoutAccessor)
-            state.error<EvalError>("checkout accessor not available").atPos(pos).debugThrow();
-
-        auto checkoutPath = state.settings.tectonixCheckoutPath.get();
-        auto checkoutFullPath = CanonPath(checkoutPath + fullPath.abs());
-
-        auto storePath = fetchToStore(
-            state.fetchSettings,
-            *state.store,
-            SourcePath(*checkoutAccessor, checkoutFullPath),
-            FetchMode::Copy,
-            name);
-
-        state.allowAndSetStorePathString(storePath, v);
-    } else {
-        // Use git content
-        auto treeSha = state.getWorldTreeSha(zonePath);
-        auto repo = state.getWorldRepo();
-        GitAccessorOptions opts{.exportIgnore = true, .smudgeLfs = false};
-        auto accessor = repo->getAccessor(treeSha, opts, "world-zone");
-
-        auto storePath = fetchToStore(
-            state.fetchSettings,
-            *state.store,
-            SourcePath(accessor, CanonPath::root),
-            FetchMode::Copy,
-            name);
-
-        state.allowAndSetStorePathString(storePath, v);
-    }
+    auto storePath = state.getZoneStorePath(zonePath);
+    state.allowAndSetStorePathString(storePath, v);
 }
 
 static RegisterPrimOp primop_unsafeTectonixInternalZoneSrc({
@@ -337,8 +297,11 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneSrc({
     .doc = R"(
       Get the source of a zone as a store path.
 
-      In source-available mode with uncommitted changes, uses checkout content.
-      Otherwise uses git content.
+      With `lazy-trees = true`, returns a virtual store path that is only
+      materialized when used as a derivation input (devirtualized).
+
+      In source-available mode with uncommitted changes, uses checkout content
+      (always eager for dirty zones).
 
       Example: `builtins.unsafeTectonixInternalZoneSrc "//areas/tools/tec"`
 
@@ -488,6 +451,108 @@ static RegisterPrimOp primop_unsafeTectonixInternalDirtyZones({
       Requires `--tectonix-checkout-path` to be set.
     )",
     .fun = prim_unsafeTectonixInternalDirtyZones,
+});
+
+// ============================================================================
+// builtins.worldZone zonePath
+// Returns an attrset with zone info (flake-like interface)
+// ============================================================================
+static void prim_worldZone(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zonePath = state.forceStringNoCtx(*args[0], pos,
+        "while evaluating the 'zonePath' argument to builtins.worldZone");
+
+    // Get tree SHA before we potentially fetch
+    auto treeSha = state.getWorldTreeSha(zonePath);
+
+    // Check dirty status
+    bool isDirty = false;
+    if (state.isTectonixSourceAvailable()) {
+        auto & dirtyZones = state.getTectonixDirtyZones();
+        auto it = dirtyZones.find(std::string(zonePath));
+        isDirty = it != dirtyZones.end() && it->second;
+    }
+
+    auto storePath = state.getZoneStorePath(zonePath);
+    auto storePathStr = state.store->printStorePath(storePath);
+
+    // Build result attrset (like fetchTree)
+    auto attrs = state.buildBindings(5);
+
+    // outPath: string with context (for use as derivation src)
+    attrs.alloc("outPath").mkString(storePathStr, {
+        NixStringContextElem::Opaque{storePath}
+    }, state.mem);
+
+    // root: path value (for reading files without devirtualization)
+    attrs.alloc("root").mkPath(
+        state.rootPath(CanonPath(storePathStr)), state.mem);
+
+    attrs.alloc("treeSha").mkString(treeSha.gitRev(), state.mem);
+    attrs.alloc("zonePath").mkString(zonePath, state.mem);
+    attrs.alloc("dirty").mkBool(isDirty);
+
+    v.mkAttrs(attrs);
+}
+
+static RegisterPrimOp primop_worldZone({
+    .name = "worldZone",
+    .args = {"zonePath"},
+    .doc = R"(
+      Get a zone from the world repository.
+
+      Returns an attrset with:
+      - outPath: Store path string with context (for use as derivation src)
+      - root: Path value for reading files (no devirtualization)
+      - treeSha: Git tree SHA for this zone
+      - zonePath: The zone path argument
+      - dirty: Whether the zone has uncommitted changes
+
+      With `lazy-trees = true`, the zone is mounted lazily. Use `root` to
+      read files without triggering a copy to the store:
+
+          let zone = builtins.worldZone "//areas/tools/tec";
+          in import (zone.root + "/zone.nix")
+
+      Use `outPath` as derivation src (triggers copy at build time):
+
+          mkDerivation { src = zone.outPath; }
+
+      Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
+    )",
+    .fun = prim_worldZone,
+});
+
+// ============================================================================
+// builtins.worldRoot
+// Returns a path to the world repository root for read-only access
+// ============================================================================
+static void prim_worldRoot(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto storePath = state.getOrMountWorldRoot();
+
+    v.mkPath(state.rootPath(
+        CanonPath(state.store->printStorePath(storePath))), state.mem);
+}
+
+static RegisterPrimOp primop_worldRoot({
+    .name = "worldRoot",
+    .args = {},
+    .doc = R"(
+      Get a path to the world repository root.
+
+      This path can be used for reading files during evaluation:
+
+          let world = builtins.worldRoot;
+          in import (world + "/areas/tools/tec/zone.nix")
+
+      WARNING: Do not use this path directly as a derivation src!
+      That would copy the entire world to the store. Use
+      builtins.worldZone for derivation sources.
+
+      Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
+    )",
+    .fun = prim_worldRoot,
 });
 
 } // namespace nix
