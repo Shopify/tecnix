@@ -165,118 +165,6 @@ static RegisterPrimOp primop_unsafeTectonixInternalTree({
 });
 
 // ============================================================================
-// builtins.unsafeTectonixInternalFile path
-// Returns file contents as a string
-// ============================================================================
-static void prim_unsafeTectonixInternalFile(EvalState & state, const PosIdx pos, Value ** args, Value & v)
-{
-    auto worldPath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'path' argument to builtins.unsafeTectonixInternalFile");
-
-    // Normalize path (remove leading //)
-    std::string path(worldPath);
-    if (hasPrefix(path, "//"))
-        path = path.substr(2);
-
-    auto fullPath = CanonPath("/" + path);
-
-    // In source-available mode, check checkout first
-    if (state.isTectonixSourceAvailable()) {
-        auto checkoutAccessor = state.getWorldCheckoutAccessor();
-        if (checkoutAccessor) {
-            auto checkoutPath = state.settings.tectonixCheckoutPath.get();
-            auto checkoutFullPath = CanonPath(checkoutPath + fullPath.abs());
-            if ((*checkoutAccessor)->pathExists(checkoutFullPath)) {
-                auto content = (*checkoutAccessor)->readFile(checkoutFullPath);
-                v.mkString(content, state.mem);
-                return;
-            }
-        }
-    }
-
-    // Fall back to git
-    auto accessor = state.getWorldGitAccessor();
-    if (!accessor->pathExists(fullPath))
-        state.error<EvalError>("path '%s' does not exist in world", fullPath)
-            .atPos(pos).debugThrow();
-
-    auto content = accessor->readFile(fullPath);
-    v.mkString(content, state.mem);
-}
-
-static RegisterPrimOp primop_unsafeTectonixInternalFile({
-    .name = "__unsafeTectonixInternalFile",
-    .args = {"path"},
-    .doc = R"(
-      Read a file from the world repository.
-
-      In source-available mode (--tectonix-checkout-path set), prefers checkout files.
-
-      Example: `builtins.unsafeTectonixInternalFile "//areas/tools/tec/zone.nix"`
-
-      Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
-    )",
-    .fun = prim_unsafeTectonixInternalFile,
-});
-
-// ============================================================================
-// builtins.worldZoneFile zonePath pathInZone
-// Returns file contents as a string
-// ============================================================================
-static void prim_worldZoneFile(EvalState & state, const PosIdx pos, Value ** args, Value & v)
-{
-    auto zonePath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'zonePath' argument to builtins.worldZoneFile");
-    auto pathInZone = state.forceStringNoCtx(*args[1], pos,
-        "while evaluating the 'pathInZone' argument to builtins.worldZoneFile");
-
-    // Normalize zone path (remove leading //)
-    std::string zone(zonePath);
-    if (hasPrefix(zone, "//"))
-        zone = zone.substr(2);
-
-    auto fullPath = CanonPath("/" + zone + "/" + std::string(pathInZone));
-
-    // In source-available mode, check checkout first
-    if (state.isTectonixSourceAvailable()) {
-        auto checkoutAccessor = state.getWorldCheckoutAccessor();
-        if (checkoutAccessor) {
-            auto checkoutPath = state.settings.tectonixCheckoutPath.get();
-            auto checkoutFullPath = CanonPath(checkoutPath + fullPath.abs());
-            if ((*checkoutAccessor)->pathExists(checkoutFullPath)) {
-                auto content = (*checkoutAccessor)->readFile(checkoutFullPath);
-                v.mkString(content, state.mem);
-                return;
-            }
-        }
-    }
-
-    // Fall back to git
-    auto accessor = state.getWorldGitAccessor();
-    if (!accessor->pathExists(fullPath))
-        state.error<EvalError>("path '%s' does not exist in world", fullPath)
-            .atPos(pos).debugThrow();
-
-    auto content = accessor->readFile(fullPath);
-    v.mkString(content, state.mem);
-}
-
-static RegisterPrimOp primop_worldZoneFile({
-    .name = "worldZoneFile",
-    .args = {"zonePath", "pathInZone"},
-    .doc = R"(
-      Read a file from a zone in the world repository.
-
-      In source-available mode (--tectonix-checkout-path set), prefers checkout files.
-
-      Example: `builtins.worldZoneFile "//areas/tools/tec" "zone.nix"`
-
-      Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
-    )",
-    .fun = prim_worldZoneFile,
-});
-
-// ============================================================================
 // builtins.unsafeTectonixInternalZoneSrc zonePath
 // Returns a store path containing the zone source
 // With lazy-trees enabled, returns a virtual store path that is only
@@ -308,84 +196,6 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneSrc({
       Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
     )",
     .fun = prim_unsafeTectonixInternalZoneSrc,
-});
-
-// ============================================================================
-// builtins.unsafeTectonixInternalDir zonePath pathInZone
-// Returns directory listing as attrset
-// ============================================================================
-static void prim_unsafeTectonixInternalDir(EvalState & state, const PosIdx pos, Value ** args, Value & v)
-{
-    auto zonePath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalDir");
-    auto pathInZone = state.forceStringNoCtx(*args[1], pos,
-        "while evaluating the 'pathInZone' argument to builtins.unsafeTectonixInternalDir");
-
-    // Normalize path
-    std::string zone(zonePath);
-    if (hasPrefix(zone, "//"))
-        zone = zone.substr(2);
-
-    auto fullPath = CanonPath("/" + zone + "/" + std::string(pathInZone));
-
-    // Determine which accessor to use
-    ref<SourceAccessor> accessor = state.getWorldGitAccessor();
-    CanonPath accessPath = fullPath;
-
-    if (state.isTectonixSourceAvailable()) {
-        auto checkoutAccessor = state.getWorldCheckoutAccessor();
-        if (checkoutAccessor) {
-            auto checkoutPath = state.settings.tectonixCheckoutPath.get();
-            auto checkoutFullPath = CanonPath(checkoutPath + fullPath.abs());
-            if ((*checkoutAccessor)->pathExists(checkoutFullPath)) {
-                accessor = *checkoutAccessor;
-                accessPath = checkoutFullPath;
-            }
-        }
-    }
-
-    if (!accessor->pathExists(accessPath))
-        state.error<EvalError>("path '%s' does not exist in world", fullPath)
-            .atPos(pos).debugThrow();
-
-    auto entries = accessor->readDirectory(accessPath);
-
-    auto attrs = state.buildBindings(entries.size());
-    for (auto & [name, typeOpt] : entries) {
-        const char * typeStr;
-        if (!typeOpt) {
-            typeStr = "unknown";
-        } else {
-            switch (*typeOpt) {
-                case SourceAccessor::Type::tRegular: typeStr = "regular"; break;
-                case SourceAccessor::Type::tDirectory: typeStr = "directory"; break;
-                case SourceAccessor::Type::tSymlink: typeStr = "symlink"; break;
-                case SourceAccessor::Type::tChar:
-                case SourceAccessor::Type::tBlock:
-                case SourceAccessor::Type::tSocket:
-                case SourceAccessor::Type::tFifo:
-                case SourceAccessor::Type::tUnknown:
-                    typeStr = "unknown"; break;
-            }
-        }
-        attrs.alloc(state.symbols.create(name)).mkString(typeStr, state.mem);
-    }
-    v.mkAttrs(attrs);
-}
-
-static RegisterPrimOp primop_unsafeTectonixInternalDir({
-    .name = "__unsafeTectonixInternalDir",
-    .args = {"zonePath", "pathInZone"},
-    .doc = R"(
-      List directory contents from the world repository.
-
-      Returns an attrset mapping names to types ("regular", "directory", "symlink").
-
-      Example: `builtins.unsafeTectonixInternalDir "//areas/tools/tec" "src"`
-
-      Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
-    )",
-    .fun = prim_unsafeTectonixInternalDir,
 });
 
 // ============================================================================
@@ -454,13 +264,13 @@ static RegisterPrimOp primop_unsafeTectonixInternalDirtyZones({
 });
 
 // ============================================================================
-// builtins.worldZone zonePath
+// builtins.__unsafeTectonixInternalZone zonePath
 // Returns an attrset with zone info (flake-like interface)
 // ============================================================================
-static void prim_worldZone(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+static void prim_unsafeTectonixInternalZone(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto zonePath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'zonePath' argument to builtins.worldZone");
+        "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZone");
 
     // Get tree SHA before we potentially fetch
     auto treeSha = state.getWorldTreeSha(zonePath);
@@ -495,8 +305,8 @@ static void prim_worldZone(EvalState & state, const PosIdx pos, Value ** args, V
     v.mkAttrs(attrs);
 }
 
-static RegisterPrimOp primop_worldZone({
-    .name = "worldZone",
+static RegisterPrimOp primop_unsafeTectonixInternalZone({
+    .name = "__unsafeTectonixInternalZone",
     .args = {"zonePath"},
     .doc = R"(
       Get a zone from the world repository.
@@ -511,7 +321,7 @@ static RegisterPrimOp primop_worldZone({
       With `lazy-trees = true`, the zone is mounted lazily. Use `root` to
       read files without triggering a copy to the store:
 
-          let zone = builtins.worldZone "//areas/tools/tec";
+          let zone = builtins.__unsafeTectonixInternalZone "//areas/tools/tec";
           in import (zone.root + "/zone.nix")
 
       Use `outPath` as derivation src (triggers copy at build time):
@@ -520,14 +330,14 @@ static RegisterPrimOp primop_worldZone({
 
       Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_worldZone,
+    .fun = prim_unsafeTectonixInternalZone,
 });
 
 // ============================================================================
-// builtins.worldRoot
+// builtins.__unsafeTectonixInternalRoot
 // Returns a path to the world repository root for read-only access
 // ============================================================================
-static void prim_worldRoot(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+static void prim_unsafeTectonixInternalRoot(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto storePath = state.getOrMountWorldRoot();
 
@@ -535,24 +345,24 @@ static void prim_worldRoot(EvalState & state, const PosIdx pos, Value ** args, V
         CanonPath(state.store->printStorePath(storePath))), state.mem);
 }
 
-static RegisterPrimOp primop_worldRoot({
-    .name = "worldRoot",
+static RegisterPrimOp primop_unsafeTectonixInternalRoot({
+    .name = "__unsafeTectonixInternalRoot",
     .args = {},
     .doc = R"(
       Get a path to the world repository root.
 
       This path can be used for reading files during evaluation:
 
-          let world = builtins.worldRoot;
+          let world = builtins.__unsafeTectonixInternalRoot;
           in import (world + "/areas/tools/tec/zone.nix")
 
       WARNING: Do not use this path directly as a derivation src!
       That would copy the entire world to the store. Use
-      builtins.worldZone for derivation sources.
+      builtins.__unsafeTectonixInternalZone for derivation sources.
 
       Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_worldRoot,
+    .fun = prim_unsafeTectonixInternalRoot,
 });
 
 } // namespace nix
