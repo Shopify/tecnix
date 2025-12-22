@@ -540,11 +540,6 @@ private:
     mutable SharedSync<std::map<Hash, StorePath>> tectonixZoneCache_;
 
     /**
-     * Lazily-mounted world root store path (for worldRoot builtin).
-     */
-    mutable SharedSync<std::optional<StorePath>> worldRootStorePath_;
-
-    /**
      * Mount a zone by tree SHA, returning a (potentially virtual) store path.
      * Caches by tree SHA for deduplication across world revisions.
      */
@@ -616,12 +611,6 @@ public:
      * For lazy-trees disabled: eager-copies from git
      */
     StorePath getZoneStorePath(std::string_view zonePath);
-
-    /**
-     * Get or mount the world root for read-only access.
-     * Used by the worldRoot builtin.
-     */
-    StorePath getOrMountWorldRoot();
 
     /**
      * Return a `SourcePath` that refers to `path` in the root

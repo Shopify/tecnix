@@ -780,37 +780,6 @@ StorePath EvalState::getZoneFromCheckout(std::string_view zonePath)
     return storePath;
 }
 
-StorePath EvalState::getOrMountWorldRoot()
-{
-    // Check if already mounted (thread-safe)
-    {
-        auto cached = worldRootStorePath_.readLock();
-        if (*cached)
-            return **cached;
-    }
-
-    // Not mounted: create accessor and mount
-    auto accessor = getWorldGitAccessor();
-    auto storePath = StorePath::random("world");
-    allowPath(storePath);
-
-    storeFS->mount(CanonPath(store->printStorePath(storePath)), accessor);
-
-    // Cache it (thread-safe)
-    {
-        auto cache = worldRootStorePath_.lock();
-        if (!*cache) {
-            *cache = storePath;
-        } else {
-            // Another thread beat us, use their path
-            return **cache;
-        }
-    }
-
-    debug("mounted world root at %s", store->printStorePath(storePath));
-    return storePath;
-}
-
 inline static bool isJustSchemePrefix(std::string_view prefix)
 {
     return !prefix.empty() && prefix[prefix.size() - 1] == ':'

@@ -272,6 +272,13 @@ static void prim_unsafeTectonixInternalZone(EvalState & state, const PosIdx pos,
     auto zonePath = state.forceStringNoCtx(*args[0], pos,
         "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZone");
 
+    // Validate that zonePath is exactly a zone root (exists in manifest)
+    auto content = readManifestContent(state, pos);
+    auto manifest = nlohmann::json::parse(content);
+    if (!manifest.contains(std::string(zonePath)))
+        state.error<EvalError>("'%s' is not a zone root (must be an exact path from the manifest)", zonePath)
+            .atPos(pos).debugThrow();
+
     // Get tree SHA before we potentially fetch
     auto treeSha = state.getWorldTreeSha(zonePath);
 
@@ -331,38 +338,6 @@ static RegisterPrimOp primop_unsafeTectonixInternalZone({
       Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
     )",
     .fun = prim_unsafeTectonixInternalZone,
-});
-
-// ============================================================================
-// builtins.__unsafeTectonixInternalRoot
-// Returns a path to the world repository root for read-only access
-// ============================================================================
-static void prim_unsafeTectonixInternalRoot(EvalState & state, const PosIdx pos, Value ** args, Value & v)
-{
-    auto storePath = state.getOrMountWorldRoot();
-
-    v.mkPath(state.rootPath(
-        CanonPath(state.store->printStorePath(storePath))), state.mem);
-}
-
-static RegisterPrimOp primop_unsafeTectonixInternalRoot({
-    .name = "__unsafeTectonixInternalRoot",
-    .args = {},
-    .doc = R"(
-      Get a path to the world repository root.
-
-      This path can be used for reading files during evaluation:
-
-          let world = builtins.__unsafeTectonixInternalRoot;
-          in import (world + "/areas/tools/tec/zone.nix")
-
-      WARNING: Do not use this path directly as a derivation src!
-      That would copy the entire world to the store. Use
-      builtins.__unsafeTectonixInternalZone for derivation sources.
-
-      Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
-    )",
-    .fun = prim_unsafeTectonixInternalRoot,
 });
 
 } // namespace nix
