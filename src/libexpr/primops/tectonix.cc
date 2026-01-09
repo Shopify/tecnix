@@ -9,6 +9,82 @@
 
 namespace nix {
 
+// ============================================================================
+// Zone Path Parsing Infrastructure
+// ============================================================================
+
+/**
+ * Result of peeling a zone path into host and local components.
+ *
+ * For top-level zones like "//a/b/c", hostPath is nullopt and localPath is "//a/b/c".
+ * For internal zones like "//a/b/_internal/c", hostPath is "//a/b" and localPath is "c".
+ * For nested internal zones like "//a/_internal/b/_internal/c", hostPath is "//a/_internal/b" and localPath is "c".
+ */
+struct PeeledZonePath {
+    std::optional<std::string> hostPath;  // nullopt for top-level zones
+    std::string localPath;                 // The path to look up in manifest
+
+    bool isInternal() const { return hostPath.has_value(); }
+};
+
+/**
+ * Peel a zone path to extract the innermost internal zone layer.
+ *
+ * Uses rfind to find the rightmost "/_internal/" marker:
+ * - peel("//a/b/c") → {nullopt, "//a/b/c"} — top-level
+ * - peel("//a/b/_internal/c") → {"//a/b", "c"} — one level of nesting
+ * - peel("//a/_internal/b/_internal/c") → {"//a/_internal/b", "c"} — recursive host
+ */
+static PeeledZonePath peelZonePath(std::string_view path) {
+    constexpr std::string_view marker = "/_internal/";
+    auto pos = path.rfind(marker);
+
+    if (pos == std::string_view::npos) {
+        return {.hostPath = std::nullopt, .localPath = std::string(path)};
+    }
+
+    return {
+        .hostPath = std::string(path.substr(0, pos)),
+        .localPath = std::string(path.substr(pos + marker.size()))
+    };
+}
+
+// ============================================================================
+// Internal Manifest Reading
+// ============================================================================
+
+/**
+ * Read the internal manifest from a host zone's tree.
+ *
+ * Internal manifests are located at `_internal/manifest.json` within the host zone
+ * and contain relative paths (no // prefix) mapping to zone IDs.
+ *
+ * Example internal manifest:
+ * {
+ *   "helpers": {"id": "W-def000"},
+ *   "test-utils": {"id": "W-def001"},
+ *   "deeply/nested/thing": {"id": "W-def002"}
+ * }
+ *
+ * @param state The evaluation state
+ * @param hostTreeSha The tree SHA of the host zone
+ * @return The parsed internal manifest JSON, or nullopt if no internal manifest exists
+ */
+static std::optional<nlohmann::json> readInternalManifest(
+    EvalState & state,
+    const Hash & hostTreeSha)
+{
+    auto repo = state.getWorldRepo();
+    GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+    auto accessor = repo->getAccessor(hostTreeSha, opts, "host");
+
+    auto manifestPath = CanonPath("_internal/manifest.json");
+    if (!accessor->pathExists(manifestPath))
+        return std::nullopt;
+
+    return nlohmann::json::parse(accessor->readFile(manifestPath));
+}
+
 // Helper to read the manifest JSON content
 static std::string readManifestContent(EvalState & state, const PosIdx pos)
 {
@@ -272,14 +348,33 @@ static void prim_unsafeTectonixInternalZone(EvalState & state, const PosIdx pos,
     auto zonePath = state.forceStringNoCtx(*args[0], pos,
         "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZone");
 
-    // Validate that zonePath is exactly a zone root (exists in manifest)
-    auto content = readManifestContent(state, pos);
-    auto manifest = nlohmann::json::parse(content);
-    if (!manifest.contains(std::string(zonePath)))
-        state.error<EvalError>("'%s' is not a zone root (must be an exact path from the manifest)", zonePath)
-            .atPos(pos).debugThrow();
+    // Peel the zone path to determine if it's top-level or internal
+    auto peeled = peelZonePath(zonePath);
 
-    // Get tree SHA before we potentially fetch
+    // Validate that zonePath exists in the appropriate manifest
+    if (!peeled.isInternal()) {
+        // Top-level zone: check root manifest
+        auto content = readManifestContent(state, pos);
+        auto manifest = nlohmann::json::parse(content);
+        if (!manifest.contains(std::string(zonePath)))
+            state.error<EvalError>("'%s' is not a zone root (must be an exact path from the manifest)", zonePath)
+                .atPos(pos).debugThrow();
+    } else {
+        // Internal zone: resolve host zone and check its internal manifest
+        auto hostTreeSha = state.getWorldTreeSha(*peeled.hostPath);
+        auto internalManifest = readInternalManifest(state, hostTreeSha);
+
+        if (!internalManifest)
+            state.error<EvalError>("zone '%s' has no internal manifest", *peeled.hostPath)
+                .atPos(pos).debugThrow();
+
+        if (!internalManifest->contains(peeled.localPath))
+            state.error<EvalError>("'%s' is not an internal zone of '%s'",
+                peeled.localPath, *peeled.hostPath)
+                .atPos(pos).debugThrow();
+    }
+
+    // Get tree SHA (handles recursion internally)
     auto treeSha = state.getWorldTreeSha(zonePath);
 
     // Check dirty status

@@ -478,8 +478,113 @@ bool EvalState::isTectonixSourceAvailable() const
     return !settings.tectonixCheckoutPath.get().empty();
 }
 
+// ============================================================================
+// Zone Path Parsing (for internal zone support)
+// ============================================================================
+
+namespace {
+
+/**
+ * Result of peeling a zone path into host and local components.
+ */
+struct PeeledZonePath {
+    std::optional<std::string> hostPath;  // nullopt for top-level zones
+    std::string localPath;                 // The path to look up in manifest
+
+    bool isInternal() const { return hostPath.has_value(); }
+};
+
+/**
+ * Peel a zone path to extract the innermost internal zone layer.
+ *
+ * Uses rfind to find the rightmost "/_internal/" marker:
+ * - peel("//a/b/c") → {nullopt, "//a/b/c"} — top-level
+ * - peel("//a/b/_internal/c") → {"//a/b", "c"} — one level of nesting
+ * - peel("//a/_internal/b/_internal/c") → {"//a/_internal/b", "c"} — recursive host
+ */
+PeeledZonePath peelZonePath(std::string_view path) {
+    constexpr std::string_view marker = "/_internal/";
+    auto pos = path.rfind(marker);
+
+    if (pos == std::string_view::npos) {
+        return {.hostPath = std::nullopt, .localPath = std::string(path)};
+    }
+
+    return {
+        .hostPath = std::string(path.substr(0, pos)),
+        .localPath = std::string(path.substr(pos + marker.size()))
+    };
+}
+
+// ============================================================================
+// Zone Filtering Accessor (filters _internal directories)
+// ============================================================================
+
+/**
+ * A filtering source accessor that hides `_internal` directories.
+ *
+ * Every zone's source accessor filters out `_internal` directories at every level,
+ * ensuring that zones are hermetically sealed from their internal zones.
+ *
+ * Example:
+ * - `//a/b/c` sees everything EXCEPT any `_internal` subdirectories
+ * - `//a/b/c/_internal/d` sees everything EXCEPT any `_internal` subdirectories within it
+ */
+class ZoneFilteringAccessor : public FilteringSourceAccessor {
+public:
+    ZoneFilteringAccessor(ref<SourceAccessor> next)
+        : FilteringSourceAccessor(SourcePath(next), makeNotAllowedError)
+    {
+    }
+
+private:
+    static RestrictedPathError makeNotAllowedError(const CanonPath & path) {
+        return RestrictedPathError("'%s' is hidden (inside _internal)", path);
+    }
+
+    bool isAllowed(const CanonPath & path) override {
+        // Check each path component for _internal
+        for (auto & component : path) {
+            if (component == "_internal")
+                return false;
+        }
+        return true;
+    }
+};
+
+} // anonymous namespace
+
+// ============================================================================
+// World Tree SHA Resolution (with internal zone support)
+// ============================================================================
+
+/**
+ * Get tree SHA for a world path (top-level zones only, no recursion).
+ * This is the internal implementation that walks from the git root.
+ */
 Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
 {
+    auto peeled = peelZonePath(worldPath);
+
+    if (peeled.isInternal()) {
+        // Internal zone: resolve host first (recursive!)
+        auto hostTreeSha = getWorldTreeSha(*peeled.hostPath);
+        auto repo = getWorldRepo();
+
+        // Navigate: hostTree -> _internal -> localPath
+        auto internalTreeSha = repo->getSubtreeSha(hostTreeSha, "_internal");
+
+        // Walk through localPath segments
+        Hash currentSha = internalTreeSha;
+        for (auto & segment : tokenizeString<std::vector<std::string>>(peeled.localPath, "/")) {
+            if (segment.empty()) continue;
+            currentSha = repo->getSubtreeSha(currentSha, segment);
+        }
+
+        return currentSha;
+    }
+
+    // Top-level zone: use original logic
     // Normalize path (remove leading //)
     std::string path(worldPath);
     if (hasPrefix(path, "//"))
@@ -626,6 +731,48 @@ const std::map<std::string, bool> & EvalState::getTectonixDirtyZones() const
                             dirtyZones[zonePath] = false;
                         }
 
+                        // Helper function to recursively discover and register internal zones
+                        std::function<void(const std::string &, const Hash &)> discoverInternalZones;
+                        discoverInternalZones = [&](const std::string & hostZonePath, const Hash & hostTreeSha) {
+                            // Check if host zone has an internal manifest
+                            auto hostAccessor = repo->getAccessor(hostTreeSha, opts, "host");
+                            auto internalManifestPath = CanonPath("_internal/manifest.json");
+
+                            if (!hostAccessor->pathExists(internalManifestPath))
+                                return;
+
+                            auto internalManifestContent = hostAccessor->readFile(internalManifestPath);
+                            auto internalManifest = nlohmann::json::parse(internalManifestContent);
+
+                            // Register each internal zone
+                            for (auto & [localPath, value] : internalManifest.items()) {
+                                std::string internalZonePath = hostZonePath + "/_internal/" + localPath;
+                                dirtyZones[internalZonePath] = false;
+
+                                // Recursively discover nested internal zones
+                                try {
+                                    auto internalTreeSha = repo->getSubtreeSha(hostTreeSha, "_internal");
+                                    for (auto & segment : tokenizeString<std::vector<std::string>>(localPath, "/")) {
+                                        if (!segment.empty())
+                                            internalTreeSha = repo->getSubtreeSha(internalTreeSha, segment);
+                                    }
+                                    discoverInternalZones(internalZonePath, internalTreeSha);
+                                } catch (...) {
+                                    // Internal zone tree not found, skip recursion
+                                }
+                            }
+                        };
+
+                        // Discover internal zones for each top-level zone
+                        for (auto & [zoneId, zonePath] : zoneIdToPath) {
+                            try {
+                                auto zoneTreeSha = getWorldTreeSha(zonePath);
+                                discoverInternalZones(zonePath, zoneTreeSha);
+                            } catch (...) {
+                                // Zone tree not found, skip internal zone discovery
+                            }
+                        }
+
                         // Get dirty files via git status (avoids libgit2 reftables issue)
                         auto checkoutPath = settings.tectonixCheckoutPath.get();
                         auto gitStatusOutput = runProgram("git", true, {"-C", checkoutPath, "status", "--porcelain"});
@@ -635,7 +782,9 @@ const std::map<std::string, bool> & EvalState::getTectonixDirtyZones() const
                             // Format: "XY filename" where XY is 2-char status
                             auto filePath = "/" + std::string(line.substr(3));
 
-                            // Find which zone this file belongs to
+                            // Find the most specific zone this file belongs to
+                            // (internal zones are more specific than their host zones)
+                            std::string bestMatch;
                             for (auto & [zonePath, dirty] : dirtyZones) {
                                 // Normalize zone path for comparison (remove leading //)
                                 std::string normalizedZonePath = zonePath;
@@ -643,9 +792,15 @@ const std::map<std::string, bool> & EvalState::getTectonixDirtyZones() const
                                     normalizedZonePath = normalizedZonePath.substr(1); // keep one /
 
                                 if (hasPrefix(filePath, normalizedZonePath + "/") || filePath == normalizedZonePath) {
-                                    dirtyZones[zonePath] = true;
-                                    break;
+                                    // Prefer longer (more specific) matches
+                                    if (normalizedZonePath.size() > bestMatch.size()) {
+                                        bestMatch = zonePath;
+                                    }
                                 }
+                            }
+
+                            if (!bestMatch.empty()) {
+                                dirtyZones[bestMatch] = true;
                             }
                         }
                     }
@@ -685,7 +840,10 @@ StorePath EvalState::getZoneStorePath(std::string_view zonePath)
         // Eager mode: immediate copy from git ODB
         auto repo = getWorldRepo();
         GitAccessorOptions opts{.exportIgnore = true, .smudgeLfs = false};
-        auto accessor = repo->getAccessor(treeSha, opts, "zone");
+        auto rawAccessor = repo->getAccessor(treeSha, opts, "zone");
+
+        // Wrap with _internal filter to hide internal zones
+        auto accessor = make_ref<ZoneFilteringAccessor>(rawAccessor);
 
         std::string name = "zone-" + replaceStrings(zone, "/", "-");
         auto storePath = fetchToStore(
@@ -716,7 +874,10 @@ StorePath EvalState::mountZoneByTreeSha(const Hash & treeSha, std::string_view z
     // Not cached: create accessor and mount
     auto repo = getWorldRepo();
     GitAccessorOptions opts{.exportIgnore = true, .smudgeLfs = false};
-    auto accessor = repo->getAccessor(treeSha, opts, "zone");
+    auto rawAccessor = repo->getAccessor(treeSha, opts, "zone");
+
+    // Wrap with _internal filter to hide internal zones from this zone's view
+    auto accessor = make_ref<ZoneFilteringAccessor>(rawAccessor);
 
     // Generate name from zone path
     std::string zone(zonePath);
@@ -728,7 +889,7 @@ StorePath EvalState::mountZoneByTreeSha(const Hash & treeSha, std::string_view z
     auto storePath = StorePath::random(name);
     allowPath(storePath);
 
-    // Mount accessor at this path
+    // Mount the filtered accessor at this path
     storeFS->mount(CanonPath(store->printStorePath(storePath)), accessor);
 
     // Cache it (thread-safe)
@@ -759,13 +920,15 @@ StorePath EvalState::getZoneFromCheckout(std::string_view zonePath)
 
     if (!settings.lazyTrees) {
         // Eager mode: immediate copy from checkout
-        auto checkoutAccessor = getWorldCheckoutAccessor();
-        if (!checkoutAccessor)
-            throw Error("checkout accessor not available for dirty zone '%s'", zonePath);
+        // Create an accessor rooted at the zone directory
+        auto rawAccessor = makeFSSourceAccessor(fullPath);
+
+        // Wrap with _internal filter to hide internal zones
+        auto accessor = make_ref<ZoneFilteringAccessor>(rawAccessor);
 
         auto storePath = fetchToStore(
             fetchSettings, *store,
-            SourcePath(*checkoutAccessor, CanonPath(checkoutPath + "/" + zone)),
+            SourcePath(accessor, CanonPath::root),
             FetchMode::Copy, name);
 
         allowPath(storePath);
@@ -783,13 +946,16 @@ StorePath EvalState::getZoneFromCheckout(std::string_view zonePath)
     }
 
     // Not cached: create accessor rooted at zone directory and mount
-    auto accessor = makeFSSourceAccessor(fullPath);
+    auto rawAccessor = makeFSSourceAccessor(fullPath);
+
+    // Wrap with _internal filter to hide internal zones from this zone's view
+    auto accessor = make_ref<ZoneFilteringAccessor>(rawAccessor);
 
     // Create virtual store path
     auto storePath = StorePath::random(name);
     allowPath(storePath);
 
-    // Mount accessor at this path
+    // Mount the filtered accessor at this path
     storeFS->mount(CanonPath(store->printStorePath(storePath)), accessor);
 
     // Cache it (thread-safe)
