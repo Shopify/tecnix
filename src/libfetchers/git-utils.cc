@@ -46,6 +46,7 @@
 #include <regex>
 #include <span>
 #include <ranges>
+#include <unordered_set>
 
 namespace std {
 
@@ -74,6 +75,7 @@ bool operator==(const git_oid & oid1, const git_oid & oid2)
 namespace nix {
 
 struct GitSourceAccessor;
+struct GitRepoImpl;
 
 typedef std::unique_ptr<git_repository, Deleter<git_repository_free>> Repository;
 typedef std::unique_ptr<git_tree_entry, Deleter<git_tree_entry_free>> TreeEntry;
@@ -126,15 +128,7 @@ static git_oid hashToOID(const Hash & hash)
     return oid;
 }
 
-static Object lookupObject(git_repository * repo, const git_oid & oid, git_object_t type = GIT_OBJECT_ANY)
-{
-    Object obj;
-    if (git_object_lookup(Setter(obj), repo, &oid, type)) {
-        auto err = git_error_last();
-        throw Error("getting Git object '%s': %s", oid, err->message);
-    }
-    return obj;
-}
+static Object lookupObject(GitRepoImpl * repo, const git_oid & oid, git_object_t type = GIT_OBJECT_ANY);
 
 template<typename T>
 static T peelObject(git_object * obj, git_object_t type)
@@ -265,6 +259,57 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
      * Owned by `repo`.
      */
     git_odb_backend * packBackend = nullptr;
+
+    struct FetchCache {
+        std::mutex mutex;
+        std::unordered_set<std::string> attemptedOids;
+        std::chrono::steady_clock::time_point lastFetchTime;
+    };
+
+    mutable FetchCache fetchCache;
+
+    bool isPartialClone() const
+    {
+        auto promisorDir = path / "objects" / "info";
+        if (!std::filesystem::exists(promisorDir))
+            return false;
+
+        for (const auto& entry : std::filesystem::directory_iterator(promisorDir)) {
+            if (entry.path().filename().string().starts_with("promisor-"))
+                return true;
+        }
+        return false;
+    }
+
+    bool tryFetchObject(const git_oid & oid)
+    {
+        if (!isPartialClone())
+            return false;
+
+        auto oidStr = std::string(git_oid_tostr_s(&oid));
+
+        {
+            std::lock_guard lock(fetchCache.mutex);
+            if (fetchCache.attemptedOids.contains(oidStr))
+                return false;
+
+            fetchCache.attemptedOids.insert(oidStr);
+        }
+
+        Strings args = {"-C", path.string(), "--git-dir", ".",
+                       "fetch", "origin", oidStr};
+
+        try {
+            auto [status, output] = runProgram(RunOptions{
+                .program = "git",
+                .args = args,
+                .isInteractive = false
+            });
+            return status == 0;
+        } catch (...) {
+            return false;
+        }
+    }
 
     GitRepoImpl(std::filesystem::path _path, Options _options)
         : path(std::move(_path))
@@ -427,7 +472,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
     {
         boost::concurrent_flat_set<git_oid, std::hash<git_oid>> done;
 
-        auto startCommit = peelObject<Commit>(lookupObject(*this, hashToOID(rev)).get(), GIT_OBJECT_COMMIT);
+        auto startCommit = peelObject<Commit>(lookupObject(this, hashToOID(rev)).get(), GIT_OBJECT_COMMIT);
         auto startOid = *git_commit_id(startCommit.get());
         done.insert(startOid);
 
@@ -438,7 +483,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         auto process = [&done, &pool, &repoPool](this auto const & process, const git_oid & oid) -> void {
             auto repo(repoPool.get());
 
-            auto _commit = lookupObject(*repo, oid, GIT_OBJECT_COMMIT);
+            auto _commit = lookupObject(&*repo, oid, GIT_OBJECT_COMMIT);
             auto commit = (const git_commit *) &*_commit;
 
             for (auto n : std::views::iota(0U, git_commit_parentcount(commit))) {
@@ -467,7 +512,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
 
     uint64_t getLastModified(const Hash & rev) override
     {
-        auto commit = peelObject<Commit>(lookupObject(*this, hashToOID(rev)).get(), GIT_OBJECT_COMMIT);
+        auto commit = peelObject<Commit>(lookupObject(this, hashToOID(rev)).get(), GIT_OBJECT_COMMIT);
 
         return git_commit_time(commit.get());
     }
@@ -630,8 +675,22 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         git_tree * tree = nullptr;
         auto oid = hashToOID(treeSha);
 
-        if (git_tree_lookup(&tree, *this, &oid))
-            throw Error("looking up tree %s: %s", treeSha.gitRev(), git_error_last()->message);
+        auto errCode = git_tree_lookup(&tree, *this, &oid);
+        if (errCode == GIT_ENOTFOUND && tryFetchObject(oid)) {
+            errCode = git_tree_lookup(&tree, *this, &oid);
+        }
+        if (errCode) {
+            if (errCode == GIT_ENOTFOUND && isPartialClone()) {
+                throw Error(
+                    "Git tree '%s' not found in partial clone. "
+                    "Automatic fetch from promisor remote failed. "
+                    "Try manually: git -C %s fetch origin %s",
+                    treeSha.gitRev(), path.string(), git_oid_tostr_s(&oid)
+                );
+            } else {
+                throw Error("looking up tree %s: %s", treeSha.gitRev(), git_error_last()->message);
+            }
+        }
 
         Finally freeTree([&]() { git_tree_free(tree); });
 
@@ -648,7 +707,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
     Hash getCommitTree(const Hash & commitSha) override
     {
         auto oid = hashToOID(commitSha);
-        auto obj = lookupObject(*this, oid);
+        auto obj = lookupObject(this, oid);
         auto tree = peelObject<Object>(obj.get(), GIT_OBJECT_TREE);
         return toHash(*git_object_id(tree.get()));
     }
@@ -801,7 +860,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
     {
         auto oid = hashToOID(oid_);
 
-        auto _tree = lookupObject(*this, oid, GIT_OBJECT_TREE);
+        auto _tree = lookupObject(this, oid, GIT_OBJECT_TREE);
         auto tree = (const git_tree *) &*_tree;
 
         if (git_tree_entrycount(tree) == 1) {
@@ -814,6 +873,33 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         return toHash(oid);
     }
 };
+
+static Object lookupObject(GitRepoImpl * repo, const git_oid & oid, git_object_t type)
+{
+    Object obj;
+    auto errCode = git_object_lookup(Setter(obj), *repo, &oid, type);
+
+    if (errCode == GIT_ENOTFOUND) {
+        if (repo->tryFetchObject(oid)) {
+            errCode = git_object_lookup(Setter(obj), *repo, &oid, type);
+        }
+    }
+
+    if (errCode) {
+        auto err = git_error_last();
+        if (errCode == GIT_ENOTFOUND && repo->isPartialClone()) {
+            throw Error(
+                "Git object '%s' not found in partial clone. "
+                "Automatic fetch from promisor remote failed. "
+                "Try manually: git -C %s fetch origin %s",
+                git_oid_tostr_s(&oid), repo->path.string(), git_oid_tostr_s(&oid)
+            );
+        } else {
+            throw Error("getting Git object '%s': %s", oid, err->message);
+        }
+    }
+    return obj;
+}
 
 ref<GitRepo> GitRepo::openRepo(const std::filesystem::path & path, GitRepo::Options options)
 {
@@ -843,7 +929,7 @@ struct GitSourceAccessor : SourceAccessor
     GitSourceAccessor(ref<GitRepoImpl> repo_, const Hash & rev, const GitAccessorOptions & options)
         : state_{State{
               .repo = repo_,
-              .root = peelToTreeOrBlob(lookupObject(*repo_, hashToOID(rev)).get()),
+              .root = peelToTreeOrBlob(lookupObject(&*repo_, hashToOID(rev)).get()),
               .lfsFetch = options.smudgeLfs ? std::make_optional(lfs::Fetch(*repo_, hashToOID(rev))) : std::nullopt,
               .options = options,
           }}
@@ -1036,8 +1122,28 @@ struct GitSourceAccessor : SourceAccessor
             return std::nullopt;
 
         Tree tree;
-        if (git_tree_entry_to_object((git_object **) (git_tree **) Setter(tree), *state.repo, entry))
-            throw Error("looking up directory '%s': %s", showPath(path), git_error_last()->message);
+        auto errCode = git_tree_entry_to_object((git_object **) (git_tree **) Setter(tree), *state.repo, entry);
+
+        if (errCode == GIT_ENOTFOUND) {
+            auto oid = git_tree_entry_id(entry);
+            if (state.repo->tryFetchObject(*oid)) {
+                errCode = git_tree_entry_to_object((git_object **) (git_tree **) Setter(tree), *state.repo, entry);
+            }
+        }
+
+        if (errCode) {
+            if (errCode == GIT_ENOTFOUND && state.repo->isPartialClone()) {
+                auto oid = git_tree_entry_id(entry);
+                throw Error(
+                    "Git tree '%s' not found in partial clone. "
+                    "Automatic fetch from promisor remote failed. "
+                    "Try manually: git -C %s fetch origin %s",
+                    git_oid_tostr_s(oid), state.repo->path.string(), git_oid_tostr_s(oid)
+                );
+            } else {
+                throw Error("looking up directory '%s': %s", showPath(path), git_error_last()->message);
+            }
+        }
 
         return tree;
     }
@@ -1071,8 +1177,28 @@ struct GitSourceAccessor : SourceAccessor
             throw Error("'%s' is not a directory", showPath(path));
 
         Tree tree;
-        if (git_tree_entry_to_object((git_object **) (git_tree **) Setter(tree), *state.repo, entry))
-            throw Error("looking up directory '%s': %s", showPath(path), git_error_last()->message);
+        auto errCode = git_tree_entry_to_object((git_object **) (git_tree **) Setter(tree), *state.repo, entry);
+
+        if (errCode == GIT_ENOTFOUND) {
+            auto oid = git_tree_entry_id(entry);
+            if (state.repo->tryFetchObject(*oid)) {
+                errCode = git_tree_entry_to_object((git_object **) (git_tree **) Setter(tree), *state.repo, entry);
+            }
+        }
+
+        if (errCode) {
+            if (errCode == GIT_ENOTFOUND && state.repo->isPartialClone()) {
+                auto oid = git_tree_entry_id(entry);
+                throw Error(
+                    "Git tree '%s' not found in partial clone. "
+                    "Automatic fetch from promisor remote failed. "
+                    "Try manually: git -C %s fetch origin %s",
+                    git_oid_tostr_s(oid), state.repo->path.string(), git_oid_tostr_s(oid)
+                );
+            } else {
+                throw Error("looking up directory '%s': %s", showPath(path), git_error_last()->message);
+            }
+        }
 
         return tree;
     }
@@ -1104,8 +1230,28 @@ struct GitSourceAccessor : SourceAccessor
         }
 
         Blob blob;
-        if (git_tree_entry_to_object((git_object **) (git_blob **) Setter(blob), *state.repo, entry))
-            throw Error("looking up file '%s': %s", showPath(path), git_error_last()->message);
+        auto errCode = git_tree_entry_to_object((git_object **) (git_blob **) Setter(blob), *state.repo, entry);
+
+        if (errCode == GIT_ENOTFOUND) {
+            auto oid = git_tree_entry_id(entry);
+            if (state.repo->tryFetchObject(*oid)) {
+                errCode = git_tree_entry_to_object((git_object **) (git_blob **) Setter(blob), *state.repo, entry);
+            }
+        }
+
+        if (errCode) {
+            if (errCode == GIT_ENOTFOUND && state.repo->isPartialClone()) {
+                auto oid = git_tree_entry_id(entry);
+                throw Error(
+                    "Git blob '%s' not found in partial clone. "
+                    "Automatic fetch from promisor remote failed. "
+                    "Try manually: git -C %s fetch origin %s",
+                    git_oid_tostr_s(oid), state.repo->path.string(), git_oid_tostr_s(oid)
+                );
+            } else {
+                throw Error("looking up file '%s': %s", showPath(path), git_error_last()->message);
+            }
+        }
 
         return blob;
     }
