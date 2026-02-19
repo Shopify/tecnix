@@ -47,13 +47,14 @@ if [[ ! "$zone_src" =~ ^"$NIX_STORE_DIR" ]]; then
     fail "Zone source should be a store path, got: $zone_src"
 fi
 
-# Test: Zone attribute set
-zone_root=$(tectonix_eval_json "$TEST_WORLD/.git" "$HEAD_SHA" \
-    'builtins.unsafeTectonixInternalZoneRoot "//areas/tools/dev"')
+# Test: Zone root access
+zone_root=$(tectonix_eval "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalZoneRoot "//areas/tools/dev"' \
+    --option tectonix-checkout-path "$TEST_WORLD" \
+    --impure)
 echo "Zone root: $zone_root"
 
 # Verify it exists in world tree
-echo "$zone_root" | grepQuiet "$TEST_WORLD"
 if [[ ! "$zone_root" =~ ^"$TEST_WORLD" ]]; then
     fail "Zone root should be in world tree"
 fi
