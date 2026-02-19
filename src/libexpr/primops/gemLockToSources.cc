@@ -62,12 +62,25 @@ static bool startsWith(const std::string & s, const std::string & prefix)
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
+static std::vector<std::string> nixSystemToRubyPlatforms(const std::string & nixSystem)
+{
+    if (nixSystem == "x86_64-linux")
+        return {"x86_64-linux", "x86_64-linux-gnu"};
+    if (nixSystem == "aarch64-linux")
+        return {"aarch64-linux", "aarch64-linux-gnu"};
+    if (nixSystem == "x86_64-darwin")
+        return {"x86_64-darwin", "universal-darwin"};
+    if (nixSystem == "aarch64-darwin")
+        return {"arm64-darwin", "aarch64-darwin", "universal-darwin"};
+    return {};
+}
+
 struct GemLockParser {
     std::map<std::string, GemSpec> entries;
-    // checksums keyed by "name-version" (no platform suffix)
+    std::map<std::string, std::vector<GemSpec>> gemCandidates;
     std::map<std::string, Hash> checksums;
 
-    void parse(std::string_view content)
+    void parse(std::string_view content, const std::string & nixSystem)
     {
         auto lines = splitLines(content);
         size_t i = 0;
@@ -85,6 +98,7 @@ struct GemLockParser {
                 i++;
             }
         }
+        resolveGemCandidates(nixSystem);
         mergeChecksums();
     }
 
@@ -236,15 +250,12 @@ private:
                 if (!version.empty() && version.back() == ')')
                     version.pop_back();
 
-                // GEM has lowest priority — skip if already present
-                if (entries.find(name) == entries.end()) {
-                    GemSpec spec;
-                    spec.name = name;
-                    spec.version = version;
-                    spec.remote = remote;
-                    spec.sourceType = GemSourceType::Gem;
-                    entries.insert_or_assign(name, std::move(spec));
-                }
+                GemSpec spec;
+                spec.name = name;
+                spec.version = version;
+                spec.remote = remote;
+                spec.sourceType = GemSourceType::Gem;
+                gemCandidates[name].push_back(std::move(spec));
             }
             i++;
         }
@@ -273,17 +284,6 @@ private:
             auto name = line.substr(0, parenOpen);
             auto versionPlatform = line.substr(parenOpen + 2, parenClose - parenOpen - 2);
 
-            // Check for platform suffix: if version contains '-', it might be platform-specific
-            // e.g. "1.15.0-x86_64-linux" vs "1.15.0"
-            bool hasPlatform = false;
-            // Find the last dash — versions like "1.2.3" have dots, platforms have dashes after version
-            // A simple heuristic: if there's a dash after any digit, it's likely a platform
-            auto dashPos = versionPlatform.find('-');
-            if (dashPos != std::string::npos) {
-                // Check if this looks like a platform suffix (contains arch/os patterns)
-                hasPlatform = true;
-            }
-
             auto sha256Pos = line.find("sha256=", parenClose);
             if (sha256Pos == std::string::npos) {
                 i++;
@@ -291,24 +291,65 @@ private:
             }
             auto hexStr = line.substr(sha256Pos + 7);
 
-            if (hasPlatform) {
-                // Platform-specific entry — only store if no platform-agnostic entry exists
-                auto key = name + "-" + versionPlatform.substr(0, dashPos);
-                if (checksums.find(key) == checksums.end()) {
-                    // Don't store platform-specific checksums; they'll be warned about later
-                }
-            } else {
-                auto key = name + "-" + versionPlatform;
-                try {
-                    checksums.insert_or_assign(key, Hash::parseNonSRIUnprefixed(hexStr, HashAlgorithm::SHA256));
-                } catch (...) {
-                    // Skip malformed checksums
-                }
+            auto key = name + "-" + versionPlatform;
+            try {
+                checksums.insert_or_assign(key, Hash::parseNonSRIUnprefixed(hexStr, HashAlgorithm::SHA256));
+            } catch (...) {
+                // Skip malformed checksums
             }
 
             i++;
         }
         return i;
+    }
+
+    void resolveGemCandidates(const std::string & nixSystem)
+    {
+        auto rubyPlatforms = nixSystemToRubyPlatforms(nixSystem);
+
+        for (auto & [name, candidates] : gemCandidates) {
+            // GIT/PATH have higher priority — skip if already in entries
+            if (entries.find(name) != entries.end())
+                continue;
+
+            if (candidates.size() == 1) {
+                entries.insert_or_assign(name, std::move(candidates[0]));
+                continue;
+            }
+
+            // Multiple candidates — platform-specific gem
+            // Try each Ruby platform in preference order
+            bool found = false;
+            for (auto & platform : rubyPlatforms) {
+                auto suffix = "-" + platform;
+                for (auto & candidate : candidates) {
+                    if (candidate.version.size() >= suffix.size() &&
+                        candidate.version.compare(
+                            candidate.version.size() - suffix.size(),
+                            suffix.size(), suffix) == 0) {
+                        entries.insert_or_assign(name, std::move(candidate));
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+
+            if (!found) {
+                // Fallback: try a platform-agnostic candidate (version has no '-')
+                for (auto & candidate : candidates) {
+                    if (candidate.version.find('-') == std::string::npos) {
+                        entries.insert_or_assign(name, std::move(candidate));
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found) {
+                warn("gem '%s' has no variant matching system '%s', skipping", name, nixSystem);
+            }
+        }
     }
 
     void mergeChecksums()
@@ -437,14 +478,15 @@ static void prim_gemLockToSources(EvalState & state, const PosIdx pos,
     auto content = lockFilePath.readFile();
 
     GemLockParser parser;
-    parser.parse(content);
+    auto nixSystem = state.settings.getCurrentSystem();
+    parser.parse(content, nixSystem);
 
     auto attrs = state.buildBindings(parser.entries.size());
     for (auto & [name, spec] : parser.entries) {
         switch (spec.sourceType) {
         case GemSourceType::Gem:
             if (!spec.sha256) {
-                warn("gem '%s' has no platform-agnostic checksum, skipping", name);
+                warn("gem '%s' has no checksum, skipping", name);
                 continue;
             }
             createGemFOD(state, spec, attrs.alloc(name));
