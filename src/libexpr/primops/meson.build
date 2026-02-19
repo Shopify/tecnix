@@ -9,5 +9,6 @@ sources += files(
   'fetchMercurial.cc',
   'fetchTree.cc',
   'fromTOML.cc',
+  'gemLockToSources.cc',
   'tectonix.cc',
 )
