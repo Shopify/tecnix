@@ -574,8 +574,21 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         git_status_options options = GIT_STATUS_OPTIONS_INIT;
         options.flags |= GIT_STATUS_OPT_INCLUDE_UNMODIFIED;
         options.flags |= GIT_STATUS_OPT_EXCLUDE_SUBMODULES;
-        if (git_status_foreach_ext(*this, &options, &statusCallbackTrampoline, &statusCallback))
-            throw Error("getting working directory status: %s", git_error_last()->message);
+        if (git_status_foreach_ext(*this, &options, &statusCallbackTrampoline, &statusCallback)) {
+            std::string errMsg(git_error_last()->message);
+            if (errMsg.find("sdir") != std::string::npos) {
+                warn("git index contains sparse directory entries (sdir) unsupported by libgit2; "
+                     "rebuilding index with 'git -c index.sparse=false sparse-checkout reapply'");
+                runProgram("git", true, {"-C", path.string(),
+                           "-c", "index.sparse=false",
+                           "sparse-checkout", "reapply"});
+                if (git_status_foreach_ext(*this, &options, &statusCallbackTrampoline, &statusCallback))
+                    throw Error("getting working directory status after sdir remediation: %s",
+                                git_error_last()->message);
+            } else {
+                throw Error("getting working directory status: %s", errMsg);
+            }
+        }
 
         /* Get submodule info. */
         auto modulesFile = path / ".gitmodules";
