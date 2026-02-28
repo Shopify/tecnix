@@ -22,6 +22,7 @@
 #include "nix/expr/gc-small-vector.hh"
 #include "nix/util/url.hh"
 #include "nix/fetchers/fetch-to-store.hh"
+#include "nix/util/archive.hh"
 #include "nix/fetchers/tarball.hh"
 #include "nix/fetchers/input-cache.hh"
 #include "nix/fetchers/git-utils.hh"
@@ -908,6 +909,37 @@ struct DirtyOverlaySourceAccessor : SourceAccessor
     std::string readFile(const CanonPath & path) override { return (isDirty(path) ? disk : base)->readFile(path); }
     std::string readLink(const CanonPath & path) override { return (isDirty(path) ? disk : base)->readLink(path); }
     std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override { return (isDirty(path) ? disk : base)->getPhysicalPath(path); }
+
+    // Modelled after GitInputScheme::getFingerprint() in git.cc which
+    // hashes dirty/deleted working-directory files into the fingerprint.
+    std::pair<CanonPath, std::optional<std::string>> getFingerprint(const CanonPath & path) override
+    {
+        auto [subpath, baseFp] = base->getFingerprint(path);
+        if (!baseFp)
+            return {path, std::nullopt};
+
+        HashSink hashSink{HashAlgorithm::SHA256};
+        auto prefix = path.isRoot() ? std::string("") : std::string(path.rel()) + "/";
+        std::vector<std::string> relevant;
+        for (auto & f : dirtyFiles)
+            if (prefix.empty() || hasPrefix(f, prefix))
+                relevant.push_back(f);
+        std::sort(relevant.begin(), relevant.end());
+        for (auto & f : relevant) {
+            auto cp = CanonPath(f);
+            auto physPath = disk->getPhysicalPath(cp);
+            auto st = disk->maybeLstat(cp);
+            if (!st) {
+                writeString("deleted:", hashSink);
+                writeString(f, hashSink);
+            } else if (physPath) {
+                writeString("modified:", hashSink);
+                writeString(f, hashSink);
+                nix::dumpPath(physPath->string(), hashSink);
+            }
+        }
+        return {path, *baseFp + ";d=" + hashSink.finish().hash.to_string(HashFormat::Base16, false)};
+    }
 
     DirEntries readDirectory(const CanonPath & path) override
     {
