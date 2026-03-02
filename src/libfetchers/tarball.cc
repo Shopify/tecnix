@@ -152,6 +152,7 @@ static DownloadTarballResult downloadTarball_(
 
     auto source = sinkToSource([&](Sink & sink) {
         FileTransferRequest req(url);
+        req.headers = headers;
         req.expectedETag = cached ? getStrAttr(cached->value, "etag") : "";
         getFileTransfer()->download(std::move(req), sink, [_res](FileTransferResult r) { *_res->lock() = r; });
     });
@@ -484,7 +485,20 @@ struct TarballInputScheme : CurlInputScheme
     {
         auto input(_input);
 
-        auto result = downloadTarball_(settings, getStrAttr(input.attrs, "url"), {}, "«" + input.to_string() + "»");
+        auto urlS = getStrAttr(input.attrs, "url");
+
+        // Build auth headers from access-tokens for the URL's host.
+        Headers headers;
+        auto parsedUrl = parseURL(urlS);
+        if (parsedUrl.authority) {
+            auto & host = parsedUrl.authority->host;
+            auto tokens = settings.accessTokens.get();
+            if (auto token = get(tokens, host)) {
+                headers.push_back({"Authorization", fmt("token %s", *token)});
+            }
+        }
+
+        auto result = downloadTarball_(settings, urlS, headers, "«" + input.to_string() + "»");
 
         if (result.immutableUrl) {
             auto immutableInput = Input::fromURL(settings, *result.immutableUrl);
