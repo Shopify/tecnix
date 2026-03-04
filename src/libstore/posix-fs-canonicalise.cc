@@ -69,7 +69,11 @@ static void canonicalisePathMetaData_(
 
 #if NIX_SUPPORT_ACL
     /* Remove extended attributes / ACLs. */
+#  ifdef __APPLE__
+    ssize_t eaSize = listxattr(path.c_str(), nullptr, 0, XATTR_NOFOLLOW);
+#  else
     ssize_t eaSize = llistxattr(path.c_str(), nullptr, 0);
+#  endif
 
     if (eaSize < 0) {
         if (errno != ENOTSUP && errno != ENODATA)
@@ -77,13 +81,22 @@ static void canonicalisePathMetaData_(
     } else if (eaSize > 0) {
         std::vector<char> eaBuf(eaSize);
 
+#  ifdef __APPLE__
+        if ((eaSize = listxattr(path.c_str(), eaBuf.data(), eaBuf.size(), XATTR_NOFOLLOW)) < 0)
+#  else
         if ((eaSize = llistxattr(path.c_str(), eaBuf.data(), eaBuf.size())) < 0)
+#  endif
             throw SysError("querying extended attributes of '%s'", path);
 
         for (auto & eaName : tokenizeString<Strings>(std::string(eaBuf.data(), eaSize), std::string("\000", 1))) {
             if (settings.ignoredAcls.get().count(eaName))
                 continue;
+
+#  ifdef __APPLE__
+            if (removexattr(path.c_str(), eaName.c_str(), XATTR_NOFOLLOW) == -1)
+#  else
             if (lremovexattr(path.c_str(), eaName.c_str()) == -1)
+#  endif
                 throw SysError("removing extended attribute '%s' from '%s'", eaName, path);
         }
     }

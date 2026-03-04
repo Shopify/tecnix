@@ -1218,7 +1218,13 @@ public:
 #if NIX_SUPPORT_ACL
     Setting<StringSet> ignoredAcls{
         this,
+#ifdef __linux__
         {"security.selinux", "system.nfs4_acl", "security.csm"},
+#elifdef __APPLE__
+        {"com.apple.provenance"},
+#else
+        {},
+#endif
         "ignored-acls",
         R"(
           A list of ACLs that should be ignored, normally Nix attempts to

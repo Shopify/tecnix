@@ -85,8 +85,8 @@ foreach funcspec : check_funcs
 endforeach
 
 has_acl_support = cxx.has_header('sys/xattr.h') \
-  and cxx.has_function('llistxattr') \
-  and cxx.has_function('lremovexattr')
+  and (cxx.has_function('llistxattr') or cxx.has_function('listxattr')) \
+  and (cxx.has_function('lremovexattr') or cxx.has_function('removexattr'))
 # Used in public header. Affects ABI!
 configdata_pub.set(
   'NIX_SUPPORT_ACL',
