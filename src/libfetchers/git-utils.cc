@@ -1,5 +1,6 @@
 #include "nix/fetchers/git-utils.hh"
 #include "nix/fetchers/git-lfs-fetch.hh"
+#include "nix/fetchers/git-promisor-backend.hh"
 #include "nix/fetchers/cache.hh"
 #include "nix/fetchers/fetch-settings.hh"
 #include "nix/util/base-n.hh"
@@ -305,6 +306,22 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
 
         if (git_odb_add_backend(odb.get(), mempackBackend, 999))
             throw Error("adding mempack backend to Git object database: %s", git_error_last()->message);
+
+        // Add promisor backend for partial clone support (lowest priority).
+        // This backend fetches missing objects (typically blobs excluded by
+        // --filter=blob:none) from the promisor remote using the git CLI.
+        // Only installed for repos that are actual partial clones; skipped
+        // for tarball caches (packfilesOnly) which never need remote fetches.
+        if (!options.packfilesOnly) {
+            git_odb_backend * promisorBackend = nullptr;
+            if (git_odb_backend_promisor(&promisorBackend, path) == GIT_OK
+                && promisorBackend != nullptr)
+            {
+                // Priority 0: tried last, after pack (1) and mempack (999) backends.
+                if (git_odb_add_backend(odb.get(), promisorBackend, 0))
+                    throw Error("adding promisor backend to Git object database: %s", git_error_last()->message);
+            }
+        }
 
         if (options.packfilesOnly) {
             if (git_repository_set_odb(repo.get(), odb.get()))

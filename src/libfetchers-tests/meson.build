@@ -40,6 +40,7 @@ subdir('nix-meson-build-support/common')
 
 sources = files(
   'access-tokens.cc',
+  'git-promisor-backend.cc',
   'git-utils.cc',
   'git.cc',
   'input.cc',

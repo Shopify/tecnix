@@ -9,6 +9,7 @@
   nix-fetchers-c,
   nix-store-test-support,
 
+  git,
   libgit2,
   rapidcheck,
   gtest,
@@ -59,6 +60,7 @@ mkMesonExecutable (finalAttrs: {
           {
             meta.broken = !stdenv.hostPlatform.emulatorAvailable buildPackages;
             buildInputs = [ writableTmpDirAsHomeHook ];
+            nativeBuildInputs = [ git ];
           }
           ''
             export _NIX_TEST_UNIT_DATA=${resolvePath ./data}
