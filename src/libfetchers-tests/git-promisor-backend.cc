@@ -39,7 +39,7 @@ static Hash gitOidToHash(const git_oid & oid)
  *   dir/nested.txt -> "nested content\n"
  *
  * The partial clone is created with --filter=blob:none, so tree and commit
- * objects are local but blob objects are missing.
+ * objects are local but blob objects are missing until fetched.
  */
 class PromisorBackendTest : public ::testing::Test
 {
@@ -81,10 +81,6 @@ protected:
     }
 
 private:
-    /**
-     * Create a bare repo with a commit containing hello.txt and dir/nested.txt.
-     * Uses git CLI to ensure it's a proper repo that can serve as a promisor remote.
-     */
     void createFullRepo()
     {
         auto workDir = tmpDir / "full-work";
@@ -92,31 +88,23 @@ private:
         runGit(workDir, {"config", "user.email", "test@test.com"});
         runGit(workDir, {"config", "user.name", "Test"});
 
-        // Create files
         std::filesystem::create_directories(workDir / "dir");
         writeTestFile(workDir / "hello.txt", "hello world\n");
         writeTestFile(workDir / "dir" / "nested.txt", "nested content\n");
 
-        // Commit
         runGit(workDir, {"add", "."});
         runGit(workDir, {"commit", "-m", "initial commit"});
 
-        // Record OIDs
         helloBlobOid = parseOid(runGitOutput(workDir, {"rev-parse", "HEAD:hello.txt"}));
         nestedBlobOid = parseOid(runGitOutput(workDir, {"rev-parse", "HEAD:dir/nested.txt"}));
         rootTreeOid = parseOid(runGitOutput(workDir, {"rev-parse", "HEAD^{tree}"}));
         commitOid = parseOid(runGitOutput(workDir, {"rev-parse", "HEAD"}));
 
-        // Clone to a bare repo that will serve as the "remote"
         runGit(tmpDir, {"clone", "--bare", workDir.string(), fullRepoPath.string()});
     }
 
-    /**
-     * Create a blobless partial clone from the full repo.
-     */
     void createPartialClone()
     {
-        // Use file:// protocol to enable partial clone from local repo
         runGit(
             tmpDir,
             {"clone", "--filter=blob:none", "--no-checkout",
@@ -153,7 +141,6 @@ private:
         });
         if (status != 0)
             throw Error("git command failed in %s (status %d): %s", cwd.string(), status, output);
-        // Trim trailing newline
         while (!output.empty() && output.back() == '\n')
             output.pop_back();
         return output;
@@ -197,7 +184,6 @@ TEST_F(PromisorBackendTest, backend_created_for_partial_clone)
     ASSERT_EQ(git_odb_backend_promisor(&backend, partialGitDir()), GIT_OK);
     EXPECT_NE(backend, nullptr);
 
-    // Clean up — normally libgit2 would call free when the ODB is destroyed
     if (backend && backend->free)
         backend->free(backend);
 }
@@ -210,37 +196,43 @@ TEST_F(PromisorBackendTest, backend_not_created_for_full_clone)
 }
 
 // ===========================================================================
-// Object read tests via GitRepo (full integration with promisor backend)
+// Batch flush tests
+// ===========================================================================
+
+TEST_F(PromisorBackendTest, flush_with_no_pending_returns_false)
+{
+    git_odb_backend * backend = nullptr;
+    ASSERT_EQ(git_odb_backend_promisor(&backend, partialGitDir()), GIT_OK);
+    ASSERT_NE(backend, nullptr);
+
+    // Nothing pending — flush should return false
+    EXPECT_FALSE(git_promisor_backend_flush(backend));
+
+    if (backend->free)
+        backend->free(backend);
+}
+
+TEST_F(PromisorBackendTest, flush_null_backend_is_noop)
+{
+    EXPECT_FALSE(git_promisor_backend_flush(nullptr));
+}
+
+// ===========================================================================
+// Object read tests via GitSourceAccessor (flush+retry integration)
 // ===========================================================================
 
 TEST_F(PromisorBackendTest, tree_objects_available_locally)
 {
-    // Tree objects should be present in a blobless clone (only blobs are filtered)
-    auto repo = GitRepo::openRepo(partialGitDir(), false, true);
+    // Tree objects are always local in a blobless clone
+    auto repo = GitRepo::openRepo(partialGitDir(), {.bare = true});
     EXPECT_TRUE(repo->hasObject(gitOidToHash(rootTreeOid)));
-}
-
-TEST_F(PromisorBackendTest, read_missing_blob_triggers_fetch)
-{
-    // The promisor backend should transparently fetch the missing blob
-    auto repo = GitRepo::openRepo(partialGitDir(), false, true);
-    EXPECT_TRUE(repo->hasObject(gitOidToHash(helloBlobOid)));
-}
-
-TEST_F(PromisorBackendTest, read_nonexistent_oid_fails_cleanly)
-{
-    auto repo = GitRepo::openRepo(partialGitDir(), false, true);
-
-    // Fabricated OID that doesn't exist anywhere — should fail without crashing
-    git_oid fakeOid;
-    git_oid_fromstr(&fakeOid, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-    EXPECT_FALSE(repo->hasObject(gitOidToHash(fakeOid)));
 }
 
 TEST_F(PromisorBackendTest, accessor_reads_file_from_partial_clone)
 {
-    // Integration test: use GitSourceAccessor (same path as Tecnix zone eval)
-    auto repo = GitRepo::openRepo(partialGitDir(), false, true);
+    // The key integration test: GitSourceAccessor::getBlob() should
+    // detect the failed lookup, call flushPromisedObjects(), and retry.
+    auto repo = GitRepo::openRepo(partialGitDir(), {.bare = true});
     auto accessor = repo->getAccessor(gitOidToHash(commitOid), {}, "test");
 
     auto content = accessor->readFile(CanonPath("hello.txt"));
@@ -252,32 +244,41 @@ TEST_F(PromisorBackendTest, accessor_reads_file_from_partial_clone)
 
 TEST_F(PromisorBackendTest, double_read_uses_cached_blob)
 {
-    auto repo = GitRepo::openRepo(partialGitDir(), false, true);
+    auto repo = GitRepo::openRepo(partialGitDir(), {.bare = true});
     auto accessor = repo->getAccessor(gitOidToHash(commitOid), {}, "test");
 
-    // First read triggers fetch
     auto content1 = accessor->readFile(CanonPath("hello.txt"));
     EXPECT_EQ(content1, "hello world\n");
 
-    // Second read should use the now-local packfile
+    // Second read uses the now-local packfile — no fetch needed
     auto content2 = accessor->readFile(CanonPath("hello.txt"));
     EXPECT_EQ(content2, "hello world\n");
+}
+
+TEST_F(PromisorBackendTest, read_nonexistent_oid_fails_cleanly)
+{
+    auto repo = GitRepo::openRepo(partialGitDir(), {.bare = true});
+
+    git_oid fakeOid;
+    git_oid_fromstr(&fakeOid, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+    EXPECT_FALSE(repo->hasObject(gitOidToHash(fakeOid)));
 }
 
 TEST_F(PromisorBackendTest, directory_listing_works_without_blob_fetch)
 {
     // Directory listing only needs tree objects, which are local
-    auto repo = GitRepo::openRepo(partialGitDir(), false, true);
+    auto repo = GitRepo::openRepo(partialGitDir(), {.bare = true});
     auto accessor = repo->getAccessor(gitOidToHash(commitOid), {}, "test");
 
     auto entries = accessor->readDirectory(CanonPath::root);
     EXPECT_EQ(entries.size(), 2u); // hello.txt, dir/
 }
 
-TEST_F(PromisorBackendTest, concurrent_blob_reads)
+TEST_F(PromisorBackendTest, concurrent_blob_reads_batch)
 {
-    // Verify thread safety with concurrent fetches
-    auto repo = GitRepo::openRepo(partialGitDir(), false, true);
+    // With batched fetching, concurrent threads accumulate OIDs.
+    // The first thread to hit a flush collects everyone's OIDs.
+    auto repo = GitRepo::openRepo(partialGitDir(), {.bare = true});
 
     std::vector<std::thread> threads;
     std::string result0, result1;
@@ -314,13 +315,12 @@ TEST_F(PromisorBackendTest, concurrent_blob_reads)
 }
 
 // ===========================================================================
-// Full clone (non-partial) should work identically (no promisor backend needed)
+// Full clone (non-partial) should work identically
 // ===========================================================================
 
 TEST_F(PromisorBackendTest, full_clone_works_without_promisor)
 {
-    // Opening a full clone should work normally — promisor backend is not installed
-    auto repo = GitRepo::openRepo(fullRepoPath, false, true);
+    auto repo = GitRepo::openRepo(fullRepoPath, {.bare = true});
     EXPECT_TRUE(repo->hasObject(gitOidToHash(helloBlobOid)));
     EXPECT_TRUE(repo->hasObject(gitOidToHash(rootTreeOid)));
 }

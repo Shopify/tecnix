@@ -267,6 +267,14 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
      */
     git_odb_backend * packBackend = nullptr;
 
+    /**
+     * Promisor ODB backend for partial clone support.
+     * Accumulates missing OIDs for batch fetching.
+     * Owned by `repo` (freed when the ODB is destroyed).
+     * nullptr if the repo is not a partial clone.
+     */
+    git_odb_backend * promisorBackend = nullptr;
+
     GitRepoImpl(std::filesystem::path _path, Options _options)
         : path(std::move(_path))
         , options(_options)
@@ -313,13 +321,13 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         // Only installed for repos that are actual partial clones; skipped
         // for tarball caches (packfilesOnly) which never need remote fetches.
         if (!options.packfilesOnly) {
-            git_odb_backend * promisorBackend = nullptr;
-            if (git_odb_backend_promisor(&promisorBackend, path) == GIT_OK
-                && promisorBackend != nullptr)
+            git_odb_backend * pb = nullptr;
+            if (git_odb_backend_promisor(&pb, path) == GIT_OK && pb != nullptr)
             {
                 // Priority 0: tried last, after pack (1) and mempack (999) backends.
-                if (git_odb_add_backend(odb.get(), promisorBackend, 0))
+                if (git_odb_add_backend(odb.get(), pb, 0))
                     throw Error("adding promisor backend to Git object database: %s", git_error_last()->message);
+                promisorBackend = pb;
             }
         }
 
@@ -332,6 +340,19 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
     operator git_repository *()
     {
         return repo.get();
+    }
+
+    /**
+     * Flush all pending promisor object fetches in a single batch.
+     * Returns true if objects were fetched, false if no promisor backend
+     * is installed or nothing was pending.
+     *
+     * Thread-safe: multiple threads can accumulate OIDs via read(),
+     * then one thread calls this to fetch them all at once.
+     */
+    bool flushPromisedObjects()
+    {
+        return git_promisor_backend_flush(promisorBackend);
     }
 
     void flush() override
@@ -1098,8 +1119,17 @@ struct GitSourceAccessor : SourceAccessor
         }
 
         Blob blob;
-        if (git_tree_entry_to_object((git_object **) (git_blob **) Setter(blob), *state.repo, entry))
+        if (git_tree_entry_to_object((git_object **) (git_blob **) Setter(blob), *state.repo, entry)) {
+            // Blob lookup failed — if we have a promisor backend, flush
+            // all accumulated OIDs in a single batch fetch and retry.
+            // With parallel evaluation, other threads may have also
+            // accumulated missing OIDs, so the flush picks them all up.
+            if (state.repo->flushPromisedObjects()) {
+                if (git_tree_entry_to_object((git_object **) (git_blob **) Setter(blob), *state.repo, entry) == 0)
+                    return blob;
+            }
             throw Error("looking up file '%s': %s", showPath(path), git_error_last()->message);
+        }
 
         return blob;
     }

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <mutex>
 #include <set>
+#include <vector>
 
 namespace nix {
 
@@ -30,6 +31,19 @@ struct GitOidLess
  *
  * This struct uses C-style inheritance: `parent` must be the first member
  * so that a pointer to PromisorBackend can be cast to git_odb_backend*.
+ *
+ * ## Batching strategy
+ *
+ * Instead of fetching each missing blob individually (N round-trips),
+ * the backend accumulates OIDs of missing objects. When the caller
+ * detects a lookup failure, it calls git_promisor_backend_flush() which
+ * fetches ALL accumulated OIDs in a single `git fetch` invocation,
+ * then the caller retries.
+ *
+ * With parallel evaluation (builtins.parallel), multiple threads hit
+ * missing blobs concurrently. Their OIDs accumulate in pendingOids
+ * before any thread triggers a flush. The first thread to flush
+ * collects everyone's pending OIDs in one batch.
  */
 struct PromisorBackend
 {
@@ -38,124 +52,134 @@ struct PromisorBackend
     std::filesystem::path repoPath;
     std::string gitBin;
 
+    std::mutex mutex;
+
     /**
-     * Track OIDs we've already attempted to fetch in this backend instance.
-     * Prevents infinite recursion when git_odb_read() re-invokes our read()
-     * callback after we fetch and refresh.
+     * OIDs that have been requested via read() but not yet fetched.
+     * Accumulated until flushPendingFetches() is called.
      */
-    std::mutex fetchedMutex;
-    std::set<git_oid, GitOidLess> alreadyFetched;
-};
+    std::set<git_oid, GitOidLess> pendingOids;
 
-/**
- * Fetch a single object from the promisor remote using the git CLI.
- *
- * Uses `git -C <repo> fetch origin <oid>` which triggers the promisor
- * remote's lazy fetch mechanism for the specific object.
- */
-static int fetchObject(PromisorBackend * backend, const git_oid * oid)
-{
-    // GIT_OID_SHA1_HEXSIZE is 40; use 64+1 to also cover SHA-256 if enabled.
-    char oidStr[65];
-    git_oid_tostr(oidStr, sizeof(oidStr), oid);
+    /**
+     * OIDs that have already been fetched (or attempted).
+     * Prevents re-accumulating OIDs on retry after flush.
+     */
+    std::set<git_oid, GitOidLess> fetchedOids;
 
-    debug("promisor backend: fetching object %s from %s", oidStr, backend->repoPath.string());
+    /**
+     * Fetch a batch of objects from the promisor remote in a single
+     * `git fetch` invocation.
+     *
+     * @return GIT_OK on success, GIT_ENOTFOUND if fetch fails.
+     */
+    int fetchObjects(const std::vector<git_oid> & oids)
+    {
+        if (oids.empty())
+            return GIT_OK;
 
-    try {
-        // Use `git fetch origin <oid>` which handles promisor remote
-        // negotiation, authentication, and protocol details.
-        //
-        // We set fetch.negotiationAlgorithm=noop to skip negotiation
-        // overhead since we know exactly which object we want and the
-        // promisor remote is guaranteed to have it.
-        auto [status, output] = runProgram(RunOptions{
-            .program = backend->gitBin,
-            .args =
-                {
-                    "-C",
-                    backend->repoPath.string(),
-                    "--git-dir",
-                    ".",
-                    "-c",
-                    "fetch.negotiationAlgorithm=noop",
-                    "fetch",
-                    "origin",
-                    oidStr,
-                },
-            .mergeStderrToStdout = true,
-        });
-        if (status != 0) {
-            debug("promisor backend: git fetch for %s exited with status %d: %s", oidStr, status, output);
+        Strings args = {
+            "-C",
+            repoPath.string(),
+            "--git-dir",
+            ".",
+            "-c",
+            "fetch.negotiationAlgorithm=noop",
+            "fetch",
+            "origin",
+        };
+
+        // Append all OIDs as refspecs
+        for (const auto & oid : oids) {
+            char oidStr[65];
+            git_oid_tostr(oidStr, sizeof(oidStr), &oid);
+            args.push_back(oidStr);
+        }
+
+        debug("promisor backend: batch-fetching %d objects from %s", oids.size(), repoPath.string());
+
+        try {
+            auto [status, output] = runProgram(RunOptions{
+                .program = gitBin,
+                .args = args,
+                .mergeStderrToStdout = true,
+            });
+            if (status != 0) {
+                debug("promisor backend: git fetch exited with status %d: %s", status, output);
+                return GIT_ENOTFOUND;
+            }
+            return GIT_OK;
+        } catch (const std::exception & e) {
+            printError("promisor backend: failed to fetch batch: %s", e.what());
             return GIT_ENOTFOUND;
         }
-        return GIT_OK;
-    } catch (const std::exception & e) {
-        printError("promisor backend: failed to fetch %s: %s", oidStr, e.what());
-        return GIT_ENOTFOUND;
     }
-}
+
+    /**
+     * Flush all pending OIDs: fetch them in one batch, then refresh
+     * the ODB so the pack backend picks up the new packfile.
+     *
+     * @return true if objects were fetched, false if nothing was pending.
+     */
+    bool flushPendingFetches()
+    {
+        std::vector<git_oid> toFetch;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (pendingOids.empty())
+                return false;
+            toFetch.assign(pendingOids.begin(), pendingOids.end());
+            // Move all pending → fetched (even before the actual fetch,
+            // to prevent re-accumulation if read() is called concurrently)
+            for (const auto & oid : toFetch)
+                fetchedOids.insert(oid);
+            pendingOids.clear();
+        }
+
+        fetchObjects(toFetch);
+
+        // Refresh the ODB so the pack backend picks up new packfiles.
+        git_odb * odb = parent.odb;
+        if (odb)
+            git_odb_refresh(odb);
+
+        return true;
+    }
+};
 
 /**
  * libgit2 ODB backend callback: read an object.
  *
- * Called when higher-priority backends (pack, mempack) fail to find an object.
- * Fetches the missing object from the promisor remote, refreshes the ODB,
- * then re-reads from the ODB (which will find it in the newly-fetched packfile).
+ * In batch mode: accumulates the OID in pendingOids and returns
+ * GIT_ENOTFOUND. The caller is expected to call
+ * git_promisor_backend_flush() then retry.
  */
 static int promisor_backend_read(
     void ** data_p, size_t * len_p, git_object_t * type_p, git_odb_backend * _backend, const git_oid * oid)
 {
+    (void) data_p;
+    (void) len_p;
+    (void) type_p;
+
     auto * backend = reinterpret_cast<PromisorBackend *>(_backend);
 
-    // Prevent infinite recursion: if we've already tried to fetch this oid,
-    // return ENOTFOUND immediately. This happens when git_odb_read() below
-    // re-invokes the entire backend stack including this backend.
-    {
-        std::lock_guard<std::mutex> lock(backend->fetchedMutex);
-        if (backend->alreadyFetched.count(*oid))
-            return GIT_ENOTFOUND;
-        backend->alreadyFetched.insert(*oid);
-    }
+    std::lock_guard<std::mutex> lock(backend->mutex);
 
-    // Fetch the object from the promisor remote
-    if (fetchObject(backend, oid) != GIT_OK)
+    // If we already tried to fetch this OID, don't re-accumulate.
+    // The pack backend should have it if the fetch succeeded.
+    // If it doesn't, the object genuinely doesn't exist.
+    if (backend->fetchedOids.count(*oid))
         return GIT_ENOTFOUND;
 
-    // The parent.odb pointer is set by libgit2 when the backend is added
-    // to an ODB via git_odb_add_backend(). Refresh the ODB so the pack
-    // backend picks up the newly-fetched packfile.
-    git_odb * odb = backend->parent.odb;
-    if (!odb)
-        return GIT_ERROR;
-
-    git_odb_refresh(odb);
-
-    // Re-read from the ODB. This will invoke all backends (including us),
-    // but our alreadyFetched check above prevents recursion. The pack
-    // backend should now find the object in the new packfile.
-    git_odb_object * obj = nullptr;
-    if (git_odb_read(&obj, odb, oid) != GIT_OK)
-        return GIT_ENOTFOUND;
-
-    // Copy data out — the caller (libgit2) owns the returned buffer.
-    // Use git_odb_backend_data_alloc so libgit2 can properly free it.
-    *len_p = git_odb_object_size(obj);
-    *type_p = git_odb_object_type(obj);
-    *data_p = git_odb_backend_data_alloc(_backend, *len_p);
-    if (!*data_p) {
-        git_odb_object_free(obj);
-        return GIT_ERROR;
-    }
-    std::memcpy(*data_p, git_odb_object_data(obj), *len_p);
-    git_odb_object_free(obj);
-    return GIT_OK;
+    // Accumulate for batch fetch
+    backend->pendingOids.insert(*oid);
+    return GIT_ENOTFOUND;
 }
 
 /**
  * libgit2 ODB backend callback: check if an object exists.
  *
- * We return 0 ("no") to avoid proactively fetching objects just for
- * existence checks. Objects are only fetched on actual read attempts.
+ * Returns 0 ("no") — we don't proactively fetch for existence checks.
  */
 static int promisor_backend_exists(git_odb_backend * /* _backend */, const git_oid * /* oid */)
 {
@@ -174,8 +198,6 @@ static void promisor_backend_free(git_odb_backend * _backend)
 bool isPromisorRepo(const std::filesystem::path & repoPath)
 {
     // Strategy 1: Check for .promisor sentinel files.
-    // When git fetches from a promisor remote, it creates a .promisor
-    // file alongside each packfile received from that remote.
     auto packDir = repoPath / "objects" / "pack";
     if (std::filesystem::exists(packDir)) {
         std::error_code ec;
@@ -186,8 +208,6 @@ bool isPromisorRepo(const std::filesystem::path & repoPath)
     }
 
     // Strategy 2: Check git config for remote.<name>.promisor = true.
-    // This handles cases where the promisor files might not exist yet
-    // (e.g., freshly configured partial clone before first fetch).
     auto configPath = repoPath / "config";
     if (std::filesystem::exists(configPath)) {
         git_config * cfg = nullptr;
@@ -211,14 +231,19 @@ bool isPromisorRepo(const std::filesystem::path & repoPath)
     return false;
 }
 
+bool git_promisor_backend_flush(git_odb_backend * backend)
+{
+    if (!backend)
+        return false;
+    return reinterpret_cast<PromisorBackend *>(backend)->flushPendingFetches();
+}
+
 int git_odb_backend_promisor(
     git_odb_backend ** out, const std::filesystem::path & repoPath, const std::string & gitBin)
 {
     *out = nullptr;
 
     if (!isPromisorRepo(repoPath)) {
-        // Not a partial clone — don't install the backend.
-        // Returning GIT_OK with *out = nullptr signals "not needed".
         return GIT_OK;
     }
 
@@ -229,8 +254,6 @@ int git_odb_backend_promisor(
     backend->parent.read = promisor_backend_read;
     backend->parent.exists = promisor_backend_exists;
     backend->parent.free = promisor_backend_free;
-    // read_prefix, read_header, write, etc. are left null.
-    // libgit2 will fall back to read() for read_prefix/read_header.
 
     backend->repoPath = repoPath;
     backend->gitBin = gitBin;
