@@ -388,6 +388,8 @@ void mainWrapped(int argc, char ** argv)
 
     initNix();
     initGC();
+
+    experimentalFeatureSettings.set("extra-experimental-features", "pipe-operators");
     flakeSettings.configureEvalSettings(evalSettings);
 
     /* Set the build hook location
