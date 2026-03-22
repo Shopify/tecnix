@@ -44,6 +44,7 @@ headers = [ config_pub_h ] + files(
   'export-import.hh',
   'filetransfer.hh',
   'gc-store.hh',
+  'gcs-binary-cache-store.hh',
   'gcs-creds.hh',
   'gcs-url.hh',
   'global-paths.hh',
