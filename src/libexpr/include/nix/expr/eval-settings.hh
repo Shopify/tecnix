@@ -438,6 +438,15 @@ struct EvalSettings : Config
           for tectonix builtins. This enables local development workflows where changes
           are visible before committing.
         )"};
+
+    Setting<bool> tectonixAutoSparseCheckout{
+        this,
+        true,
+        "tectonix-auto-sparse-checkout",
+        R"(
+          When true, automatically add zones to the git sparse checkout
+          when they are referenced but not present on disk.
+        )"};
 };
 
 /**

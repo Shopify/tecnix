@@ -565,6 +565,15 @@ private:
      */
     mutable SharedSync<std::map<std::string, StorePath>> tectonixCheckoutZoneCache_;
 
+    /** Mutex for serializing sparse checkout modifications */
+    mutable std::mutex sparseCheckoutMutex_;
+
+    /** Resolve .git to actual git directory (handles worktrees). */
+    std::filesystem::path resolveGitDir() const;
+
+    /** Auto-add a zone to sparse checkout if not on disk. Returns true if added. */
+    bool ensureZoneInSparseCheckout(std::string_view zonePath);
+
     /**
      * Mount a zone by tree SHA, returning a (potentially virtual) store path.
      * Caches by tree SHA for deduplication across world revisions.
