@@ -173,10 +173,10 @@ static RegisterPrimOp primop_unsafeTectonixInternalTree({
 });
 
 // ============================================================================
-// builtins.unsafeTectonixInternalZoneSrc zonePath
-// Returns a store path containing the zone source
-// With lazy-trees enabled, returns a virtual store path that is only
-// materialized when used as a derivation input.
+// builtins.unsafeTectonixInternalZoneSrc zonePath (DEPRECATED)
+// Returns a store path string containing the zone source.
+// Deprecated: use unsafeTectonixInternalZonePath instead, which returns a
+// path value enabling sub-path-granular lazy imports.
 // ============================================================================
 static void prim_unsafeTectonixInternalZoneSrc(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
@@ -193,20 +193,56 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneSrc({
     .name = "__unsafeTectonixInternalZoneSrc",
     .args = {"zonePath"},
     .doc = R"(
-      Get the source of a zone as a store path.
+      Deprecated: use `builtins.unsafeTectonixInternalZonePath` instead.
 
-      With `lazy-trees = true`, returns a virtual store path that is only
-      materialized when used as a derivation input (devirtualized).
-
-      In source-available mode with uncommitted changes, uses checkout content
-      (always eager for dirty zones).
+      Get the source of a zone as a store path string. String interpolation
+      on the result (e.g. `"${src}/file"`) triggers eager fetchToStore of the
+      entire zone. Prefer `unsafeTectonixInternalZonePath` which returns a
+      path value where sub-paths are independently importable.
 
       Example: `builtins.unsafeTectonixInternalZoneSrc "//areas/tools/tec"`
+    )",
+    .fun = prim_unsafeTectonixInternalZoneSrc,
+});
+
+// ============================================================================
+// builtins.unsafeTectonixInternalZonePath zonePath
+// Returns a path into the zone source tree backed by a lazy accessor.
+// Sub-paths via path arithmetic are independently importable — only the
+// referenced subtree is copied to the store when used as a derivation input.
+// ============================================================================
+static void prim_unsafeTectonixInternalZonePath(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zonePath = state.forceStringNoCtx(*args[0], pos,
+        "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalZonePath");
+
+    validateZonePath(state, pos, zonePath);
+
+    auto storePath = state.getZoneStorePath(zonePath);
+    state.allowPath(storePath);
+    v.mkPath(state.storePath(storePath), state.mem);
+}
+
+static RegisterPrimOp primop_unsafeTectonixInternalZonePath({
+    .name = "__unsafeTectonixInternalZonePath",
+    .args = {"zonePath"},
+    .doc = R"(
+      Get the source of a zone as a path value.
+
+      Returns a path backed by the zone's lazy accessor. Sub-paths created
+      via path arithmetic (e.g. `src + "/subdir"`) are independently
+      importable — only the referenced subtree is copied to the store when
+      used as a derivation input.
+
+      In source-available mode with uncommitted changes, uses checkout content
+      overlaid on the git tree.
+
+      Example: `builtins.unsafeTectonixInternalZonePath "//areas/tools/tec"`
 
       Uses `--tectonix-git-dir` (defaults to `~/world/git`) and requires
       `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_unsafeTectonixInternalZoneSrc,
+    .fun = prim_unsafeTectonixInternalZonePath,
 });
 
 // ============================================================================
