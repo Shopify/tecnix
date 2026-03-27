@@ -566,6 +566,18 @@ private:
     mutable SharedSync<std::map<std::string, StorePath>> tectonixCheckoutZoneCache_;
 
     /**
+     * Cache (tree SHA, subpath) → virtual store path for lazy zone subpath mounts.
+     * Thread-safe for eval-cores > 1.
+     */
+    mutable SharedSync<std::map<std::pair<Hash, std::string>, StorePath>> tectonixZoneSubpathCache_;
+
+    /**
+     * Cache (zone path, subpath) → virtual store path for lazy checkout zone subpath mounts.
+     * Thread-safe for eval-cores > 1.
+     */
+    mutable SharedSync<std::map<std::pair<std::string, std::string>, StorePath>> tectonixCheckoutZoneSubpathCache_;
+
+    /**
      * Mount a zone by tree SHA, returning a (potentially virtual) store path.
      * Caches by tree SHA for deduplication across world revisions.
      */
@@ -576,6 +588,17 @@ private:
      * With lazy-trees enabled, mounts lazily and caches by zone path.
      */
     StorePath getZoneFromCheckout(std::string_view zonePath, const boost::unordered_flat_set<std::string> * dirtyFiles = nullptr);
+
+    /**
+     * Mount a zone subpath by tree SHA, returning a virtual store path
+     * containing only the subpath contents.
+     */
+    StorePath mountZoneSubpathByTreeSha(const Hash & treeSha, std::string_view zonePath, std::string_view subpath);
+
+    /**
+     * Get zone subpath store path from checkout (for dirty zones).
+     */
+    StorePath getZoneSubpathFromCheckout(std::string_view zonePath, std::string_view subpath, const boost::unordered_flat_set<std::string> * dirtyFiles = nullptr);
 
 public:
 
@@ -655,6 +678,12 @@ public:
      * For lazy-trees disabled: eager-copies from git
      */
     StorePath getZoneStorePath(std::string_view zonePath);
+
+    /**
+     * Get a store path containing only a subpath of a zone.
+     * Like getZoneStorePath but scoped to a specific file or subdirectory.
+     */
+    StorePath getZoneSubpathStorePath(std::string_view zonePath, std::string_view subpath);
 
     /**
      * Return a `SourcePath` that refers to `path` in the root
