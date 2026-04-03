@@ -681,19 +681,28 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
             tectonixDirtyZones[zonePath] = {};
         }
 
+        // Create git command environment with environment variables
+        // GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR removed since they affect
+        // git repository discovery
+        StringMap gitEnvironment = getEnv();
+        gitEnvironment.erase("GIT_DIR");
+        gitEnvironment.erase("GIT_WORK_TREE");
+        gitEnvironment.erase("GIT_COMMON_DIR");
+
         // Get dirty files via git status with -z for NUL-separated output
         // This handles filenames with special characters correctly
         auto checkoutPath = settings.tectonixCheckoutPath.get();
-        std::string gitStatusOutput;
-        try {
-            gitStatusOutput = runProgram("git", true, {"-C", checkoutPath, "status", "--porcelain", "-z"});
-        } catch (ExecError & e) {
+        auto [gitStatusCode, gitStatusOutput] = runProgram(
+            {.program = "git",
+             .args = {"-C", checkoutPath, "status", "--porcelain", "-z"},
+             .environment = gitEnvironment});
+        if (!statusOk(gitStatusCode)) {
             // If git status fails, treat all zones as clean (fallback)
             // This ensures call_once completes and we don't retry with partial state
             warn(
-                "failed to get git status for dirty zone detection in '%s': %s; treating all zones as clean",
+                "failed to get git status for dirty zone detection in '%s': program 'git' %s; treating all zones as clean",
                 checkoutPath,
-                e.what());
+                statusToString(gitStatusCode));
             return;
         }
 
