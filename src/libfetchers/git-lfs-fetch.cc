@@ -143,6 +143,15 @@ static std::string getLfsEndpointUrl(git_repository * repo)
                 return value;
             }
         }
+
+        GitConfigEntry remoteEntry;
+        if (!git_config_get_entry(Setter(remoteEntry), config.get(), "remote.origin.lfsurl")) {
+            auto value = std::string(remoteEntry->value);
+            if (!value.empty()) {
+                debug("Found explicit remote.origin.lfsurl value: %s", value);
+                return value;
+            }
+        }
     }
 
     git_remote * remote = nullptr;
