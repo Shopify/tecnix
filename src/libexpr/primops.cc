@@ -18,6 +18,8 @@
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/util/sort.hh"
 #include "nix/util/mounted-source-accessor.hh"
+#include "nix/expr/provenance.hh"
+#include "nix/util/override-provenance-source-accessor.hh"
 
 #include <boost/container/small_vector.hpp>
 #include <boost/unordered/concurrent_flat_map.hpp>
@@ -165,24 +167,20 @@ StringMap EvalState::realiseContext(const NixStringContext & context, StorePathS
     return res;
 }
 
-static SourcePath realisePath(
-    EvalState & state,
-    const PosIdx pos,
-    Value & v,
-    std::optional<SymlinkResolution> resolveSymlinks = SymlinkResolution::Full)
+SourcePath EvalState::realisePath(const PosIdx pos, Value & v, std::optional<SymlinkResolution> resolveSymlinks)
 {
     NixStringContext context;
 
-    auto path = state.coerceToPath(noPos, v, context, "while realising the context of a path");
+    auto path = coerceToPath(noPos, v, context, "while realising the context of a path");
 
     try {
-        if (!context.empty() && path.accessor == state.rootFS) {
-            auto rewrites = state.realiseContext(context);
+        if (!context.empty() && path.accessor == rootFS) {
+            auto rewrites = realiseContext(context);
             path = {path.accessor, CanonPath(rewriteStrings(path.path.abs(), rewrites))};
         }
         return resolveSymlinks ? path.resolveSymlinks(*resolveSymlinks) : path;
     } catch (Error & e) {
-        e.addTrace(state.positions[pos], "while realising the context of path '%s'", path);
+        e.addTrace(positions[pos], "while realising the context of path '%s'", path);
         throw;
     }
 }
@@ -302,7 +300,7 @@ static void scopedImport(EvalState & state, const PosIdx pos, SourcePath & path,
    argument. */
 static void import(EvalState & state, const PosIdx pos, Value & vPath, Value * vScope, Value & v)
 {
-    auto path = realisePath(state, pos, vPath, std::nullopt);
+    auto path = state.realisePath(pos, vPath, std::nullopt);
     auto path2 = path.path.abs();
 
     // FIXME
@@ -456,7 +454,7 @@ extern "C" typedef void (*ValueInitializer)(EvalState & state, Value & v);
 /* Load a ValueInitializer from a DSO and return whatever it initializes */
 void prim_importNative(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto path = realisePath(state, pos, *args[0]);
+    auto path = state.realisePath(pos, *args[0]);
 
     std::string sym(
         state.forceStringNoCtx(*args[1], pos, "while evaluating the second argument passed to builtins.importNative"));
@@ -1383,16 +1381,15 @@ static void prim_second(EvalState & state, const PosIdx pos, Value ** args, Valu
  * Derivations
  *************************************************************/
 
-static void derivationStrictInternal(EvalState & state, std::string_view name, const Bindings * attrs, Value & v);
+static void derivationStrictInternal(
+    EvalState & state,
+    std::string_view name,
+    const Bindings * attrs,
+    Value & v,
+    std::shared_ptr<const Provenance> provenance,
+    bool acceptMeta);
 
-/* Construct (as a unobservable side effect) a Nix derivation
-   expression that performs the derivation described by the argument
-   set.  Returns the original set extended with the following
-   attributes: `outPath' containing the primary output path of the
-   derivation; `drvPath' containing the path of the Nix expression;
-   and `type' set to `derivation' to indicate that this is a
-   derivation. */
-static void prim_derivationStrict(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+static void prim_derivationStrictGeneric(EvalState & state, const PosIdx pos, Value ** args, Value & v, bool acceptMeta)
 {
     state.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.derivationStrict");
 
@@ -1412,7 +1409,7 @@ static void prim_derivationStrict(EvalState & state, const PosIdx pos, Value ** 
     }
 
     try {
-        derivationStrictInternal(state, drvName, attrs, v);
+        derivationStrictInternal(state, drvName, attrs, v, state.evalContext.provenance, acceptMeta);
     } catch (Error & e) {
         Pos pos = state.positions[nameAttr->pos];
         /*
@@ -1443,6 +1440,18 @@ static void prim_derivationStrict(EvalState & state, const PosIdx pos, Value ** 
     }
 }
 
+/* Construct a Nix derivation with metadata provenance */
+static RegisterPrimOp primop_derivationStrictWithMeta(
+    PrimOp{
+        .name = "derivationStrictWithMeta",
+        .arity = 1,
+        .fun =
+            [](EvalState & state, const PosIdx pos, Value ** args, Value & v) {
+                prim_derivationStrictGeneric(state, pos, args, v, /*acceptMeta=*/true);
+            },
+        .internal = true,
+    });
+
 /**
  * Early validation for the derivation name, for better error message.
  * It is checked again when constructing store paths.
@@ -1466,7 +1475,13 @@ static void checkDerivationName(EvalState & state, std::string_view drvName)
     }
 }
 
-static void derivationStrictInternal(EvalState & state, std::string_view drvName, const Bindings * attrs, Value & v)
+static void derivationStrictInternal(
+    EvalState & state,
+    std::string_view drvName,
+    const Bindings * attrs,
+    Value & v,
+    std::shared_ptr<const Provenance> provenance,
+    bool acceptMeta)
 {
     checkDerivationName(state, drvName);
 
@@ -1591,7 +1606,19 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
                the environment. */
             default:
 
-                if (jsonObject) {
+                if (acceptMeta && i->name == EvalState::s.__meta) {
+                    if (experimentalFeatureSettings.isEnabled(Xp::Provenance)) {
+                        state.forceAttrs(*i->value, pos, "while evaluating __meta");
+                        NixStringContext ctx;
+                        auto obj = printValueAsJSON(state, true, *i->value, pos, ctx);
+
+                        if (!ctx.empty())
+                            throw Error("Derivation __meta provenance can't contain string context like store paths.");
+
+                        provenance =
+                            std::make_shared<const DerivationProvenance>(provenance, make_ref<nlohmann::json>(obj));
+                    }
+                } else if (jsonObject) {
 
                     if (i->name == state.s.structuredAttrs)
                         continue;
@@ -1851,7 +1878,7 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
     }
 
     /* Write the resulting term into the Nix store directory. */
-    auto drvPath = writeDerivation(*state.store, *state.asyncPathWriter, drv, state.repair);
+    auto drvPath = writeDerivation(*state.store, *state.asyncPathWriter, drv, state.repair, false, provenance);
     auto drvPathS = state.store->printStorePath(drvPath);
 
     printMsg(lvlChatty, "instantiated '%1%' -> '%2%'", drvName, drvPathS);
@@ -1878,11 +1905,21 @@ static void derivationStrictInternal(EvalState & state, std::string_view drvName
     v.mkAttrs(result);
 }
 
+/* Construct (as a unobservable side effect) a Nix derivation
+   expression that performs the derivation described by the argument
+   set.  Returns the original set extended with the following
+   attributes: `outPath' containing the primary output path of the
+   derivation; `drvPath' containing the path of the Nix expression;
+   and `type' set to `derivation' to indicate that this is a
+   derivation. */
 static RegisterPrimOp primop_derivationStrict(
     PrimOp{
         .name = "derivationStrict",
         .arity = 1,
-        .fun = prim_derivationStrict,
+        .fun =
+            [](EvalState & state, const PosIdx pos, Value ** args, Value & v) {
+                prim_derivationStrictGeneric(state, pos, args, v, /*acceptMeta=*/false);
+            },
     });
 
 /* Return a placeholder string for the specified output that will be
@@ -2003,7 +2040,7 @@ static void prim_pathExists(EvalState & state, const PosIdx pos, Value ** args, 
             arg.type() == nString && (arg.string_view().ends_with("/") || arg.string_view().ends_with("/."));
 
         auto symlinkResolution = mustBeDir ? SymlinkResolution::Full : SymlinkResolution::Ancestors;
-        auto path = realisePath(state, pos, arg, symlinkResolution);
+        auto path = state.realisePath(pos, arg, symlinkResolution);
 
         auto st = path.maybeLstat();
         auto exists = st && (!mustBeDir || st->type == SourceAccessor::tDirectory);
@@ -2110,7 +2147,7 @@ static RegisterPrimOp primop_dirOf({
 /* Return the contents of a file as a string. */
 static void prim_readFile(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto path = realisePath(state, pos, *args[0]);
+    auto path = state.realisePath(pos, *args[0]);
     auto s = path.readFile();
     if (s.find((char) 0) != std::string::npos)
         state.error<EvalError>("the contents of the file '%1%' cannot be represented as a Nix string", path)
@@ -2348,7 +2385,7 @@ static void prim_hashFile(EvalState & state, const PosIdx pos, Value ** args, Va
     if (!ha)
         state.error<EvalError>("unknown hash algorithm '%1%'", algo).atPos(pos).debugThrow();
 
-    auto path = realisePath(state, pos, *args[1]);
+    auto path = state.realisePath(pos, *args[1]);
 
     v.mkString(hashString(*ha, path.readFile()).to_string(HashFormat::Base16, false), state.mem);
 }
@@ -2362,6 +2399,23 @@ static RegisterPrimOp primop_hashFile({
       of `"md5"`, `"sha1"`, `"sha256"` or `"sha512"`.
     )",
     .fun = prim_hashFile,
+});
+
+static RegisterPrimOp primop_narHash({
+    .name = "__narHash",
+    .args = {"p"},
+    .doc = R"(
+      Return an SRI representation of the SHA-256 hash of the NAR serialisation of the path *p*.
+    )",
+    .fun =
+        [](EvalState & state, const PosIdx pos, Value ** args, Value & v) {
+            auto path = state.realisePath(pos, *args[0]);
+            auto hash =
+                fetchToStore2(state.fetchSettings, *state.store, path.resolveSymlinks(), FetchMode::DryRun).second;
+            v.mkString(hash.to_string(HashFormat::SRI, true), state.mem);
+        },
+    // FIXME: may be useful to expose to the user.
+    .internal = true,
 });
 
 static const Value & fileTypeToString(EvalState & state, SourceAccessor::Type type)
@@ -2400,7 +2454,7 @@ static const Value & fileTypeToString(EvalState & state, SourceAccessor::Type ty
 
 static void prim_readFileType(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto path = realisePath(state, pos, *args[0], std::nullopt);
+    auto path = state.realisePath(pos, *args[0], std::nullopt);
     /* Retrieve the directory entry type and stringize it. */
     v = fileTypeToString(state, path.lstat().type);
 }
@@ -2418,7 +2472,7 @@ static RegisterPrimOp primop_readFileType({
 /* Read a directory (without . or ..) */
 static void prim_readDir(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto path = realisePath(state, pos, *args[0]);
+    auto path = state.realisePath(pos, *args[0]);
 
     // Retrieve directory entries for all nodes in a directory.
     // This is similar to `getFileType` but is optimized to reduce system calls
@@ -2737,7 +2791,8 @@ static void prim_toFile(EvalState & state, const PosIdx pos, Value ** args, Valu
                                                      ContentAddressMethod::Raw::Text,
                                                      HashAlgorithm::SHA256,
                                                      refs,
-                                                     state.repair);
+                                                     state.repair,
+                                                     state.evalContext.provenance);
                                              });
 
     /* Note: we don't need to add `context' to the context of the
@@ -2883,10 +2938,21 @@ static void addPath(
         if (!expectedHash || !state.store->isValidPath(*expectedStorePath)) {
             // FIXME: make this lazy?
             // FIXME: support refs in fetchToStore()?
+            auto path2 = path.resolveSymlinks();
+            // Don't use source path provenance if we have a filter applied, since we can't accurately
+            // record that. Instead, use the current global provenance, since it's better than nothing.
+            auto path3 = filter
+                ? SourcePath{
+                      make_ref<OverrideProvenanceSourceAccessor>(
+                          path2.accessor, state.evalContext.provenance),
+                      path2.path
+                  }
+                : path2;
+
             auto dstPath = refs.empty() ? fetchToStore(
                                               state.fetchSettings,
                                               *state.store,
-                                              path.resolveSymlinks(),
+                                              path3,
                                               settings.readOnlyMode ? FetchMode::DryRun : FetchMode::Copy,
                                               name,
                                               method,
@@ -2894,7 +2960,7 @@ static void addPath(
                                               state.repair)
                                         : state.store->addToStore(
                                               name,
-                                              path.resolveSymlinks(),
+                                              path3,
                                               method,
                                               HashAlgorithm::SHA256,
                                               refs,
@@ -4675,8 +4741,9 @@ static void prim_hashString(EvalState & state, const PosIdx pos, Value ** args, 
         state.error<EvalError>("unknown hash algorithm '%1%'", algo).atPos(pos).debugThrow();
 
     NixStringContext context; // discarded
-    auto s =
-        state.forceString(*args[1], context, pos, "while evaluating the second argument passed to builtins.hashString");
+    auto s = state.devirtualize(
+        state.forceString(*args[1], context, pos, "while evaluating the second argument passed to builtins.hashString"),
+        context);
 
     v.mkString(hashString(*ha, s).to_string(HashFormat::Base16, false), state.mem);
 }
@@ -5512,6 +5579,16 @@ void EvalState::createBaseEnv(const EvalSettings & evalSettings)
             .type = nFunction,
         });
 
+    auto vDerivationWithMeta = allocValue();
+    if (experimentalFeatureSettings.isEnabled(Xp::Provenance)) {
+        addConstant(
+            "derivationWithMeta",
+            vDerivationWithMeta,
+            {
+                .type = nFunction,
+            });
+    }
+
     /* Now that we've added all primops, sort the `builtins' set,
        because attribute lookups expect it to be sorted. */
     const_cast<Bindings *>(getBuiltins().attrs())->sort();
@@ -5520,7 +5597,14 @@ void EvalState::createBaseEnv(const EvalSettings & evalSettings)
 
     /* Note: we have to initialize the 'derivation' constant *after*
        building baseEnv/staticBaseEnv because it uses 'builtins'. */
-    evalFile(derivationInternal, *vDerivation);
+    auto vDerivationValue = allocValue();
+    evalFile(derivationInternal, *vDerivationValue);
+
+    callFunction(*vDerivationValue, getBuiltin("derivationStrict"), *vDerivation, PosIdx());
+
+    if (experimentalFeatureSettings.isEnabled(Xp::Provenance))
+        callFunction(
+            *vDerivationValue, **get(internalPrimOps, "derivationStrictWithMeta"), *vDerivationWithMeta, PosIdx());
 }
 
 } // namespace nix

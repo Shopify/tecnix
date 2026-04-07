@@ -249,7 +249,7 @@ static std::pair<std::map<FlakeId, FlakeInput>, fetchers::Attrs> parseFlakeInput
     return {inputs, selfAttrs};
 }
 
-static Flake readFlake(
+Flake readFlake(
     EvalState & state,
     const FlakeRef & originalRef,
     const FlakeRef & resolvedRef,
@@ -269,6 +269,7 @@ static Flake readFlake(
         .resolvedRef = resolvedRef,
         .lockedRef = lockedRef,
         .path = flakePath,
+        .provenance = flakePath.getProvenance(),
     };
 
     if (auto description = vInfo.attrs()->get(state.s.description)) {
@@ -427,16 +428,12 @@ static LockFile readLockFile(const fetchers::Settings & fetchSettings, const Sou
                                      : LockFile();
 }
 
-/* Compute an in-memory lock file for the specified top-level flake,
-   and optionally write it to file, if the flake is writable. */
-LockedFlake
-lockFlake(const Settings & settings, EvalState & state, const FlakeRef & topRef, const LockFlags & lockFlags)
+LockedFlake lockFlake(
+    const Settings & settings, EvalState & state, const FlakeRef & topRef, const LockFlags & lockFlags, Flake flake)
 {
     auto useRegistries = lockFlags.useRegistries.value_or(settings.useRegistries);
     auto useRegistriesTop = useRegistries ? fetchers::UseRegistries::All : fetchers::UseRegistries::No;
     auto useRegistriesInputs = useRegistries ? fetchers::UseRegistries::Limited : fetchers::UseRegistries::No;
-
-    auto flake = getFlake(state, topRef, useRegistriesTop, {}, lockFlags.requireLockable);
 
     if (lockFlags.applyNixConfig) {
         flake.config.apply(settings);
@@ -919,6 +916,8 @@ lockFlake(const Settings & settings, EvalState & state, const FlakeRef & topRef,
                                 CanonPath((topRef.subdir == "" ? "" : topRef.subdir + "/") + "flake.lock"),
                                 newLockFileS,
                                 commitMessage);
+
+                            flake.lockFilePath().invalidateCache();
                         }
 
                         /* Rewriting the lockfile changed the top-level
@@ -947,6 +946,23 @@ lockFlake(const Settings & settings, EvalState & state, const FlakeRef & topRef,
         e.addTrace({}, "while updating the lock file of flake '%s'", flake.lockedRef.to_string());
         throw;
     }
+}
+
+LockedFlake
+lockFlake(const Settings & settings, EvalState & state, const FlakeRef & topRef, const LockFlags & lockFlags)
+{
+    auto useRegistries = lockFlags.useRegistries.value_or(settings.useRegistries);
+    auto useRegistriesTop = useRegistries ? fetchers::UseRegistries::All : fetchers::UseRegistries::No;
+
+    return lockFlake(settings, state, topRef, lockFlags, getFlake(state, topRef, useRegistriesTop, {}, false));
+}
+
+LockedFlake
+lockFlake(const Settings & settings, EvalState & state, const SourcePath & flakeDir, const LockFlags & lockFlags)
+{
+    /* We need a fake flakeref to put in the `Flake` struct, but it's not used for anything. */
+    auto fakeRef = parseFlakeRef(state.fetchSettings, "flake:get-flake");
+    return lockFlake(settings, state, fakeRef, lockFlags, readFlake(state, fakeRef, fakeRef, fakeRef, flakeDir, {}));
 }
 
 static ref<SourceAccessor> makeInternalFS()
@@ -1038,41 +1054,6 @@ std::optional<Fingerprint> LockedFlake::getFingerprint(Store & store, const fetc
 }
 
 Flake::~Flake() {}
-
-ref<eval_cache::EvalCache> openEvalCache(EvalState & state, ref<const LockedFlake> lockedFlake)
-{
-    auto fingerprint = state.settings.useEvalCache && state.settings.pureEval
-                           ? lockedFlake->getFingerprint(*state.store, state.fetchSettings)
-                           : std::nullopt;
-    auto rootLoader = [&state, lockedFlake]() {
-        /* For testing whether the evaluation cache is
-           complete. */
-        if (getEnv("NIX_ALLOW_EVAL").value_or("1") == "0")
-            throw Error("not everything is cached, but evaluation is not allowed");
-
-        auto vFlake = state.allocValue();
-        callFlake(state, *lockedFlake, *vFlake);
-
-        state.forceAttrs(*vFlake, noPos, "while parsing cached flake data");
-
-        auto aOutputs = vFlake->attrs()->get(state.symbols.create("outputs"));
-        assert(aOutputs);
-
-        return aOutputs->value;
-    };
-
-    if (fingerprint) {
-        auto search = state.evalCaches.find(fingerprint.value());
-        if (search == state.evalCaches.end()) {
-            search = state.evalCaches
-                         .emplace(fingerprint.value(), make_ref<eval_cache::EvalCache>(fingerprint, state, rootLoader))
-                         .first;
-        }
-        return search->second;
-    } else {
-        return make_ref<eval_cache::EvalCache>(std::nullopt, state, rootLoader);
-    }
-}
 
 } // namespace flake
 

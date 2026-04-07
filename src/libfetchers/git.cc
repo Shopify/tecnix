@@ -32,12 +32,6 @@ namespace nix::fetchers {
 
 namespace {
 
-// Explicit initial branch of our bare repo to suppress warnings from new version of git.
-// The value itself does not matter, since we always fetch a specific revision or branch.
-// It is set with `-c init.defaultBranch=` instead of `--initial-branch=` to stay compatible with
-// old version of git, which will ignore unrecognized `-c` options.
-const std::string gitInitialBranch = "__nix_dummy_branch";
-
 bool isCacheFileWithinTtl(time_t now, const struct stat & st)
 {
     return st.st_mtime + static_cast<time_t>(settings.tarballTtl) > now;
@@ -118,7 +112,7 @@ std::optional<std::string> readHeadCached(const std::string & actualUrl, bool sh
     std::optional<std::string> cachedRef;
     if (stat(headRefFile.string().c_str(), &st) == 0) {
         cachedRef = readHead(cacheDir);
-        if (cachedRef != std::nullopt && *cachedRef != gitInitialBranch && isCacheFileWithinTtl(now, st)) {
+        if (cachedRef != std::nullopt && isCacheFileWithinTtl(now, st)) {
             debug("using cached HEAD ref '%s' for repo '%s'", *cachedRef, actualUrl);
             return cachedRef;
         }
@@ -845,12 +839,39 @@ struct GitInputScheme : InputScheme
      * checkout`.
      */
     ref<SourceAccessor> getLegacyGitAccessor(
+        const Settings & settings,
         Store & store,
         RepoInfo & repoInfo,
         const std::filesystem::path & repoDir,
         const Hash & rev,
         GitAccessorOptions & options) const
     {
+        if (!options.submodules)
+            options.exportIgnore = true;
+
+        auto fingerprint = options.makeFingerprint(rev) + ";legacy";
+
+        auto cacheKey = makeSourcePathToHashCacheKey(fingerprint, ContentAddressMethod::Raw::NixArchive, "/");
+
+        auto makeAccessor = [&](const auto & storePath) -> ref<SourceAccessor> {
+            auto accessor = store.getFSAccessor(storePath);
+            accessor->fingerprint = fingerprint;
+            return ref{accessor};
+        };
+
+        if (auto res = settings.getCache()->lookup(cacheKey)) {
+            auto hash = Hash::parseSRI(fetchers::getStrAttr(*res, "hash"));
+            auto storePath = store.makeFixedOutputPathFromCA(
+                "source", ContentAddressWithReferences::fromParts(ContentAddressMethod::Raw::NixArchive, hash, {}));
+            store.addTempRoot(storePath);
+            if (store.maybeQueryPathInfo(storePath)) {
+                debug("using cached legacy export of revision '%s'", rev.gitRev());
+                return makeAccessor(storePath);
+            }
+        }
+
+        debug("doing legacy export of revision '%s'", rev.gitRev());
+
         auto tmpDir = createTempDir();
         AutoDelete delTmpDir(tmpDir, true);
 
@@ -858,10 +879,11 @@ struct GitInputScheme : InputScheme
             options.submodules
                 ? [&]() {
                       // Nix < 2.20 used `git checkout` for repos with submodules.
-                      runProgram2({.program = "git", .args = {"init", tmpDir}});
-                      runProgram2({.program = "git", .args = {"-C", tmpDir, "remote", "add", "origin", repoDir}});
-                      runProgram2({.program = "git", .args = {"-C", tmpDir, "fetch", "origin", rev.gitRev()}});
-                      runProgram2({.program = "git", .args = {"-C", tmpDir, "checkout", rev.gitRev()}});
+                      runProgram({.program = "git", .args = {"init", tmpDir, "-b", "master"}});
+                      runProgram({.program = "git", .args = {"-C", tmpDir, "remote", "add", "origin", repoDir}});
+                      runProgram(
+                          {.program = "git", .args = {"-C", tmpDir, "fetch", "--quiet", "origin", rev.gitRev()}});
+                      runProgram({.program = "git", .args = {"-C", tmpDir, "checkout", "--quiet", rev.gitRev()}});
                       PathFilter filter = [&](const Path & path) { return baseNameOf(path) != ".git"; };
                       return store.addToStore(
                           "source",
@@ -873,8 +895,6 @@ struct GitInputScheme : InputScheme
                   }()
                 : [&]() {
                       // Nix < 2.20 used `git archive` for repos without submodules.
-                      options.exportIgnore = true;
-
                       auto source = sinkToSource([&](Sink & sink) {
                           runProgram2(
                               {.program = "git",
@@ -887,15 +907,14 @@ struct GitInputScheme : InputScheme
                       return store.addToStore("source", {getFSSourceAccessor(), CanonPath(tmpDir.string())});
                   }();
 
-        auto accessor = store.getFSAccessor(storePath);
+        settings.getCache()->upsert(
+            cacheKey, {{"hash", store.queryPathInfo(storePath)->narHash.to_string(HashFormat::SRI, true)}});
 
-        accessor->fingerprint = options.makeFingerprint(rev) + ";legacy";
-
-        return ref{accessor};
+        return makeAccessor(storePath);
     }
 
-    std::pair<ref<SourceAccessor>, Input>
-    getAccessorFromCommit(const Settings & settings, Store & store, RepoInfo & repoInfo, Input && input) const
+    std::optional<std::pair<ref<SourceAccessor>, Input>> getAccessorFromCommit(
+        const Settings & settings, Store & store, RepoInfo & repoInfo, Input && input, bool fastOnly) const
     {
         assert(!repoInfo.workdirInfo.isDirty);
 
@@ -963,6 +982,9 @@ struct GitInputScheme : InputScheme
             }
 
             if (doFetch) {
+                if (fastOnly)
+                    return std::nullopt;
+
                 try {
                     auto fetchRef = getAllRefsAttr(input)             ? "refs/*:refs/*"
                                     : input.getRev()                  ? input.getRev()->gitRev()
@@ -1049,12 +1071,12 @@ struct GitInputScheme : InputScheme
            it would poison subsequent modern fetches of the same rev. */
         bool usedLegacyFallback = false;
 
-        if (settings.nix219Compat && !options.smudgeLfs && accessor->pathExists(CanonPath(".gitattributes"))) {
+        if (settings.nix219Compat && !options.smudgeLfs) {
             /* Use Nix 2.19 semantics to generate locks, but if a NAR hash is specified, support Nix >= 2.20 semantics
              * as well. */
             warn("Using Nix 2.19 semantics to export Git repository '%s'.", input.to_string());
             auto accessorModern = accessor;
-            accessor = getLegacyGitAccessor(store, repoInfo, repoDir, rev, options);
+            accessor = getLegacyGitAccessor(settings, store, repoInfo, repoDir, rev, options);
             usedLegacyFallback = true;
             if (expectedNarHash) {
                 auto narHashLegacy =
@@ -1072,10 +1094,10 @@ struct GitInputScheme : InputScheme
             /* Backward compatibility hack for locks produced by Nix < 2.20 that depend on Nix applying Git filters,
              * `export-ignore` or `export-subst`. Nix >= 2.20 doesn't do those, so we may get a NAR hash mismatch. If
              * that happens, try again using `git archive`. */
-            auto narHashNew = fetchToStore2(settings, store, {accessor}, FetchMode::DryRun, input.getName()).second;
-            if (expectedNarHash && accessor->pathExists(CanonPath(".gitattributes"))) {
+            if (expectedNarHash) {
+                auto narHashNew = fetchToStore2(settings, store, {accessor}, FetchMode::DryRun, input.getName()).second;
                 if (expectedNarHash != narHashNew) {
-                    auto accessorLegacy = getLegacyGitAccessor(store, repoInfo, repoDir, rev, options);
+                    auto accessorLegacy = getLegacyGitAccessor(settings, store, repoInfo, repoDir, rev, options);
                     auto narHashLegacy =
                         fetchToStore2(settings, store, {accessorLegacy}, FetchMode::DryRun, input.getName()).second;
                     if (expectedNarHash == narHashLegacy) {
@@ -1168,7 +1190,7 @@ struct GitInputScheme : InputScheme
 
         assert(!origRev || origRev == rev);
 
-        return {accessor, std::move(input)};
+        return {{accessor, std::move(input)}};
     }
 
     std::pair<ref<SourceAccessor>, Input>
@@ -1255,8 +1277,8 @@ struct GitInputScheme : InputScheme
         return {accessor, std::move(input)};
     }
 
-    std::pair<ref<SourceAccessor>, Input>
-    getAccessor(const Settings & settings, Store & store, const Input & _input) const override
+    std::optional<std::pair<ref<SourceAccessor>, Input>>
+    getAccessor(const Settings & settings, Store & store, const Input & _input, bool fastOnly) const override
     {
         Input input(_input);
 
@@ -1284,11 +1306,9 @@ struct GitInputScheme : InputScheme
             }
         }
 
-        auto [accessor, final] = input.getRef() || input.getRev() || !repoInfo.getPath()
-                                     ? getAccessorFromCommit(settings, store, repoInfo, std::move(input))
-                                     : getAccessorFromWorkdir(settings, store, repoInfo, std::move(input));
-
-        return {accessor, std::move(final)};
+        return input.getRef() || input.getRev() || !repoInfo.getPath()
+                   ? getAccessorFromCommit(settings, store, repoInfo, std::move(input), fastOnly)
+                   : std::optional{getAccessorFromWorkdir(settings, store, repoInfo, std::move(input))};
     }
 
     std::optional<std::string> getFingerprint(Store & store, const Input & input) const override

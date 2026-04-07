@@ -13,6 +13,7 @@
   libseccomp,
   nlohmann_json,
   sqlite,
+  wasmtime,
 
   busybox-sandbox-shell ? null,
 
@@ -20,11 +21,13 @@
 
   version,
 
-  embeddedSandboxShell ? stdenv.hostPlatform.isStatic,
+  embeddedSandboxShell ? stdenv.hostPlatform.isStatic && !stdenv.hostPlatform.isDarwin,
 
   withAWS ?
     # Default is this way because there have been issues building this dependency
     stdenv.hostPlatform == stdenv.buildPlatform && (stdenv.isLinux || stdenv.isDarwin),
+
+  enableWasm ? !stdenv.hostPlatform.isStatic,
 }:
 
 let
@@ -67,7 +70,8 @@ mkMesonLibrary (finalAttrs: {
     sqlite
   ]
   ++ lib.optional stdenv.hostPlatform.isLinux libseccomp
-  ++ lib.optional withAWS aws-crt-cpp;
+  ++ lib.optional withAWS aws-crt-cpp
+  ++ lib.optional enableWasm wasmtime;
 
   propagatedBuildInputs = [
     nix-util
@@ -78,6 +82,7 @@ mkMesonLibrary (finalAttrs: {
     (lib.mesonEnable "seccomp-sandboxing" stdenv.hostPlatform.isLinux)
     (lib.mesonBool "embedded-sandbox-shell" embeddedSandboxShell)
     (lib.mesonEnable "s3-aws-auth" withAWS)
+    (lib.mesonEnable "wasm" enableWasm)
   ]
   ++ lib.optionals stdenv.hostPlatform.isLinux [
     (lib.mesonOption "sandbox-shell" "${busybox-sandbox-shell}/bin/busybox")

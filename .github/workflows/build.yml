@@ -52,6 +52,7 @@ jobs:
       - uses: DeterminateSystems/flakehub-cache-action@main
       - run: nix build .#packages.${{ inputs.system }}.default .#packages.${{ inputs.system }}.binaryTarball --no-link -L
       - run: nix build .#packages.${{ inputs.system }}.binaryTarball --out-link tarball
+      - run: nix build .#packages.${{ inputs.system }}.nix-cli-static --no-link -L
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.system }}
@@ -131,11 +132,20 @@ jobs:
           - "lazy-trees = false"
           - "eval-cores = 24"
         glob:
-          - "[0-d]*"
-          - "[e-l]*"
+          - "[0-9]*"
+          - "[a-b]*"
+          - "[c]*"
+          - "[d]*"
+          - "[e]*"
+          - "[f]*"
+          - "[g-h]*"
+          - "[i-k]*"
+          - "[l]*"
           - "[m]*"
-          - "[n-r]*"
-          - "[s-z]*"
+          - "[n]*"
+          - "[o-s]*"
+          - "[t]*"
+          - "[u-z]*"
 
     steps:
       - name: Checkout nix
@@ -143,12 +153,12 @@ jobs:
       - name: Checkout flake-regressions
         uses: actions/checkout@v4
         with:
-          repository: DeterminateSystems/flake-regressions
+          repository: NixOS/flake-regressions
           path: flake-regressions
       - name: Checkout flake-regressions-data
         uses: actions/checkout@v4
         with:
-          repository: DeterminateSystems/flake-regressions-data
+          repository: NixOS/flake-regressions-data
           path: flake-regressions/tests
       - uses: DeterminateSystems/determinate-nix-action@main
       - uses: DeterminateSystems/flakehub-cache-action@main
@@ -159,6 +169,7 @@ jobs:
           FLAKE_REGRESSION_GLOB: ${{ matrix.glob }}
           NIX_CONFIG: ${{ matrix.nix_config }}
           PREFETCH: "1"
+          USE_NIX_FLAKE_SHOW: "1"
         run: |
           set -x
           echo "PARALLEL: $PARALLEL"

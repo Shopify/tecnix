@@ -57,12 +57,13 @@ enum RepairFlag : bool;
 struct MemorySourceAccessor;
 struct MountedSourceAccessor;
 struct AsyncPathWriter;
+struct Provenance;
+struct Executor;
 struct GitRepo;
 
 namespace eval_cache {
 class EvalCache;
 }
-struct Executor;
 
 /**
  * Increments a count on construction and decrements on destruction.
@@ -233,7 +234,7 @@ struct StaticEvalSymbols
         line, column, functor, toString, right, wrong, structuredAttrs, json, allowedReferences, allowedRequisites,
         disallowedReferences, disallowedRequisites, maxSize, maxClosureSize, builder, args, contentAddressed, impure,
         outputHash, outputHashAlgo, outputHashMode, recurseForDerivations, description, self, epsilon, startSet,
-        operator_, key, path, prefix, outputSpecified;
+        operator_, key, path, prefix, outputSpecified, __meta;
 
     Expr::AstSymbols exprSymbols;
 
@@ -286,6 +287,7 @@ struct StaticEvalSymbols
             .path = alloc.create("path"),
             .prefix = alloc.create("prefix"),
             .outputSpecified = alloc.create("outputSpecified"),
+            .__meta = alloc.create("__meta"),
             .exprSymbols = {
                 .sub = alloc.create("__sub"),
                 .lessThan = alloc.create("__lessThan"),
@@ -506,12 +508,11 @@ private:
      * Associate source positions of certain AST nodes with their preceding doc comment, if they have one.
      * Grouped by file.
      */
-    SharedSync<boost::unordered_flat_map<SourcePath, ref<DocCommentMap>>> positionToDocComment;
+    const ref<boost::concurrent_flat_map<SourcePath, ref<DocCommentMap>>> positionToDocComment;
 
     LookupPath lookupPath;
 
-    // FIXME: make thread-safe.
-    boost::unordered_flat_map<std::string, std::optional<SourcePath>, StringViewHash, std::equal_to<>>
+    const ref<boost::concurrent_flat_map<std::string, std::optional<SourcePath>, StringViewHash, std::equal_to<>>>
         lookupPathResolved;
 
     /**
@@ -1147,6 +1148,12 @@ public:
     realiseContext(const NixStringContext & context, StorePathSet * maybePaths = nullptr, bool isIFD = true);
 
     /**
+     * Coerce `v` to a path and realise it, i.e. build anything in the value's string context using `realiseContext()`.
+     */
+    SourcePath realisePath(
+        const PosIdx pos, Value & v, std::optional<SymlinkResolution> resolveSymlinks = SymlinkResolution::Full);
+
+    /**
      * Realise the given string with context, and return the string with outputs instead of downstream output
      * placeholders.
      * @param[in] str the string to realise
@@ -1234,6 +1241,45 @@ private:
     friend class ListBuilder;
 
 public:
+
+    /**
+     * Per-thread evaluation context. This context is propagated to worker threads when a value is evaluated
+     * asynchronously.
+     */
+    struct EvalContext
+    {
+        std::shared_ptr<const Provenance> provenance;
+    };
+
+    thread_local static EvalContext evalContext;
+
+    /**
+     * Create a work item that propagates the current evaluation context.
+     */
+    template<typename T>
+    auto makeWork(T && t)
+    {
+        return [this, t{std::move(t)}, evalContext(evalContext)]() {
+            this->evalContext = evalContext;
+            t();
+        };
+    }
+
+    /**
+     * Add a work item to the given work vector that propagates the current evaluation context.
+     */
+    template<typename WorkItems, typename T>
+    void addWork(WorkItems & work, uint8_t priority, T && t)
+    {
+        work.emplace_back(makeWork(std::move(t)), priority);
+    }
+
+    template<typename FuturesVector, typename T>
+    void spawn(FuturesVector & futures, uint8_t priority, T && t)
+    {
+        futures.spawn(priority, makeWork(std::move(t)));
+    }
+
     /**
      * Worker threads manager.
      *
@@ -1278,6 +1324,24 @@ SourcePath resolveExprPath(SourcePath path, bool addDefaultNix = true);
  * Whether a URI is allowed, assuming restrictEval is enabled
  */
 bool isAllowedURI(std::string_view uri, const Strings & allowedPaths);
+
+struct PushProvenance
+{
+    EvalState & state;
+    std::shared_ptr<const Provenance> prev;
+
+    PushProvenance(EvalState & state, std::shared_ptr<const Provenance> prov)
+        : state(state)
+    {
+        state.evalContext.provenance.swap(prev);
+        state.evalContext.provenance.swap(prov);
+    }
+
+    ~PushProvenance()
+    {
+        state.evalContext.provenance.swap(prev);
+    }
+};
 
 } // namespace nix
 

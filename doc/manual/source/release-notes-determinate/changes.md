@@ -1,6 +1,6 @@
 # Changes between Nix and Determinate Nix
 
-This section lists the differences between upstream Nix 2.33 and Determinate Nix 3.15.0.<!-- differences -->
+This section lists the differences between upstream Nix 2.33 and Determinate Nix 3.17.3.<!-- differences -->
 
 * In Determinate Nix, flakes are stable. You no longer need to enable the `flakes` experimental feature.
 
@@ -148,3 +148,63 @@ This section lists the differences between upstream Nix 2.33 and Determinate Nix
 * Determinate Nix has a builtin function `builtins.filterAttrs`. [DeterminateSystems/nix-src#291](https://github.com/DeterminateSystems/nix-src/pull/291)
 
 * `builtins.fetchTree` implicitly sets `__final = true` when a `narHash` is supplied. This allows the tree to be substituted. [DeterminateSystems/nix-src#297](https://github.com/DeterminateSystems/nix-src/pull/297)
+
+<!-- Determinate Nix version 3.15.1 -->
+
+<!-- Determinate Nix version 3.15.2 -->
+
+* Path inputs are now lazy [DeterminateSystems/nix-src#312](https://github.com/DeterminateSystems/nix-src/pull/312)
+
+* Improved performance when fetching a lot of dependencies with curl [DeterminateSystems/nix-src#315](https://github.com/DeterminateSystems/nix-src/pull/315)
+
+<!-- Determinate Nix version 3.16.0 -->
+
+* Wasm support [DeterminateSystems/nix-src#309](https://github.com/DeterminateSystems/nix-src/pull/309)
+
+* Fix hung downloads when `http-connections = 0` [DeterminateSystems/nix-src#327](https://github.com/DeterminateSystems/nix-src/pull/327)
+
+* Support .gitattributes in subdirectories [DeterminateSystems/nix-src#335](https://github.com/DeterminateSystems/nix-src/pull/335)
+
+* builtins.getFlake fixes [DeterminateSystems/nix-src#337](https://github.com/DeterminateSystems/nix-src/pull/337)
+
+* builtins.getFlake: Support path values [DeterminateSystems/nix-src#338](https://github.com/DeterminateSystems/nix-src/pull/338)
+
+* Provenance [DeterminateSystems/nix-src#321](https://github.com/DeterminateSystems/nix-src/pull/321)
+
+* Add subcommand 'nix provenance show' [DeterminateSystems/nix-src#340](https://github.com/DeterminateSystems/nix-src/pull/340)
+
+* Increase the open file soft limit to the hard limit [DeterminateSystems/nix-src#347](https://github.com/DeterminateSystems/nix-src/pull/347)
+
+<!-- Determinate Nix version 3.16.1 -->
+
+
+* Record provenance for unlocked inputs and impure evaluations in [DeterminateSystems/nix-src#354](https://github.com/DeterminateSystems/nix-src/pull/354)
+
+* Add setting narinfo-cache-meta-ttl in [DeterminateSystems/nix-src#355](https://github.com/DeterminateSystems/nix-src/pull/355)
+
+* Add derivationWithMeta builtin in [DeterminateSystems/nix-src#357](https://github.com/DeterminateSystems/nix-src/pull/357)
+
+* Add builtins.wasi in [DeterminateSystems/nix-src#359](https://github.com/DeterminateSystems/nix-src/pull/359)
+
+* Add `nix provenance verify` command in [DeterminateSystems/nix-src#356](https://github.com/DeterminateSystems/nix-src/pull/356)
+
+* builtins.hashString: Devirtualize lazy paths, and re-enable lazy trees tests in [DeterminateSystems/nix-src#360](https://github.com/DeterminateSystems/nix-src/pull/360)
+
+<!-- Determinate Nix version 3.16.2 -->
+
+
+<!-- Determinate Nix version 3.16.3 -->
+
+
+<!-- Determinate Nix version 3.17.0 -->
+
+
+<!-- Determinate Nix version 3.17.1 -->
+
+* Flake inputs are substituted if possible before fetching from the authoritative source, in [DeterminateSystems/nix-src#380](https://github.com/DeterminateSystems/nix-src/pull/380)
+
+* Provenance now supports additional nix.conf-defined tags, in [DeterminateSystems/nix-src#374](https://github.com/DeterminateSystems/nix-src/pull/374)
+
+<!-- Determinate Nix version 3.17.2 -->
+
+<!-- Determinate Nix version 3.17.3 -->

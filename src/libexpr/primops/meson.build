@@ -11,3 +11,7 @@ sources += files(
   'fromTOML.cc',
   'tectonix.cc',
 )
+
+if wasmtime_required.enabled()
+  sources += files('wasm.cc')
+endif

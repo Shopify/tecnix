@@ -250,7 +250,8 @@ public:
         ContentAddressMethod hashMethod,
         HashAlgorithm hashAlgo,
         const StorePathSet & references,
-        RepairFlag repair) override;
+        RepairFlag repair,
+        std::shared_ptr<const Provenance> provenance) override;
 
     void addTempRoot(const StorePath & path) override;
 
@@ -463,6 +464,8 @@ private:
 
     friend struct PathSubstitutionGoal;
     friend struct DerivationGoal;
+    /* Only used for createTempDirInStore. */
+    friend class DerivationBuilderImpl;
 
 private:
 

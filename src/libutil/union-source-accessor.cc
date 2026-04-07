@@ -35,14 +35,18 @@ struct UnionSourceAccessor : SourceAccessor
     DirEntries readDirectory(const CanonPath & path) override
     {
         DirEntries result;
+        bool exists = false;
         for (auto & accessor : accessors) {
             auto st = accessor->maybeLstat(path);
             if (!st)
                 continue;
+            exists = true;
             for (auto & entry : accessor->readDirectory(path))
                 // Don't override entries from previous accessors.
                 result.insert(entry);
         }
+        if (!exists)
+            throw FileNotFound("path '%s' does not exist", showPath(path));
         return result;
     }
 
@@ -83,6 +87,22 @@ struct UnionSourceAccessor : SourceAccessor
                 return {subpath, fingerprint};
         }
         return {path, std::nullopt};
+    }
+
+    std::shared_ptr<const Provenance> getProvenance(const CanonPath & path) override
+    {
+        for (auto & accessor : accessors) {
+            auto prov = accessor->getProvenance(path);
+            if (prov)
+                return prov;
+        }
+        return nullptr;
+    }
+
+    void invalidateCache(const CanonPath & path) override
+    {
+        for (auto & accessor : accessors)
+            accessor->invalidateCache(path);
     }
 };
 

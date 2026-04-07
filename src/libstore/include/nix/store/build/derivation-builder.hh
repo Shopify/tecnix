@@ -57,6 +57,11 @@ struct DerivationBuilderParams
     /** The path of the derivation. */
     const StorePath & drvPath;
 
+    /**
+     * The provenance of the derivation, if known
+     */
+    const std::shared_ptr<const Provenance> drvProvenance;
+
     BuildResult & buildResult;
 
     /**
@@ -79,7 +84,7 @@ struct DerivationBuilderParams
      */
     const StorePathSet & inputPaths;
 
-    const std::map<std::string, InitialOutput> & initialOutputs;
+    const std::map<std::string, InitialOutput> initialOutputs;
 
     const BuildMode & buildMode;
 
@@ -194,15 +199,22 @@ struct ExternalBuilder
     std::vector<std::string> args;
 };
 
+struct DerivationBuilderDeleter
+{
+    void operator()(DerivationBuilder * builder) noexcept;
+};
+
+using DerivationBuilderUnique = std::unique_ptr<DerivationBuilder, DerivationBuilderDeleter>;
+
 #ifndef _WIN32 // TODO enable `DerivationBuilder` on Windows
-std::unique_ptr<DerivationBuilder> makeDerivationBuilder(
+DerivationBuilderUnique makeDerivationBuilder(
     LocalStore & store, std::unique_ptr<DerivationBuilderCallbacks> miscMethods, DerivationBuilderParams params);
 
 /**
  * @param handler Must be chosen such that it supports the given
  * derivation.
  */
-std::unique_ptr<DerivationBuilder> makeExternalDerivationBuilder(
+DerivationBuilderUnique makeExternalDerivationBuilder(
     LocalStore & store,
     std::unique_ptr<DerivationBuilderCallbacks> miscMethods,
     DerivationBuilderParams params,

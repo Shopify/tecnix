@@ -46,6 +46,12 @@ std::pair<StorePath, Hash> fetchToStore2(
             auto hash = Hash::parseSRI(fetchers::getStrAttr(*res, "hash"));
             auto storePath =
                 store.makeFixedOutputPathFromCA(name, ContentAddressWithReferences::fromParts(method, hash, {}));
+
+            /* Add a temproot before the call to isValidPath to prevent accidental GC in case the
+               input is cached. Note that this must be done before to avoid races. */
+            if (mode != FetchMode::DryRun)
+                store.addTempRoot(storePath);
+
             if (mode == FetchMode::DryRun || store.maybeQueryPathInfo(storePath)) {
                 debug(
                     "source path '%s' cache hit in '%s' (hash '%s')",
@@ -58,7 +64,7 @@ std::pair<StorePath, Hash> fetchToStore2(
         }
     } else {
         static auto barf = getEnv("_NIX_TEST_BARF_ON_UNCACHEABLE").value_or("") == "1";
-        if (barf && !filter)
+        if (barf && !filter && !(path.to_string().starts_with("/") || path.to_string().starts_with("«path:/")))
             throw Error("source path '%s' is uncacheable (filter=%d)", path, (bool) filter);
         // FIXME: could still provide in-memory caching keyed on `SourcePath`.
         debug("source path '%s' is uncacheable", path);

@@ -4,10 +4,13 @@
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/util/json-utils.hh"
 #include "nix/fetchers/fetch-settings.hh"
-#include "nix/fetchers/fetch-to-store.hh"
+#include "nix/fetchers/provenance.hh"
 #include "nix/util/url.hh"
 #include "nix/util/forwarding-source-accessor.hh"
 #include "nix/util/archive.hh"
+#include "nix/util/users.hh"
+#include "nix/store/pathlocks.hh"
+#include "nix/util/environment-variables.hh"
 
 #include <nlohmann/json.hpp>
 
@@ -196,7 +199,6 @@ bool Input::contains(const Input & other) const
     return false;
 }
 
-// FIXME: remove
 std::tuple<StorePath, ref<SourceAccessor>, Input> Input::fetchToStore(const Settings & settings, Store & store) const
 {
     if (!scheme)
@@ -325,11 +327,9 @@ std::pair<ref<SourceAccessor>, Input> Input::getAccessorUnchecked(const Settings
     auto makeStoreAccessor = [&]() -> std::pair<ref<SourceAccessor>, Input> {
         auto accessor = make_ref<SubstitutedSourceAccessor>(store.requireStoreObjectAccessor(*storePath));
 
-        // FIXME: use the NAR hash for fingerprinting Git trees that have a .gitattributes file, since we don't know if
-        // we used `git archive` or libgit2 to fetch it.
-        accessor->fingerprint = getType() == "git" && accessor->pathExists(CanonPath(".gitattributes"))
-                                    ? std::optional(storePath->hashPart())
-                                    : getFingerprint(store);
+        // FIXME: use the NAR hash for fingerprinting Git trees since it may have a .gitattributes file and we don't
+        // know if we used `git archive` or libgit2 to fetch it.
+        accessor->fingerprint = getType() == "git" ? std::optional(storePath->hashPart()) : getFingerprint(store);
         cachedFingerprint = accessor->fingerprint;
 
         // Store a cache entry for the substituted tree so later fetches
@@ -340,6 +340,8 @@ std::pair<ref<SourceAccessor>, Input> Input::getAccessorUnchecked(const Settings
                 makeSourcePathToHashCacheKey(*accessor->fingerprint, ContentAddressMethod::Raw::NixArchive, "/"),
                 {{"hash", store.queryPathInfo(*storePath)->narHash.to_string(HashFormat::SRI, true)}});
         }
+
+        accessor->provenance = std::make_shared<TreeProvenance>(*this);
 
         // FIXME: ideally we would use the `showPath()` of the
         // "real" accessor for this fetcher type.
@@ -357,34 +359,52 @@ std::pair<ref<SourceAccessor>, Input> Input::getAccessorUnchecked(const Settings
         return makeStoreAccessor();
     }
 
-    try {
-        auto [accessor, result] = scheme->getAccessor(settings, store, *this);
-
+    auto fixupAccessor = [&](ref<SourceAccessor> accessor, Input result) -> std::pair<ref<SourceAccessor>, Input> {
         if (auto fp = accessor->getFingerprint(CanonPath::root).second)
             result.cachedFingerprint = *fp;
         else
             accessor->fingerprint = result.getFingerprint(store);
 
-        return {accessor, std::move(result)};
-    } catch (Error & e) {
-        if (storePath) {
-            // Fall back to substitution.
-            try {
-                store.ensurePath(*storePath);
-                warn(
-                    "Successfully substituted input '%s' after failing to fetch it from its original location: %s",
-                    to_string(),
-                    e.info().msg);
-                return makeStoreAccessor();
-            }
-            // Ignore any substitution error, rethrow the original error.
-            catch (Error & e2) {
-                debug("substitution of input '%s' failed: %s", to_string(), e2.info().msg);
-            } catch (...) {
-            }
-        }
-        throw;
+        accessor->provenance = std::make_shared<TreeProvenance>(result);
+
+        return {accessor, result};
+    };
+
+    /* Acquire a path lock on this input. Note that fetching the same input in parallel is supposed to be safe (it's up
+     * to the fetchers to guarantee this), so this is merely intended to avoid work duplication. */
+    auto lockFilePath =
+        getCacheDir() / "fetcher-locks"
+        / hashString(HashAlgorithm::SHA256, attrsToJSON(toAttrs()).dump()).to_string(HashFormat::Base16, false);
+    std::filesystem::create_directories(lockFilePath.parent_path());
+    PathLocks lock(
+        {lockFilePath.string()}, fmt("waiting for another Nix process to finish fetching input '%s'...", to_string()));
+
+    if (getEnv("_NIX_TEST_CONCURRENT_FETCHES"))
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    /* See if the input is in the cache of the fetcher. */
+    try {
+        if (auto res = scheme->getAccessor(settings, store, *this, true))
+            return fixupAccessor(res->first, std::move(res->second));
+    } catch (...) {
     }
+
+    /* If not, try to substitute the input. */
+    if (storePath) {
+        try {
+            store.ensurePath(*storePath);
+            return makeStoreAccessor();
+        }
+        // Ignore any substitution error.
+        catch (Error & e2) {
+            debug("substitution of input '%s' failed: %s", to_string(), e2.info().msg);
+        } catch (...) {
+        }
+    }
+
+    /* If we can't substitute, then fetch normally. */
+    auto [accessor, result] = scheme->getAccessor(settings, store, *this);
+    return fixupAccessor(accessor, result);
 }
 
 Input Input::applyOverrides(std::optional<std::string> ref, std::optional<Hash> rev) const

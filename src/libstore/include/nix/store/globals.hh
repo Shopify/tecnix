@@ -1057,6 +1057,17 @@ public:
           mismatch if the build isn't reproducible.
         )"};
 
+    Setting<unsigned int> ttlNarInfoCacheMeta{
+        this,
+        7 * 24 * 3600,
+        "narinfo-cache-meta-ttl",
+        R"(
+          The TTL in seconds for caching binary cache metadata (i.e.
+          `/nix-cache-info`). This determines how long information about a
+          binary cache (such as its store directory, priority, and whether it
+          wants mass queries) is considered valid before being refreshed.
+        )"};
+
     Setting<bool> printMissing{
         this, true, "print-missing", "Whether to print what paths need to be built or downloaded."};
 
@@ -1121,11 +1132,11 @@ public:
               character.
 
               Example:
-              `/nix/store/zf5lbh336mnzf1nlswdn11g4n2m8zh3g-bash-4.4-p23-dev
-              /nix/store/rjxwxwv1fpn9wa2x5ssk5phzwlcv4mna-bash-4.4-p23-doc
-              /nix/store/6bqvbzjkcp9695dq0dpl5y43nvy37pq1-bash-4.4-p23-info
-              /nix/store/r7fng3kk3vlpdlh2idnrbn37vh4imlj2-bash-4.4-p23-man
-              /nix/store/xfghy8ixrhz3kyy6p724iv3cxji088dx-bash-4.4-p23`.
+              `/nix/store/l88brggg9hpy96ijds34dlq4n8fan63g-bash-4.4-p23-dev
+              /nix/store/vch71bhyi5akr5zs40k8h2wqxx69j80l-bash-4.4-p23-doc
+              /nix/store/c5cxjywi66iwn9dcx5yvwjkvl559ay6p-bash-4.4-p23-info
+              /nix/store/scz72lskj03ihkcn42ias5mlp4i4gr1k-bash-4.4-p23-man
+              /nix/store/a724znygmd1cac856j3gfsyvih3lw07j-bash-4.4-p23`.
         )"};
 
     Setting<unsigned int> downloadSpeed{
@@ -1441,6 +1452,25 @@ public:
      * derivation, or else returns a null pointer.
      */
     const ExternalBuilder * findExternalDerivationBuilderIfSupported(const Derivation & drv);
+
+    Setting<std::string> hostName{
+        this,
+        "",
+        "host-name",
+        R"(
+          The name of this host for recording build provenance. If unset, the Unix host name is used.
+        )"};
+
+    std::optional<std::string> getHostName();
+
+    Setting<std::map<std::string, std::string>> buildProvenanceTags{
+        this,
+        {},
+        "build-provenance-tags",
+        R"(
+          Arbitrary name/value pairs that are recorded in the build provenance of store paths built by this machine.
+          This can be used to tag builds with metadata such as the CI job URL, build cluster name, etc.
+        )"};
 };
 
 // FIXME: don't use a global variable.

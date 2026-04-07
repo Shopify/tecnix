@@ -20,6 +20,7 @@
 #include "nix/store/globals.hh"
 #include "nix/store/build/derivation-env-desugar.hh"
 #include "nix/util/terminal.hh"
+#include "nix/store/provenance.hh"
 
 #include <queue>
 
@@ -104,10 +105,13 @@ public:
     {
     }
 
-    ~DerivationBuilderImpl()
+    /**
+     * Cleanup code to run when destroying any DerivationBuilderImpl implementation.
+     */
+    void cleanupOnDestruction() noexcept
     {
         /* Careful: we should never ever throw an exception from a
-           destructor. */
+           noexcept function. */
         try {
             killChild();
         } catch (...) {
@@ -291,7 +295,7 @@ protected:
         return Strings({store.printStorePath(drvPath)});
     }
 
-    virtual Path realPathInSandbox(const Path & p)
+    virtual Path realPathInHost(const Path & p)
     {
         return store.toRealPath(p);
     }
@@ -693,17 +697,17 @@ static void handleChildException(bool sendException)
     }
 }
 
-static bool checkNotWorldWritable(std::filesystem::path path)
+static void checkNotWorldWritable(std::filesystem::path path)
 {
     while (true) {
         auto st = lstat(path);
         if (st.st_mode & S_IWOTH)
-            return false;
+            throw Error("Path %s is world-writable or a symlink. That's not allowed for security.", path);
         if (path == path.parent_path())
             break;
         path = path.parent_path();
     }
-    return true;
+    return;
 }
 
 std::optional<Descriptor> DerivationBuilderImpl::startBuild()
@@ -725,9 +729,8 @@ std::optional<Descriptor> DerivationBuilderImpl::startBuild()
 
     createDirs(buildDir);
 
-    if (buildUser && !checkNotWorldWritable(buildDir))
-        throw Error(
-            "Path %s or a parent directory is world-writable or a symlink. That's not allowed for security.", buildDir);
+    if (buildUser)
+        checkNotWorldWritable(buildDir);
 
     /* Create a temporary directory where the build will take
        place. */
@@ -881,7 +884,11 @@ PathsInChroot DerivationBuilderImpl::getPathsInSandbox()
     PathsInChroot pathsInChroot = defaultPathsInChroot;
 
     for (auto & p : pathsInChroot)
-        if (!p.second.optional && !maybeLstat(p.second.source))
+        if (!p.second.optional
+#if HAVE_EMBEDDED_SANDBOX_SHELL
+            && p.second.source != SANDBOX_SHELL
+#endif
+            && !maybeLstat(p.second.source))
             throw SysError(
                 "path '%s' is configured as part of the `sandbox-paths` option, but is inaccessible", p.second.source);
 
@@ -1450,7 +1457,7 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
     for (auto & [outputName, _] : drv.outputs) {
         auto scratchOutput = get(scratchOutputs, outputName);
         assert(scratchOutput);
-        auto actualPath = realPathInSandbox(store.printStorePath(*scratchOutput));
+        auto actualPath = realPathInHost(store.printStorePath(*scratchOutput));
 
         outputsToSort.insert(outputName);
 
@@ -1570,7 +1577,14 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
         auto output = get(drv.outputs, outputName);
         auto scratchPath = get(scratchOutputs, outputName);
         assert(output && scratchPath);
-        auto actualPath = realPathInSandbox(store.printStorePath(*scratchPath));
+        auto actualPath = realPathInHost(store.printStorePath(*scratchPath));
+
+        /* An optional file descriptor of a directory used for intermediate
+           operations. */
+        AutoCloseFD tempDirFd;
+        /* RAII cleanup of a temporary directory inside the store that is used
+           for intermediate operations. */
+        std::optional<AutoDelete> delTempDir;
 
         auto finish = [&](StorePath finalStorePath) {
             /* Store the final path */
@@ -1707,6 +1721,25 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
             return newInfo0;
         };
 
+        auto moveOutputToTempDir = [&]() -> void {
+            std::filesystem::path tempDir;
+            std::tie(tempDir, tempDirFd) = store.createTempDirInStore();
+            delTempDir.emplace(tempDir);
+
+            auto tmpOutput = tempDir / "x";
+
+            /* Serialise and create a fresh copy of the output to break
+               any stale writable file descriptors. Copy through the
+               serialisation/deserialisation. TODO: Use copyRecursive here and
+               make use of reflinking. */
+            auto source = sinkToSource([&](Sink & nextSink) { dumpPath(actualPath, nextSink); });
+            restorePath(tmpOutput, *source, settings.fsyncStorePaths);
+            /* This makes it slightly harder to make sense of the control flow. The rule
+               of thumb is that actualPath points to the current location of the stuff
+               that we'll end up registering. */
+            actualPath = std::move(tmpOutput);
+        };
+
         ValidPathInfo newInfo = std::visit(
             overloaded{
 
@@ -1734,14 +1767,7 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 
                 [&](const DerivationOutput::CAFixed & dof) {
                     auto & wanted = dof.ca.hash;
-
-                    // Replace the output by a fresh copy of itself to make sure
-                    // that there's no stale file descriptor pointing to it
-                    Path tmpOutput = actualPath + ".tmp";
-                    copyFile(std::filesystem::path(actualPath), std::filesystem::path(tmpOutput), true);
-
-                    std::filesystem::rename(tmpOutput, actualPath);
-
+                    moveOutputToTempDir();
                     return newInfoFromCA(
                         DerivationOutput::CAFloating{
                             .method = dof.ca.method,
@@ -1758,6 +1784,7 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
                 },
 
                 [&](const DerivationOutput::Impure & doi) {
+                    moveOutputToTempDir();
                     return newInfoFromCA(
                         DerivationOutput::CAFloating{
                             .method = doi.method,
@@ -1864,6 +1891,14 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 
             newInfo.deriver = drvPath;
             newInfo.ultimate = true;
+            if (experimentalFeatureSettings.isEnabled(Xp::Provenance))
+                newInfo.provenance = std::make_shared<const BuildProvenance>(
+                    drvPath,
+                    outputName,
+                    settings.getHostName(),
+                    settings.buildProvenanceTags.get(),
+                    drv.platform,
+                    drvProvenance);
             store.signPathInfo(newInfo);
 
             finish(newInfo.path);
@@ -1874,8 +1909,8 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 
                This is also good so that if a fixed-output produces the
                wrong path, we still store the result (just don't consider
-               the derivation sucessful, so if someone fixes the problem by
-               just changing the wanted hash, the redownload (or whateer
+               the derivation successful, so if someone fixes the problem by
+               just changing the wanted hash, the redownload (or whatever
                possibly quite slow thing it was) doesn't have to be done
                again. */
             if (newInfo.ca)
@@ -1998,9 +2033,26 @@ StorePath DerivationBuilderImpl::makeFallbackPath(const StorePath & path)
 #include "darwin-derivation-builder.cc"
 #include "external-derivation-builder.cc"
 
+#if NIX_USE_WASMTIME
+#  include "wasi-derivation-builder.cc"
+#endif
+
 namespace nix {
 
-std::unique_ptr<DerivationBuilder> makeDerivationBuilder(
+void DerivationBuilderDeleter::operator()(DerivationBuilder * builder) noexcept
+{
+    if (!builder) /* Idempotent and handles nullptr as any deleter must. */
+        return;
+
+    if (auto builderImpl = dynamic_cast<DerivationBuilderImpl *>(builder))
+        /* Note that this might call into virtual functions, which we can't do in a destructor of
+           the DerivationBuilderImpl itself. */
+        builderImpl->cleanupOnDestruction();
+
+    delete builder;
+}
+
+std::unique_ptr<DerivationBuilder, DerivationBuilderDeleter> makeDerivationBuilder(
     LocalStore & store, std::unique_ptr<DerivationBuilderCallbacks> miscMethods, DerivationBuilderParams params)
 {
     bool useSandbox = false;
@@ -2028,6 +2080,11 @@ std::unique_ptr<DerivationBuilder> makeDerivationBuilder(
             useSandbox = params.drv.type().isSandboxed() && !params.drvOptions.noChroot;
     }
 
+#if NIX_USE_WASMTIME
+    if (params.drv.platform == "wasm32-wasip1")
+        return DerivationBuilderUnique(new WasiDerivationBuilder(store, std::move(miscMethods), std::move(params)));
+#endif
+
     if (store.storeDir != store.config->realStoreDir.get()) {
 #ifdef __linux__
         useSandbox = true;
@@ -2051,17 +2108,19 @@ std::unique_ptr<DerivationBuilder> makeDerivationBuilder(
         throw Error("feature 'uid-range' is only supported in sandboxed builds");
 
 #ifdef __APPLE__
-    return std::make_unique<DarwinDerivationBuilder>(store, std::move(miscMethods), std::move(params), useSandbox);
+    return DerivationBuilderUnique(
+        new DarwinDerivationBuilder(store, std::move(miscMethods), std::move(params), useSandbox));
 #elif defined(__linux__)
     if (useSandbox)
-        return std::make_unique<ChrootLinuxDerivationBuilder>(store, std::move(miscMethods), std::move(params));
+        return DerivationBuilderUnique(
+            new ChrootLinuxDerivationBuilder(store, std::move(miscMethods), std::move(params)));
 
-    return std::make_unique<LinuxDerivationBuilder>(store, std::move(miscMethods), std::move(params));
+    return DerivationBuilderUnique(new LinuxDerivationBuilder(store, std::move(miscMethods), std::move(params)));
 #else
     if (useSandbox)
         throw Error("sandboxing builds is not supported on this platform");
 
-    return std::make_unique<DerivationBuilderImpl>(store, std::move(miscMethods), std::move(params));
+    return DerivationBuilderUnique(new DerivationBuilderImpl(store, std::move(miscMethods), std::move(params)));
 #endif
 }
 

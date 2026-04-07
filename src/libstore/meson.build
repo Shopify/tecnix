@@ -24,6 +24,7 @@ configdata_priv = configuration_data()
 
 # TODO rename, because it will conflict with downstream projects
 configdata_priv.set_quoted('PACKAGE_VERSION', meson.project_version())
+configdata_priv.set('IS_STATIC', get_option('default_library') == 'static')
 
 configdata_priv.set_quoted(
   'DETERMINATE_NIX_VERSION',
@@ -88,6 +89,11 @@ foreach funcspec : check_funcs
   define_value = cxx.has_function(funcspec).to_int()
   configdata_priv.set(define_name, define_value)
 endforeach
+
+if host_machine.system() == 'linux'
+  has_landlock = cxx.has_header('linux/landlock.h')
+  configdata_priv.set('HAVE_LANDLOCK', has_landlock.to_int())
+endif
 
 has_acl_support = cxx.has_header('sys/xattr.h') \
   and cxx.has_function('llistxattr') \
@@ -180,6 +186,8 @@ if s3_aws_auth.enabled()
   deps_other += aws_crt_cpp
   aws_c_common = cxx.find_library('aws-c-common', required : true)
   deps_other += aws_c_common
+  aws_c_auth = cxx.find_library('aws-c-auth', required : true)
+  deps_other += aws_c_auth
 endif
 
 configdata_pub.set('NIX_WITH_AWS_AUTH', s3_aws_auth.enabled().to_int())
@@ -277,6 +285,19 @@ configdata_priv.set_quoted(
 : 'lsof',
 )
 
+link_args = []
+
+wasmtime_required = get_option('wasm').disable_if(
+  get_option('default_library') == 'static',
+  error_message : 'Building with wasmtime and static linking is not supported',
+)
+
+if wasmtime_required.enabled()
+  link_args += '-lwasmtime'
+endif
+
+configdata_priv.set('NIX_USE_WASMTIME', wasmtime_required.enabled().to_int())
+
 config_priv_h = configure_file(
   configuration : configdata_priv,
   output : 'store-config-private.hh',
@@ -344,6 +365,7 @@ sources = files(
   'pathlocks.cc',
   'posix-fs-canonicalise.cc',
   'profiles.cc',
+  'provenance.cc',
   'realisation.cc',
   'references.cc',
   'remote-fs-accessor.cc',
@@ -399,8 +421,8 @@ this_library = library(
   soversion : nix_soversion,
   dependencies : deps_public + deps_private + deps_other,
   include_directories : include_dirs,
-  link_args : linker_export_flags,
-  prelink : true, # For C++ static initializers
+  link_args : linker_export_flags + link_args,
+  prelink : prelink, # For C++ static initializers
   install : true,
   cpp_pch : do_pch ? [ 'pch/precompiled-headers.hh' ] : [],
 )
