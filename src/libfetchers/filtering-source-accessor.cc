@@ -126,11 +126,14 @@ ref<AllowListSourceAccessor> AllowListSourceAccessor::create(
 
 bool CachingFilteringSourceAccessor::isAllowed(const CanonPath & path)
 {
-    auto i = cache.find(path);
-    if (i != cache.end())
-        return i->second;
+    {
+        auto c = cache.readLock();
+        auto i = c->find(path);
+        if (i != c->end())
+            return i->second;
+    }
     auto res = isAllowedUncached(path);
-    cache.emplace(path, res);
+    cache.lock()->emplace(path, res);
     return res;
 }
 

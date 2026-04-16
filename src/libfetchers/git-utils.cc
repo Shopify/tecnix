@@ -1130,7 +1130,7 @@ struct GitSourceAccessor : SourceAccessor
 
 struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
 {
-    ref<GitRepoImpl> repo;
+    Pool<GitRepoImpl> repoPool;
     std::optional<Hash> rev;
     std::string attrPathPrefix;
 
@@ -1141,7 +1141,7 @@ struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
                   return RestrictedPathError(
                       fmt("'%s' does not exist because it was fetched with exportIgnore enabled", path));
               })
-        , repo(repo)
+        , repoPool(repo->getPool())
         , rev(rev)
         , attrPathPrefix(std::move(attrPathPrefix))
     {
@@ -1151,6 +1151,8 @@ struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
     {
         auto fullPath = attrPathPrefix.empty() ? path : CanonPath("/" + attrPathPrefix) / path;
         const char * pathCStr = fullPath.rel_c_str();
+
+        auto repo(repoPool.get());
 
         if (rev) {
             git_attr_options opts = GIT_ATTR_OPTIONS_INIT;
