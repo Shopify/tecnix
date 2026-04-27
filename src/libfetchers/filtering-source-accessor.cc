@@ -127,7 +127,7 @@ ref<AllowListSourceAccessor> AllowListSourceAccessor::create(
 bool CachingFilteringSourceAccessor::isAllowed(const CanonPath & path)
 {
     {
-        auto c = cache.readLock();
+        auto c(cache.readLock());
         auto i = c->find(path);
         if (i != c->end())
             return i->second;
