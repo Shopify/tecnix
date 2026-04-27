@@ -74,7 +74,12 @@ struct ArchiveCompressionSink : CompressionSink
     Sink & nextSink;
     struct archive * archive;
 
-    ArchiveCompressionSink(Sink & nextSink, std::string format, bool parallel, int level = COMPRESSION_LEVEL_DEFAULT)
+    ArchiveCompressionSink(
+        Sink & nextSink,
+        std::string format,
+        bool parallel,
+        int level = COMPRESSION_LEVEL_DEFAULT,
+        unsigned int threads = 0)
         : nextSink(nextSink)
     {
         archive = archive_write_new();
@@ -83,7 +88,8 @@ struct ArchiveCompressionSink : CompressionSink
         check(archive_write_add_filter_by_name(archive, format.c_str()), "couldn't initialize compression (%s)");
         check(archive_write_set_format_raw(archive));
         if (parallel)
-            check(archive_write_set_filter_option(archive, format.c_str(), "threads", "0"));
+            check(archive_write_set_filter_option(
+                archive, format.c_str(), "threads", std::to_string(threads).c_str()));
         if (level != COMPRESSION_LEVEL_DEFAULT)
             check(archive_write_set_filter_option(
                 archive, format.c_str(), "compression-level", std::to_string(level).c_str()));
@@ -289,12 +295,13 @@ struct BrotliCompressionSink : ChunkedCompressionSink
     }
 };
 
-ref<CompressionSink> makeCompressionSink(const std::string & method, Sink & nextSink, const bool parallel, int level)
+ref<CompressionSink> makeCompressionSink(
+    const std::string & method, Sink & nextSink, const bool parallel, int level, unsigned int threads)
 {
     std::vector<std::string> la_supports = {
         "bzip2", "compress", "grzip", "gzip", "lrzip", "lz4", "lzip", "lzma", "lzop", "xz", "zstd"};
     if (std::find(la_supports.begin(), la_supports.end(), method) != la_supports.end()) {
-        return make_ref<ArchiveCompressionSink>(nextSink, method, parallel, level);
+        return make_ref<ArchiveCompressionSink>(nextSink, method, parallel, level, threads);
     }
     if (method == "none")
         return make_ref<NoneSink>(nextSink);
@@ -304,10 +311,11 @@ ref<CompressionSink> makeCompressionSink(const std::string & method, Sink & next
         throw UnknownCompressionMethod("unknown compression method '%s'", method);
 }
 
-std::string compress(const std::string & method, std::string_view in, const bool parallel, int level)
+std::string
+compress(const std::string & method, std::string_view in, const bool parallel, int level, unsigned int threads)
 {
     StringSink ssink;
-    auto sink = makeCompressionSink(method, ssink, parallel, level);
+    auto sink = makeCompressionSink(method, ssink, parallel, level, threads);
     (*sink)(in);
     sink->finish();
     return std::move(ssink.s);

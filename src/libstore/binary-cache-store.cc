@@ -153,7 +153,11 @@ ref<const ValidPathInfo> BinaryCacheStore::addToStoreCommon(
         FdSink fileSink(fdTemp.get());
         TeeSink teeSinkCompressed{fileSink, fileHashSink};
         auto compressionSink = makeCompressionSink(
-            config.compression, teeSinkCompressed, config.parallelCompression, config.compressionLevel);
+            config.compression,
+            teeSinkCompressed,
+            config.parallelCompression,
+            config.compressionLevel,
+            config.parallelCompressionThreads);
         TeeSink teeSinkUncompressed{*compressionSink, narHashSink};
         TeeSource teeSource{narSource, teeSinkUncompressed};
         narAccessor = makeNarAccessor(teeSource);

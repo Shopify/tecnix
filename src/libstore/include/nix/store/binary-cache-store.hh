@@ -50,6 +50,17 @@ struct BinaryCacheStoreConfig : virtual StoreConfig
         "parallel-compression",
         "Enable multi-threaded compression of NARs. This is currently only available for `xz` and `zstd`."};
 
+    const Setting<unsigned int> parallelCompressionThreads{
+        this,
+        0,
+        "parallel-compression-threads",
+        R"(
+          The number of threads to use for parallel compression of NARs.
+          `0` (the default) means use all available CPU cores. Only takes
+          effect when `parallel-compression` is enabled, and only for
+          compression methods that support multi-threading (`xz` and `zstd`).
+        )"};
+
     const Setting<int> compressionLevel{
         this,
         -1,
