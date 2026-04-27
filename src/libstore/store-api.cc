@@ -190,7 +190,9 @@ void Store::addMultipleToStore(PathsSource && pathsToCopy, Activity & act, Repai
 
             nrDone++;
             showProgress();
-        });
+        },
+        /*discoverNodes=*/false,
+        settings.parallelStoreJobs);
 }
 
 void Store::addMultipleToStore(Source & source, RepairFlag repair, CheckSigsFlag checkSigs)
@@ -726,7 +728,7 @@ StorePathSet Store::queryValidPaths(const StorePathSet & paths, SubstituteFlag m
     Sync<State> state_(State{paths.size(), StorePathSet()});
 
     std::condition_variable wakeup;
-    ThreadPool pool;
+    ThreadPool pool(settings.parallelStoreJobs);
 
     auto doQuery = [&](const StorePath & path) {
         checkInterrupt();
