@@ -537,7 +537,8 @@ private:
 
     /** Per-zone dirty status: whether the zone is dirty, and if so, which
      *  repo-relative file paths are dirty (from git status). */
-    struct ZoneDirtyInfo {
+    struct ZoneDirtyInfo
+    {
         bool dirty = false;
         boost::unordered_flat_set<std::string> dirtyFiles; // repo-relative paths
     };
@@ -576,7 +577,8 @@ private:
      * Get zone store path from checkout (for dirty zones).
      * With lazy-trees enabled, mounts lazily and caches by zone path.
      */
-    StorePath getZoneFromCheckout(std::string_view zonePath, const boost::unordered_flat_set<std::string> * dirtyFiles = nullptr);
+    StorePath
+    getZoneFromCheckout(std::string_view zonePath, const boost::unordered_flat_set<std::string> * dirtyFiles = nullptr);
 
 public:
 

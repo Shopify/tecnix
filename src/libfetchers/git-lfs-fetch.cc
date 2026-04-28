@@ -93,17 +93,21 @@ static LfsApiInfo getLfsApi(const ParsedURL & url)
             href = hrefIt->get<std::string>();
 
         return {href, authIt->get<std::string>()};
-    }
-    else {
+    } else {
         std::ostringstream inputCredDescr;
         inputCredDescr << "protocol=" << url.scheme << "\n";
         inputCredDescr << "host=" << url.authority->host << "\n";
         inputCredDescr << "path=" << url.renderPath(true) << "\n";
 
-        auto [status, output] = runProgram({.program = "git", .args = {"credential", "fill"}, .input = std::move(inputCredDescr).str()});
+        auto [status, output] =
+            runProgram({.program = "git", .args = {"credential", "fill"}, .input = std::move(inputCredDescr).str()});
 
         if (output.empty())
-            throw Error("git-credential-fill: no output (cmd: 'git credential fill' for protocol=%s, host=%s, path=%s)", url.scheme, url.authority->host, url.renderPath(true));
+            throw Error(
+                "git-credential-fill: no output (cmd: 'git credential fill' for protocol=%s, host=%s, path=%s)",
+                url.scheme,
+                url.authority->host,
+                url.renderPath(true));
 
         std::string username;
         std::string password;
@@ -120,9 +124,15 @@ static LfsApiInfo getLfsApi(const ParsedURL & url)
         }
 
         if (username.empty() || password.empty())
-            throw Error("git-credential-fill: no credentials returned (cmd: 'git credential fill' for protocol=%s, host=%s, path=%s)", url.scheme, url.authority->host, url.renderPath(true));
+            throw Error(
+                "git-credential-fill: no credentials returned (cmd: 'git credential fill' for protocol=%s, host=%s, path=%s)",
+                url.scheme,
+                url.authority->host,
+                url.renderPath(true));
 
-        return {url.to_string(), "Basic " + base64::encode(std::as_bytes(std::span<const char>{username + ":" + password}))};
+        return {
+            url.to_string(),
+            "Basic " + base64::encode(std::as_bytes(std::span<const char>{username + ":" + password}))};
     }
 
     return {url.to_string(), std::nullopt};
@@ -321,7 +331,8 @@ void Fetch::fetch(
 
     // Check the local git LFS object store before hitting the network
     auto gitDir = std::filesystem::path(git_repository_commondir(repo));
-    auto localLfsPath = gitDir / "lfs" / "objects" / pointer->oid.substr(0, 2) / pointer->oid.substr(2, 2) / pointer->oid;
+    auto localLfsPath =
+        gitDir / "lfs" / "objects" / pointer->oid.substr(0, 2) / pointer->oid.substr(2, 2) / pointer->oid;
     if (pathExists(localLfsPath)) {
         debug("using local git lfs object %s", localLfsPath);
         auto localContent = readFile(localLfsPath);

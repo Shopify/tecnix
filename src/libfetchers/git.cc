@@ -797,17 +797,20 @@ struct GitInputScheme : InputScheme
     getAccessorFromCache(const Settings & settings, Store & store, const Input & input) const
     {
         auto rev = input.getRev();
-        if (!rev) return std::nullopt;
+        if (!rev)
+            return std::nullopt;
 
         auto url = getStrAttr(input.attrs, "url");
 
-        Cache::Key cacheKey{"gitRevUrl", {
-            {"rev", rev->gitRev()},
-            {"url", url},
-            {"submodules", getSubmodulesAttr(input) ? "1" : "0"},
-            {"exportIgnore", getExportIgnoreAttr(input) ? "1" : "0"},
-            {"lfs", getLfsAttr(input) ? "1" : "0"},
-        }};
+        Cache::Key cacheKey{
+            "gitRevUrl",
+            {
+                {"rev", rev->gitRev()},
+                {"url", url},
+                {"submodules", getSubmodulesAttr(input) ? "1" : "0"},
+                {"exportIgnore", getExportIgnoreAttr(input) ? "1" : "0"},
+                {"lfs", getLfsAttr(input) ? "1" : "0"},
+            }};
 
         auto cached = settings.getCache()->lookupStorePath(cacheKey, store);
         if (!cached)
@@ -1168,16 +1171,17 @@ struct GitInputScheme : InputScheme
         // and would not match the cache key (which says exportIgnore=0).
         if (!usedLegacyFallback) {
             auto url = getStrAttr(input.attrs, "url");
-            auto [storePath, _narHash] = fetchToStore2(
-                settings, store, {accessor}, FetchMode::DryRun, input.getName());
+            auto [storePath, _narHash] = fetchToStore2(settings, store, {accessor}, FetchMode::DryRun, input.getName());
 
-            Cache::Key cacheKey{"gitRevUrl", {
-                {"rev", rev.gitRev()},
-                {"url", url},
-                {"submodules", getSubmodulesAttr(input) ? "1" : "0"},
-                {"exportIgnore", getExportIgnoreAttr(input) ? "1" : "0"},
-                {"lfs", getLfsAttr(input) ? "1" : "0"},
-            }};
+            Cache::Key cacheKey{
+                "gitRevUrl",
+                {
+                    {"rev", rev.gitRev()},
+                    {"url", url},
+                    {"submodules", getSubmodulesAttr(input) ? "1" : "0"},
+                    {"exportIgnore", getExportIgnoreAttr(input) ? "1" : "0"},
+                    {"lfs", getLfsAttr(input) ? "1" : "0"},
+                }};
 
             Attrs cacheValue;
             if (auto lm = input.getLastModified())
@@ -1316,15 +1320,14 @@ struct GitInputScheme : InputScheme
         auto options = getGitAccessorOptions(input);
 
         if (auto rev = input.getRev())
-            // FIXME: this can return a wrong fingerprint for the legacy (`git archive`) case, since we don't know here
-            // whether to append the `;legacy` suffix or not.
+        // FIXME: this can return a wrong fingerprint for the legacy (`git archive`) case, since we don't know here
+        // whether to append the `;legacy` suffix or not.
         {
             auto fp = options.makeFingerprint(*rev);
             if (options.submodules)
                 fp += ";s";
             return fp;
-        }
-        else {
+        } else {
             auto repoInfo = getRepoInfo(input);
             if (auto repoPath = repoInfo.getPath(); repoPath && repoInfo.workdirInfo.submodules.empty()) {
                 /* Calculate a fingerprint that takes into account the
