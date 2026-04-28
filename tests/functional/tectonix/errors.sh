@@ -55,7 +55,7 @@ expect_failure tectonix_eval "$TEST_WORLD/.git" "$HEAD_SHA" \
 # Test: Tree access works without git SHA
 
 echo "Testing tree access without git SHA..."
-TREE_SHA=$(git -C "$TEST_WORLD" rev-parse HEAD^{tree})
+TREE_SHA=$(git -C "$TEST_WORLD" rev-parse 'HEAD^{tree}')
 nix eval --raw \
     --extra-experimental-features 'nix-command' \
     --option tectonix-git-dir "$TEST_WORLD/.git" \

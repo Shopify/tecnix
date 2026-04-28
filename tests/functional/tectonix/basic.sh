@@ -56,7 +56,7 @@ echo "Zone root: $zone_root"
 [[ -n "$zone_root" ]] || fail "Zone root should not be empty"
 
 # Verify zone root points into the test world
-if [[ ! "$zone_root" =~ "$TEST_WORLD" ]]; then
+if [[ ! "$zone_root" =~ $TEST_WORLD ]]; then
     fail "Zone root should reference test world, got: $zone_root"
 fi
 
