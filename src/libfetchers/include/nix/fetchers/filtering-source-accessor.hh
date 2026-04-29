@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nix/util/source-path.hh"
+#include "nix/util/sync.hh"
 
 #include <boost/unordered/unordered_flat_set_fwd.hpp>
 
@@ -93,7 +94,7 @@ struct AllowListSourceAccessor : public FilteringSourceAccessor
  */
 struct CachingFilteringSourceAccessor : FilteringSourceAccessor
 {
-    std::map<CanonPath, bool> cache;
+    SharedSync<std::map<CanonPath, bool>> cache;
 
     using FilteringSourceAccessor::FilteringSourceAccessor;
 
