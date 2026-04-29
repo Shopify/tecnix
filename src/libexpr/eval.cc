@@ -249,7 +249,7 @@ static Symbol getName(const AttrName & name, EvalState & state, Env & env)
     }
 }
 
-static constexpr size_t BASE_ENV_SIZE = 128;
+static constexpr size_t BASE_ENV_SIZE = 140;
 
 EvalMemory::EvalMemory()
 #if NIX_USE_BOEHMGC
