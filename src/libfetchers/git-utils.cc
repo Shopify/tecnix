@@ -113,7 +113,7 @@ static void initLibGit2()
         // This allows opening repos with extensions that libgit2 doesn't natively support,
         // as long as we don't actually need the extension's functionality.
         // "refstorage" is used by reftables - we can ignore it since we only access objects by SHA.
-        const char * extensions[] = { "refstorage" };
+        const char * extensions[] = {"refstorage"};
         git_libgit2_opts(GIT_OPT_SET_EXTENSIONS, extensions, 1);
     });
 }
@@ -837,7 +837,7 @@ ref<GitRepo> GitRepo::openRepo(const std::filesystem::path & path, GitRepo::Opti
 std::string GitAccessorOptions::makeFingerprint(const Hash & rev) const
 {
     return "git:" + rev.gitRev() + (exportIgnore ? ";e" : "") + (smudgeLfs ? ";l" : "")
-        + (attrFingerprint.empty() ? "" : ";af:" + attrFingerprint);
+           + (attrFingerprint.empty() ? "" : ";af:" + attrFingerprint);
 }
 
 /**
@@ -859,9 +859,13 @@ struct GitSourceAccessor : SourceAccessor
         : state_{State{
               .repo = repo_,
               .root = peelToTreeOrBlob(lookupObject(*repo_, hashToOID(rev)).get()),
-              .lfsFetch = options.smudgeLfs ? std::make_optional(lfs::Fetch(*repo_,
-                  options.attrCommitRev ? hashToOID(*options.attrCommitRev) : hashToOID(rev),
-                  options.attrPathPrefix)) : std::nullopt,
+              .lfsFetch = options.smudgeLfs
+                              ? std::make_optional(
+                                    lfs::Fetch(
+                                        *repo_,
+                                        options.attrCommitRev ? hashToOID(*options.attrCommitRev) : hashToOID(rev),
+                                        options.attrPathPrefix))
+                              : std::nullopt,
               .options = options,
           }}
     {
@@ -1139,7 +1143,8 @@ struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
 
     Sync<State> state_;
 
-    GitExportIgnoreSourceAccessor(ref<GitRepoImpl> repo, ref<SourceAccessor> next, std::optional<Hash> rev, const GitAccessorOptions & options)
+    GitExportIgnoreSourceAccessor(
+        ref<GitRepoImpl> repo, ref<SourceAccessor> next, std::optional<Hash> rev, const GitAccessorOptions & options)
         : CachingFilteringSourceAccessor(
               next,
               [&](const CanonPath & path) {
@@ -1158,7 +1163,8 @@ struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
     {
         auto state(state_.lock());
 
-        auto fullPath = state->options.attrPathPrefix.empty() ? path : CanonPath("/" + state->options.attrPathPrefix) / path;
+        auto fullPath =
+            state->options.attrPathPrefix.empty() ? path : CanonPath("/" + state->options.attrPathPrefix) / path;
         const char * pathCStr = fullPath.rel_c_str();
 
         if (state->rev) {

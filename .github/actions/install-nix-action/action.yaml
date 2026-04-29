@@ -1,8 +1,8 @@
 name: "Install Nix"
-description: "Helper action for installing Nix with support for dogfooding from master"
+description: "Helper action for installing Nix with support for catfooding from default branch"
 inputs:
-  dogfood:
-    description: "Whether to use Nix installed from the latest artifact from master branch"
+  catfood:
+    description: "Whether to use Nix installed from the latest artifact from default branch"
     required: true # Be explicit about the fact that we are using unreleased artifacts
   experimental-installer:
     description: "Whether to use the experimental installer to install Nix"
@@ -30,12 +30,14 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: "Download nix install artifact from master"
+    - name: "Download nix install artifact from default branch"
       shell: bash
       id: download-nix-installer
-      if: inputs.dogfood == 'true'
+      if: inputs.catfood == 'true'
       run: |
-        RUN_ID=$(gh run list --repo "$DOGFOOD_REPO" --workflow ci.yml --branch master --status success --json databaseId --jq ".[0].databaseId")
+        DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' "$CATFOOD_REPO")"
+
+        RUN_ID=$(gh run list --repo "$CATFOOD_REPO" --workflow ci.yml --branch "$DEFAULT_BRANCH" --status success --json databaseId --jq ".[0].databaseId")
 
         if [ "$RUNNER_OS" == "Linux" ]; then
           INSTALLER_ARTIFACT="installer-linux"
@@ -49,15 +51,15 @@ runs:
         INSTALLER_DOWNLOAD_DIR="$GITHUB_WORKSPACE/$INSTALLER_ARTIFACT"
         mkdir -p "$INSTALLER_DOWNLOAD_DIR"
 
-        gh run download "$RUN_ID" --repo "$DOGFOOD_REPO" -n "$INSTALLER_ARTIFACT" -D "$INSTALLER_DOWNLOAD_DIR"
+        gh run download "$RUN_ID" --repo "$CATFOOD_REPO" -n "$INSTALLER_ARTIFACT" -D "$INSTALLER_DOWNLOAD_DIR"
         echo "installer-path=file://$INSTALLER_DOWNLOAD_DIR" >> "$GITHUB_OUTPUT"
         TARBALL_PATH="$(find "$INSTALLER_DOWNLOAD_DIR" -name 'nix*.tar.xz' -print | head -n 1)"
         echo "tarball-path=file://$TARBALL_PATH" >> "$GITHUB_OUTPUT"
 
-        echo "::notice ::Dogfooding Nix installer from master (https://github.com/$DOGFOOD_REPO/actions/runs/$RUN_ID)"
+        echo "::notice ::Catfooding Nix installer from $DEFAULT_BRANCH (https://github.com/$CATFOOD_REPO/actions/runs/$RUN_ID)"
       env:
         GH_TOKEN: ${{ inputs.github_token }}
-        DOGFOOD_REPO: "NixOS/nix"
+        CATFOOD_REPO: ${{ github.repository }}
     - name: "Gather system info for experimental installer"
       shell: bash
       if: ${{ inputs.experimental-installer == 'true' }}
@@ -110,8 +112,8 @@ runs:
       if: ${{ inputs.experimental-installer != 'true' }}
       with:
         # Ternary operator in GHA: https://www.github.com/actions/runner/issues/409#issuecomment-752775072
-        install_url: ${{ inputs.dogfood == 'true' && format('{0}/install', steps.download-nix-installer.outputs.installer-path) || inputs.install_url }}
-        install_options: ${{ inputs.dogfood == 'true' && format('--tarball-url-prefix {0}', steps.download-nix-installer.outputs.installer-path) || '' }}
+        install_url: ${{ inputs.catfood == 'true' && format('{0}/install', steps.download-nix-installer.outputs.installer-path) || inputs.install_url }}
+        install_options: ${{ inputs.catfood == 'true' && format('--tarball-url-prefix {0}', steps.download-nix-installer.outputs.installer-path) || '' }}
         extra_nix_config: ${{ inputs.extra_nix_config }}
     - uses: DeterminateSystems/nix-installer-action@786fff0690178f1234e4e1fe9b536e94f5433196 # v20
       if: ${{ inputs.experimental-installer == 'true' }}
@@ -120,5 +122,5 @@ runs:
         # TODO: It'd be nice to use `artifacts.nixos.org` for both of these, maybe through an `/experimental-installer/latest` endpoint? or `/commit/<hash>`?
         local-root: ${{ inputs.experimental-installer-version == 'latest' && steps.download-latest-experimental-installer.outputs.installer-path || '' }}
         source-url: ${{ inputs.experimental-installer-version != 'latest' && 'https://artifacts.nixos.org/experimental-installer/tag/${{ inputs.experimental-installer-version }}/${{ env.EXPERIMENTAL_INSTALLER_ARTIFACT }}' || '' }}
-        nix-package-url: ${{ inputs.dogfood == 'true' && steps.download-nix-installer.outputs.tarball-path || (inputs.tarball_url || '') }}
+        nix-package-url: ${{ inputs.catfood == 'true' && steps.download-nix-installer.outputs.tarball-path || (inputs.tarball_url || '') }}
         extra-conf: ${{ inputs.extra_nix_config }}

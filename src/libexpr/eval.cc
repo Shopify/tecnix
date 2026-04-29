@@ -500,7 +500,8 @@ static std::string normalizeZonePath(std::string_view zonePath)
     return path;
 }
 
-static GitAccessorOptions makeZoneAccessorOptions(ref<GitRepo> repo, const Hash & commitHash, const std::string & zonePath)
+static GitAccessorOptions
+makeZoneAccessorOptions(ref<GitRepo> repo, const Hash & commitHash, const std::string & zonePath)
 {
     std::string attrFp;
     for (auto & h : repo->getGitAttributesAlongPath(commitHash, zonePath))
@@ -525,9 +526,9 @@ static std::string sanitizeZoneNameForStore(std::string_view zonePath)
     for (char c : zone) {
         if (c == '/') {
             result += '-';
-        } else if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
-                   (c >= 'A' && c <= 'Z') || c == '+' || c == '-' ||
-                   c == '.' || c == '_' || c == '?' || c == '=') {
+        } else if (
+            (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '+' || c == '-'
+            || c == '.' || c == '_' || c == '?' || c == '=') {
             result += c;
         } else {
             result += '_';
@@ -562,7 +563,8 @@ Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
     auto accessor = getWorldGitAccessor();
 
     for (auto & component : tokenizeString<std::vector<std::string>>(path, "/")) {
-        if (component.empty()) continue;
+        if (component.empty())
+            continue;
         if (component == ".." || component == ".")
             throw Error("invalid path component '%s' in world path '%s'", component, worldPath);
 
@@ -688,7 +690,10 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
         } catch (ExecError & e) {
             // If git status fails, treat all zones as clean (fallback)
             // This ensures call_once completes and we don't retry with partial state
-            warn("failed to get git status for dirty zone detection in '%s': %s; treating all zones as clean", checkoutPath, e.what());
+            warn(
+                "failed to get git status for dirty zone detection in '%s': %s; treating all zones as clean",
+                checkoutPath,
+                e.what());
             return;
         }
 
@@ -706,7 +711,8 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
 
             // Git porcelain format: "XY PATH" where XY is 2-char status, then space, then path
             // Minimum valid entry is "X  P" (4 chars): status + space + 1-char path
-            if (entry.size() < 4) continue;
+            if (entry.size() < 4)
+                continue;
 
             // XY is first 2 chars, then space, then path
             char xy0 = entry[0];
@@ -741,7 +747,8 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
 
         size_t dirtyCount = 0;
         for (const auto & [_, info] : tectonixDirtyZones)
-            if (info.dirty) dirtyCount++;
+            if (info.dirty)
+                dirtyCount++;
         debug("computed dirty zones: %d of %d zones are dirty", dirtyCount, tectonixDirtyZones.size());
     });
     return tectonixDirtyZones;
@@ -782,8 +789,7 @@ const std::string & EvalState::getManifestContent() const
 const nlohmann::json & EvalState::getManifestJson() const
 {
     std::call_once(tectonixManifestJsonFlag, [this]() {
-        tectonixManifestJson = std::make_unique<nlohmann::json>(
-            nlohmann::json::parse(getManifestContent()));
+        tectonixManifestJson = std::make_unique<nlohmann::json>(nlohmann::json::parse(getManifestContent()));
     });
     return *tectonixManifestJson;
 }
@@ -816,10 +822,8 @@ StorePath EvalState::getZoneStorePath(std::string_view zonePath)
         auto accessor = repo->getAccessor(treeSha, opts, "zone");
 
         std::string name = "zone-" + sanitizeZoneNameForStore(zonePath);
-        auto storePath = fetchToStore(
-            fetchSettings, *store,
-            SourcePath(accessor, CanonPath::root),
-            FetchMode::Copy, name);
+        auto storePath =
+            fetchToStore(fetchSettings, *store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
 
         allowPath(storePath);
         return storePath;
@@ -883,8 +887,7 @@ StorePath EvalState::mountZoneByTreeSha(const Hash & treeSha, std::string_view z
     // Insert into cache (we hold the lock, so this will succeed)
     cache->emplace(treeSha, storePath);
 
-    debug("mounted zone %s (tree %s) at %s",
-          zonePath, treeSha.gitRev(), store->printStorePath(storePath));
+    debug("mounted zone %s (tree %s) at %s", zonePath, treeSha.gitRev(), store->printStorePath(storePath));
 
     return storePath;
 }
@@ -898,9 +901,10 @@ struct DirtyOverlaySourceAccessor : SourceAccessor
     boost::unordered_flat_set<std::string> dirtyFiles, dirtyDirs;
 
     DirtyOverlaySourceAccessor(
-        ref<SourceAccessor> base, ref<SourceAccessor> disk,
-        boost::unordered_flat_set<std::string> && dirtyFiles)
-        : base(base), disk(disk), dirtyFiles(std::move(dirtyFiles))
+        ref<SourceAccessor> base, ref<SourceAccessor> disk, boost::unordered_flat_set<std::string> && dirtyFiles)
+        : base(base)
+        , disk(disk)
+        , dirtyFiles(std::move(dirtyFiles))
     {
         for (auto & f : this->dirtyFiles) {
             for (auto p = CanonPath(f); !p.isRoot();) {
@@ -911,20 +915,37 @@ struct DirtyOverlaySourceAccessor : SourceAccessor
         }
     }
 
-    bool isDirty(const CanonPath & path) { return dirtyFiles.contains(std::string(path.rel())); }
+    bool isDirty(const CanonPath & path)
+    {
+        return dirtyFiles.contains(std::string(path.rel()));
+    }
 
     std::optional<Stat> maybeLstat(const CanonPath & path) override
     {
-        if (path.isRoot()) return base->maybeLstat(path);
-        if (isDirty(path)) return disk->maybeLstat(path);
+        if (path.isRoot())
+            return base->maybeLstat(path);
+        if (isDirty(path))
+            return disk->maybeLstat(path);
         auto s = base->maybeLstat(path);
-        if (s || !dirtyDirs.contains(std::string(path.rel()))) return s;
+        if (s || !dirtyDirs.contains(std::string(path.rel())))
+            return s;
         return disk->maybeLstat(path);
     }
 
-    std::string readFile(const CanonPath & path) override { return (isDirty(path) ? disk : base)->readFile(path); }
-    std::string readLink(const CanonPath & path) override { return (isDirty(path) ? disk : base)->readLink(path); }
-    std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override { return (isDirty(path) ? disk : base)->getPhysicalPath(path); }
+    std::string readFile(const CanonPath & path) override
+    {
+        return (isDirty(path) ? disk : base)->readFile(path);
+    }
+
+    std::string readLink(const CanonPath & path) override
+    {
+        return (isDirty(path) ? disk : base)->readLink(path);
+    }
+
+    std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override
+    {
+        return (isDirty(path) ? disk : base)->getPhysicalPath(path);
+    }
 
     DirEntries readDirectory(const CanonPath & path) override
     {
@@ -933,21 +954,30 @@ struct DirtyOverlaySourceAccessor : SourceAccessor
             return base->readDirectory(path);
 
         DirEntries entries;
-        try { entries = base->readDirectory(path); } catch (...) {}
+        try {
+            entries = base->readDirectory(path);
+        } catch (...) {
+        }
 
         auto prefix = rel.empty() ? "" : rel + "/";
         for (auto & f : dirtyFiles) {
-            if (!f.starts_with(prefix)) continue;
+            if (!f.starts_with(prefix))
+                continue;
             auto rest = std::string_view(f).substr(prefix.size());
-            if (rest.find('/') != std::string_view::npos) continue;
+            if (rest.find('/') != std::string_view::npos)
+                continue;
             auto stat = disk->maybeLstat(path / rest);
-            if (stat) entries[std::string(rest)] = stat->type;
-            else entries.erase(std::string(rest));
+            if (stat)
+                entries[std::string(rest)] = stat->type;
+            else
+                entries.erase(std::string(rest));
         }
         for (auto & d : dirtyDirs) {
-            if (!d.starts_with(prefix)) continue;
+            if (!d.starts_with(prefix))
+                continue;
             auto rest = std::string_view(d).substr(prefix.size());
-            if (rest.find('/') != std::string_view::npos || rest.empty()) continue;
+            if (rest.find('/') != std::string_view::npos || rest.empty())
+                continue;
             if (!entries.count(std::string(rest)))
                 entries[std::string(rest)] = Type::tDirectory;
         }
@@ -955,7 +985,8 @@ struct DirtyOverlaySourceAccessor : SourceAccessor
     }
 };
 
-StorePath EvalState::getZoneFromCheckout(std::string_view zonePath, const boost::unordered_flat_set<std::string> * dirtyFiles)
+StorePath
+EvalState::getZoneFromCheckout(std::string_view zonePath, const boost::unordered_flat_set<std::string> * dirtyFiles)
 {
     auto zone = normalizeZonePath(zonePath);
     std::string name = "zone-" + sanitizeZoneNameForStore(zonePath);
@@ -980,10 +1011,8 @@ StorePath EvalState::getZoneFromCheckout(std::string_view zonePath, const boost:
 
     if (!settings.lazyTrees) {
         auto accessor = makeDirtyAccessor();
-        auto storePath = fetchToStore(
-            fetchSettings, *store,
-            SourcePath(accessor, CanonPath::root),
-            FetchMode::Copy, name);
+        auto storePath =
+            fetchToStore(fetchSettings, *store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
         allowPath(storePath);
         return storePath;
     }
@@ -991,12 +1020,14 @@ StorePath EvalState::getZoneFromCheckout(std::string_view zonePath, const boost:
     {
         auto cache = tectonixCheckoutZoneCache_.readLock();
         auto it = cache->find(std::string(zonePath));
-        if (it != cache->end()) return it->second;
+        if (it != cache->end())
+            return it->second;
     }
 
     auto cache = tectonixCheckoutZoneCache_.lock();
     auto it = cache->find(std::string(zonePath));
-    if (it != cache->end()) return it->second;
+    if (it != cache->end())
+        return it->second;
 
     if (!std::filesystem::exists(fullPath))
         throw Error("zone '%s' not found in checkout at '%s'", zonePath, fullPath.string());

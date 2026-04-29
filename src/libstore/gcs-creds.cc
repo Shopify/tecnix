@@ -30,6 +30,7 @@ struct BioDeleter
             BIO_free(bio);
     }
 };
+
 using UniqueBio = std::unique_ptr<BIO, BioDeleter>;
 
 struct EvpPkeyDeleter
@@ -40,6 +41,7 @@ struct EvpPkeyDeleter
             EVP_PKEY_free(pkey);
     }
 };
+
 using UniqueEvpPkey = std::unique_ptr<EVP_PKEY, EvpPkeyDeleter>;
 
 struct EvpMdCtxDeleter
@@ -50,6 +52,7 @@ struct EvpMdCtxDeleter
             EVP_MD_CTX_free(ctx);
     }
 };
+
 using UniqueEvpMdCtx = std::unique_ptr<EVP_MD_CTX, EvpMdCtxDeleter>;
 
 // Google's OAuth2 token endpoint
@@ -232,7 +235,8 @@ std::string rsaSha256Sign(std::string_view data, const std::string & privateKeyP
 /**
  * Create a signed JWT for service account authentication.
  */
-std::string createServiceAccountJwt(const std::string & clientEmail, const std::string & privateKey, std::string_view scope)
+std::string
+createServiceAccountJwt(const std::string & clientEmail, const std::string & privateKey, std::string_view scope)
 {
     auto now = std::chrono::system_clock::now();
     auto iat = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
@@ -438,9 +442,7 @@ private:
                 auto error = getString(*errPtr);
                 auto description = optionalValueAt(obj, "error_description");
                 throw GcsAuthError(
-                    "OAuth2 token request failed: %s%s",
-                    error,
-                    description ? (" - " + getString(*description)) : "");
+                    "OAuth2 token request failed: %s%s", error, description ? (" - " + getString(*description)) : "");
             }
 
             auto accessToken = getString(valueAt(obj, "access_token"));
@@ -449,8 +451,7 @@ private:
             debug("Obtained GCS access token, expires in %d seconds", expiresIn);
 
             return GcsAccessToken{
-                .token = accessToken,
-                .expiresAt = std::chrono::steady_clock::now() + std::chrono::seconds(expiresIn)};
+                .token = accessToken, .expiresAt = std::chrono::steady_clock::now() + std::chrono::seconds(expiresIn)};
         } catch (nlohmann::json::exception & e) {
             throw GcsAuthError("Failed to parse OAuth2 token response: %s\nResponse: %s", e.what(), response);
         }

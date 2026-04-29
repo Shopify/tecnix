@@ -63,7 +63,7 @@ public:
      */
     std::optional<std::string> maybeGetAccessToken(bool writable = false);
 
-    virtual ~GcsCredentialProvider() { }
+    virtual ~GcsCredentialProvider() {}
 };
 
 /**

@@ -110,9 +110,7 @@ public:
         ASSERT_EQ(git_signature_now(&sig, "test", "test@example.com"), 0);
 
         git_oid commitOid;
-        ASSERT_EQ(git_commit_create_v(
-            &commitOid, repo, "HEAD", sig, sig, nullptr,
-            "Initial commit", tree, 0), 0);
+        ASSERT_EQ(git_commit_create_v(&commitOid, repo, "HEAD", sig, sig, nullptr, "Initial commit", tree, 0), 0);
 
         // Store commit SHA
         char sha[GIT_OID_SHA1_HEXSIZE + 1];
@@ -138,14 +136,16 @@ public:
     }
 
     // Create EvalState with tectonix settings configured
-    struct TectonixEvalContext {
+    struct TectonixEvalContext
+    {
         bool readOnlyMode = true;
         fetchers::Settings fetchSettings{};
         EvalSettings evalSettings{readOnlyMode};
         ref<Store> store;
         std::unique_ptr<EvalState> state;
 
-        TectonixEvalContext(const std::filesystem::path & repoPath, const std::string & commitSha, bool withCheckout = false)
+        TectonixEvalContext(
+            const std::filesystem::path & repoPath, const std::string & commitSha, bool withCheckout = false)
             : store(openStore("dummy://"))
         {
             evalSettings.nixPath = {};
@@ -155,13 +155,7 @@ public:
                 evalSettings.tectonixCheckoutPath = repoPath.string();
             }
 
-            state = std::make_unique<EvalState>(
-                LookupPath{},
-                store,
-                fetchSettings,
-                evalSettings,
-                nullptr
-            );
+            state = std::make_unique<EvalState>(LookupPath{}, store, fetchSettings, evalSettings, nullptr);
         }
 
         Value eval(const std::string & input)
@@ -279,9 +273,7 @@ TEST_F(TectonixTest, treeSha_invalid_path_throws)
 {
     auto ctx = createTectonixContext();
 
-    ASSERT_THROW(
-        ctx->eval(R"(builtins.unsafeTectonixInternalTreeSha "//does/not/exist")"),
-        Error);
+    ASSERT_THROW(ctx->eval(R"(builtins.unsafeTectonixInternalTreeSha "//does/not/exist")"), Error);
 }
 
 // ============================================================================
@@ -310,9 +302,7 @@ TEST_F(TectonixTest, tree_invalid_sha_throws)
     auto ctx = createTectonixContext();
 
     // Invalid SHA (not 40 hex chars)
-    ASSERT_THROW(
-        ctx->eval(R"(builtins.unsafeTectonixInternalTree "invalid")"),
-        Error);
+    ASSERT_THROW(ctx->eval(R"(builtins.unsafeTectonixInternalTree "invalid")"), Error);
 }
 
 TEST_F(TectonixTest, tree_nonexistent_sha_throws)
@@ -321,8 +311,7 @@ TEST_F(TectonixTest, tree_nonexistent_sha_throws)
 
     // Valid format but non-existent SHA
     ASSERT_THROW(
-        ctx->eval(R"(builtins.unsafeTectonixInternalTree "0000000000000000000000000000000000000000")"),
-        EvalError);
+        ctx->eval(R"(builtins.unsafeTectonixInternalTree "0000000000000000000000000000000000000000")"), EvalError);
 }
 
 // ============================================================================
@@ -346,18 +335,14 @@ TEST_F(TectonixTest, zoneSrc_validates_zone_path)
     auto ctx = createTectonixContext();
 
     // Parent of zone should fail validation
-    ASSERT_THROW(
-        ctx->eval(R"(builtins.unsafeTectonixInternalZoneSrc "//areas/tools")"),
-        EvalError);
+    ASSERT_THROW(ctx->eval(R"(builtins.unsafeTectonixInternalZoneSrc "//areas/tools")"), EvalError);
 }
 
 TEST_F(TectonixTest, zoneSrc_non_zone_path_throws)
 {
     auto ctx = createTectonixContext();
 
-    ASSERT_THROW(
-        ctx->eval(R"(builtins.unsafeTectonixInternalZoneSrc "//not/a/zone")"),
-        EvalError);
+    ASSERT_THROW(ctx->eval(R"(builtins.unsafeTectonixInternalZoneSrc "//not/a/zone")"), EvalError);
 }
 
 // ============================================================================
@@ -377,9 +362,7 @@ TEST_F(TectonixTest, zone_invalid_path_throws)
 {
     auto ctx = createTectonixContext();
 
-    ASSERT_THROW(
-        ctx->eval(R"(builtins.unsafeTectonixInternalZoneRoot "//not/a/zone")"),
-        EvalError);
+    ASSERT_THROW(ctx->eval(R"(builtins.unsafeTectonixInternalZoneRoot "//not/a/zone")"), EvalError);
 }
 
 // ============================================================================
@@ -534,13 +517,7 @@ TEST_F(TectonixTest, missing_git_dir_throws)
     evalSettings.tectonixGitDir = ""; // empty
     evalSettings.tectonixGitSha = commitSha;
 
-    EvalState evalState(
-        LookupPath{},
-        openStore("dummy://"),
-        fetchSettings,
-        evalSettings,
-        nullptr
-    );
+    EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
     ASSERT_THROW(evalState.getWorldRepo(), Error);
 }
@@ -554,13 +531,7 @@ TEST_F(TectonixTest, missing_git_sha_throws)
     evalSettings.tectonixGitDir = (repoPath / ".git").string();
     evalSettings.tectonixGitSha = ""; // empty
 
-    EvalState evalState(
-        LookupPath{},
-        openStore("dummy://"),
-        fetchSettings,
-        evalSettings,
-        nullptr
-    );
+    EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
     ASSERT_THROW(evalState.getWorldGitAccessor(), Error);
 }
@@ -574,13 +545,7 @@ TEST_F(TectonixTest, missing_git_sha_tree_sha_throws)
     evalSettings.tectonixGitDir = (repoPath / ".git").string();
     evalSettings.tectonixGitSha = ""; // empty
 
-    EvalState evalState(
-        LookupPath{},
-        openStore("dummy://"),
-        fetchSettings,
-        evalSettings,
-        nullptr
-    );
+    EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
     ASSERT_THROW(evalState.getWorldTreeSha("//areas/tools/dev"), Error);
 }
@@ -594,13 +559,7 @@ TEST_F(TectonixTest, invalid_sha_throws)
     evalSettings.tectonixGitDir = (repoPath / ".git").string();
     evalSettings.tectonixGitSha = "0000000000000000000000000000000000000000"; // nonexistent
 
-    EvalState evalState(
-        LookupPath{},
-        openStore("dummy://"),
-        fetchSettings,
-        evalSettings,
-        nullptr
-    );
+    EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
     ASSERT_THROW(evalState.getWorldGitAccessor(), Error);
 }
@@ -618,9 +577,7 @@ TEST_F(TectonixTest, concurrent_manifest_access)
 
     // Multiple threads calling getManifestJson
     for (size_t i = 0; i < 8; i++) {
-        threads.emplace_back([&, i]() {
-            results[i] = &ctx->state->getManifestJson();
-        });
+        threads.emplace_back([&, i]() { results[i] = &ctx->state->getManifestJson(); });
     }
 
     for (auto & t : threads) {
@@ -638,13 +595,11 @@ TEST_F(TectonixTest, concurrent_tree_sha_computation)
     auto ctx = createTectonixContext();
 
     std::vector<std::thread> threads;
-    std::vector<std::string> results(8);  // Store as gitRev strings
+    std::vector<std::string> results(8); // Store as gitRev strings
 
     // Multiple threads computing tree SHAs for same path
     for (size_t i = 0; i < 8; i++) {
-        threads.emplace_back([&, i]() {
-            results[i] = ctx->state->getWorldTreeSha("//areas/tools/dev").gitRev();
-        });
+        threads.emplace_back([&, i]() { results[i] = ctx->state->getWorldTreeSha("//areas/tools/dev").gitRev(); });
     }
 
     for (auto & t : threads) {
@@ -666,9 +621,7 @@ TEST_F(TectonixTest, concurrent_world_repo_access)
 
     // Multiple threads calling getWorldRepo
     for (size_t i = 0; i < 8; i++) {
-        threads.emplace_back([&, i]() {
-            results[i] = &*ctx->state->getWorldRepo();
-        });
+        threads.emplace_back([&, i]() { results[i] = &*ctx->state->getWorldRepo(); });
     }
 
     for (auto & t : threads) {
@@ -686,12 +639,8 @@ TEST_F(TectonixTest, concurrent_different_tree_shas)
     auto ctx = createTectonixContext();
 
     std::vector<std::thread> threads;
-    std::vector<std::string> zonePaths = {
-        "//areas/tools/dev",
-        "//areas/tools/tec",
-        "//areas/platform/core"
-    };
-    std::map<std::string, std::string> results;  // Store as string (gitRev)
+    std::vector<std::string> zonePaths = {"//areas/tools/dev", "//areas/tools/tec", "//areas/platform/core"};
+    std::map<std::string, std::string> results; // Store as string (gitRev)
     std::mutex resultsMutex;
 
     // Multiple threads computing different tree SHAs
@@ -735,7 +684,7 @@ TEST_F(TectonixTest, manifest_non_string_id_throws)
 
     std::filesystem::create_directories(badRepoPath / ".meta");
     std::ofstream manifest(badRepoPath / ".meta/manifest.json");
-    manifest << R"({"//zone": {"id": 12345}})";  // id is number, not string
+    manifest << R"({"//zone": {"id": 12345}})"; // id is number, not string
     manifest.close();
 
     git_index * index = nullptr;
@@ -771,24 +720,19 @@ TEST_F(TectonixTest, manifest_non_string_id_throws)
     evalSettings.tectonixGitDir = (badRepoPath / ".git").string();
     evalSettings.tectonixGitSha = sha;
 
-    EvalState evalState(
-        LookupPath{},
-        openStore("dummy://"),
-        fetchSettings,
-        evalSettings,
-        nullptr
-    );
+    EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
     // Should throw when accessing manifest
     Value v;
-    Expr * e = evalState.parseExprFromString(
-        "builtins.unsafeTectonixInternalManifest",
-        evalState.rootPath(CanonPath::root));
+    Expr * e =
+        evalState.parseExprFromString("builtins.unsafeTectonixInternalManifest", evalState.rootPath(CanonPath::root));
 
-    ASSERT_THROW({
-        evalState.eval(e, v);
-        evalState.forceValue(v, noPos);
-    }, Error);
+    ASSERT_THROW(
+        {
+            evalState.eval(e, v);
+            evalState.forceValue(v, noPos);
+        },
+        Error);
 }
 
 TEST_F(TectonixTest, zone_path_traversal_throws)
@@ -796,9 +740,7 @@ TEST_F(TectonixTest, zone_path_traversal_throws)
     auto ctx = createTectonixContext();
 
     // Path traversal attempt should fail
-    ASSERT_THROW(
-        ctx->state->getWorldTreeSha("//areas/../.git"),
-        Error);
+    ASSERT_THROW(ctx->state->getWorldTreeSha("//areas/../.git"), Error);
 }
 
 TEST_F(TectonixTest, nonexistent_git_dir_throws)
@@ -810,13 +752,7 @@ TEST_F(TectonixTest, nonexistent_git_dir_throws)
     evalSettings.tectonixGitDir = "/nonexistent/path/to/repo/.git";
     evalSettings.tectonixGitSha = "0000000000000000000000000000000000000000";
 
-    EvalState evalState(
-        LookupPath{},
-        openStore("dummy://"),
-        fetchSettings,
-        evalSettings,
-        nullptr
-    );
+    EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
     ASSERT_THROW(evalState.getWorldRepo(), Error);
 }
@@ -826,9 +762,7 @@ TEST_F(TectonixTest, treeSha_for_nonexistent_subpath_throws)
     auto ctx = createTectonixContext();
 
     // Path that doesn't exist in the tree
-    ASSERT_THROW(
-        ctx->state->getWorldTreeSha("//areas/tools/dev/nonexistent/deep/path"),
-        Error);
+    ASSERT_THROW(ctx->state->getWorldTreeSha("//areas/tools/dev/nonexistent/deep/path"), Error);
 }
 
 TEST_F(TectonixTest, manifest_missing_id_field_throws)
@@ -842,7 +776,7 @@ TEST_F(TectonixTest, manifest_missing_id_field_throws)
 
     std::filesystem::create_directories(badRepoPath / ".meta");
     std::ofstream manifest(badRepoPath / ".meta/manifest.json");
-    manifest << R"({"//zone": {"name": "test"}})";  // missing "id" field
+    manifest << R"({"//zone": {"name": "test"}})"; // missing "id" field
     manifest.close();
 
     git_index * index = nullptr;
@@ -878,24 +812,19 @@ TEST_F(TectonixTest, manifest_missing_id_field_throws)
     evalSettings.tectonixGitDir = (badRepoPath / ".git").string();
     evalSettings.tectonixGitSha = sha;
 
-    EvalState evalState(
-        LookupPath{},
-        openStore("dummy://"),
-        fetchSettings,
-        evalSettings,
-        nullptr
-    );
+    EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
     // Should throw when accessing manifest
     Value v;
-    Expr * e = evalState.parseExprFromString(
-        "builtins.unsafeTectonixInternalManifest",
-        evalState.rootPath(CanonPath::root));
+    Expr * e =
+        evalState.parseExprFromString("builtins.unsafeTectonixInternalManifest", evalState.rootPath(CanonPath::root));
 
-    ASSERT_THROW({
-        evalState.eval(e, v);
-        evalState.forceValue(v, noPos);
-    }, Error);
+    ASSERT_THROW(
+        {
+            evalState.eval(e, v);
+            evalState.forceValue(v, noPos);
+        },
+        Error);
 }
 
 } // namespace nix

@@ -310,8 +310,7 @@ TEST_F(GitUtilsTest, getCommitTree_invalid_sha_throws)
     auto repo = openRepo();
 
     // Use a SHA that doesn't exist
-    auto invalidHash = Hash::parseNonSRIUnprefixed(
-        "0000000000000000000000000000000000000000", HashAlgorithm::SHA1);
+    auto invalidHash = Hash::parseNonSRIUnprefixed("0000000000000000000000000000000000000000", HashAlgorithm::SHA1);
 
     ASSERT_THROW(repo->getCommitTree(invalidHash), Error);
 }
@@ -343,8 +342,7 @@ TEST_F(GitUtilsTest, hasObject_returns_false_for_missing)
 {
     auto repo = openRepo();
 
-    auto missingHash = Hash::parseNonSRIUnprefixed(
-        "0000000000000000000000000000000000000000", HashAlgorithm::SHA1);
+    auto missingHash = Hash::parseNonSRIUnprefixed("0000000000000000000000000000000000000000", HashAlgorithm::SHA1);
 
     ASSERT_FALSE(repo->hasObject(missingHash));
 }

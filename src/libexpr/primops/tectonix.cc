@@ -22,7 +22,8 @@ static void validateZonePath(EvalState & state, const PosIdx pos, std::string_vi
     auto & manifest = getManifest(state);
     if (!manifest.contains(std::string(zonePath)))
         state.error<EvalError>("'%s' is not a zone root (must be an exact path from the manifest)", zonePath)
-            .atPos(pos).debugThrow();
+            .atPos(pos)
+            .debugThrow();
 }
 
 // ============================================================================
@@ -105,8 +106,8 @@ static RegisterPrimOp primop_worldManifestInverted({
 // ============================================================================
 static void prim_unsafeTectonixInternalTreeSha(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto worldPath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'worldPath' argument to builtins.unsafeTectonixInternalTreeSha");
+    auto worldPath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'worldPath' argument to builtins.unsafeTectonixInternalTreeSha");
 
     auto sha = state.getWorldTreeSha(worldPath);
     v.mkString(sha.gitRev(), state.mem);
@@ -133,15 +134,14 @@ static RegisterPrimOp primop_unsafeTectonixInternalTreeSha({
 // ============================================================================
 static void prim_unsafeTectonixInternalTree(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto treeSha = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'treeSha' argument to builtins.unsafeTectonixInternalTree");
+    auto treeSha = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'treeSha' argument to builtins.unsafeTectonixInternalTree");
 
     auto repo = state.getWorldRepo();
     auto hash = Hash::parseNonSRIUnprefixed(treeSha, HashAlgorithm::SHA1);
 
     if (!repo->hasObject(hash))
-        state.error<EvalError>("tree SHA '%s' not found in world repository", treeSha)
-            .atPos(pos).debugThrow();
+        state.error<EvalError>("tree SHA '%s' not found in world repository", treeSha).atPos(pos).debugThrow();
 
     // exportIgnore=false: This is raw tree access by SHA, used for low-level operations.
     // Unlike zone accessors (which use exportIgnore=true to honor .gitattributes for
@@ -180,8 +180,8 @@ static RegisterPrimOp primop_unsafeTectonixInternalTree({
 // ============================================================================
 static void prim_unsafeTectonixInternalZoneSrc(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto zonePath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalZoneSrc");
+    auto zonePath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalZoneSrc");
 
     validateZonePath(state, pos, zonePath);
 
@@ -213,7 +213,8 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneSrc({
 // builtins.unsafeTectonixInternalSparseCheckoutRoots
 // Returns list of zone IDs in sparse checkout
 // ============================================================================
-static void prim_unsafeTectonixInternalSparseCheckoutRoots(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+static void
+prim_unsafeTectonixInternalSparseCheckoutRoots(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto & roots = state.getTectonixSparseCheckoutRoots();
 
@@ -280,8 +281,8 @@ static RegisterPrimOp primop_unsafeTectonixInternalDirtyZones({
 // ============================================================================
 static void prim_unsafeTectonixInternalZoneIsDirty(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto zonePath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZoneIsDirty");
+    auto zonePath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZoneIsDirty");
 
     validateZonePath(state, pos, zonePath);
 
@@ -314,8 +315,8 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneIsDirty({
 // ============================================================================
 static void prim_unsafeTectonixInternalZoneRoot(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto zonePath = state.forceStringNoCtx(*args[0], pos,
-        "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZoneRoot");
+    auto zonePath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZoneRoot");
 
     validateZonePath(state, pos, zonePath);
 

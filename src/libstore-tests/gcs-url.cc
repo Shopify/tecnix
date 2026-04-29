@@ -130,7 +130,8 @@ INSTANTIATE_TEST_SUITE_P(
     InvalidParsedGcsURLTest,
     ::testing::Values(
         InvalidGcsURLTestCase{"gs:///key", "error: URI has a missing or invalid bucket name", "empty_bucket"},
-        InvalidGcsURLTestCase{"gs://127.0.0.1/key", "error: URI has a missing or invalid bucket name", "ip_address_bucket"},
+        InvalidGcsURLTestCase{
+            "gs://127.0.0.1/key", "error: URI has a missing or invalid bucket name", "ip_address_bucket"},
         InvalidGcsURLTestCase{"gs://", "error: URI has a missing or invalid bucket name", "completely_empty"},
         InvalidGcsURLTestCase{"gs://bucket", "error: URI has a missing or invalid key", "missing_key"}),
     [](const ::testing::TestParamInfo<InvalidGcsURLTestCase> & info) { return info.param.description; });
@@ -195,7 +196,7 @@ INSTANTIATE_TEST_SUITE_P(
             ParsedGcsURL{
                 .bucket = "bucket",
                 .key = {"path", "to", "deep", "object.txt"},
-                .writable = true,  // writable doesn't affect HTTPS URL conversion
+                .writable = true, // writable doesn't affect HTTPS URL conversion
             },
             ParsedURL{
                 .scheme = "https",
