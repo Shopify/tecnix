@@ -8,6 +8,7 @@
   nix-expr,
   nix-main,
   nix-cmd,
+  sentry-native,
 
   # Configuration Options
 
@@ -16,6 +17,7 @@
 
 let
   inherit (lib) fileset;
+  enableSentry = !stdenv.hostPlatform.isStatic;
 in
 
 mkMesonExecutable (finalAttrs: {
@@ -76,10 +78,15 @@ mkMesonExecutable (finalAttrs: {
     && stdenv.hostPlatform.isStatic
     && stdenv.cc.libcxx != null
     && stdenv.cc.libcxx.isLLVM
-  ) llvmPackages.libunwind;
+  ) llvmPackages.libunwind
+  ++ lib.optional enableSentry sentry-native;
 
   mesonFlags = [
-  ];
+    (lib.mesonEnable "sentry" enableSentry)
+  ]
+  ++ lib.optional enableSentry (
+    lib.mesonOption "crashpad-handler" "${sentry-native}/bin/crashpad_handler"
+  );
 
   postInstall = lib.optionalString stdenv.hostPlatform.isStatic ''
     mkdir -p $out/nix-support
@@ -90,18 +97,12 @@ mkMesonExecutable (finalAttrs: {
   # For some reason that is not clear, it is wanting to use libgcc_eh which is not available.
   # Force this to be built with compiler-rt & libunwind over libgcc_eh works.
   # Issue: https://github.com/NixOS/nixpkgs/issues/177129
-  NIX_CFLAGS_COMPILE =
-    lib.optionals
-      (
-        stdenv.cc.isClang
-        && stdenv.hostPlatform.isStatic
-        && stdenv.cc.libcxx != null
-        && stdenv.cc.libcxx.isLLVM
-      )
-      [
-        "-rtlib=compiler-rt"
-        "-unwindlib=libunwind"
-      ];
+  NIX_CFLAGS_COMPILE = lib.optionalString (
+    stdenv.cc.isClang
+    && stdenv.hostPlatform.isStatic
+    && stdenv.cc.libcxx != null
+    && stdenv.cc.libcxx.isLLVM
+  ) "-rtlib=compiler-rt -unwindlib=libunwind";
 
   meta = {
     mainProgram = "nix";

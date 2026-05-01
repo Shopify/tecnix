@@ -294,7 +294,7 @@ TEST_F(TectonixTest, DISABLED_tree_returns_store_path)
     ASSERT_THAT(v, IsString());
     // Should be a store path
     auto pathStr = v.string_view();
-    ASSERT_TRUE(pathStr.find("/nix/store/") == 0 || pathStr.find(settings.nixStore) == 0);
+    ASSERT_TRUE(pathStr.find("/nix/store/") == 0 || pathStr.find(ctx->store->storeDir) == 0);
 }
 
 TEST_F(TectonixTest, tree_invalid_sha_throws)
@@ -327,7 +327,7 @@ TEST_F(TectonixTest, DISABLED_zoneSrc_returns_store_path)
     ASSERT_THAT(v, IsString());
     // Should be a store path
     auto pathStr = v.string_view();
-    ASSERT_TRUE(pathStr.find("/nix/store/") == 0 || pathStr.find(settings.nixStore) == 0);
+    ASSERT_TRUE(pathStr.find("/nix/store/") == 0 || pathStr.find(ctx->store->storeDir) == 0);
 }
 
 TEST_F(TectonixTest, zoneSrc_validates_zone_path)

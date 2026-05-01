@@ -1,3 +1,5 @@
+#include "nix/cmd/common-eval-args.hh"
+#include "nix/fetchers/fetch-settings.hh"
 #include "nix/util/args/root.hh"
 #include "nix/util/current-process.hh"
 #include "nix/cmd/command.hh"
@@ -27,8 +29,10 @@
 #include "cli-config-private.hh"
 
 #include <sys/types.h>
-#include <regex>
 #include <nlohmann/json.hpp>
+#if HAVE_SENTRY
+#  include <sentry.h>
+#endif
 
 #ifndef _WIN32
 #  include <sys/socket.h>
@@ -89,13 +93,13 @@ static bool haveInternet()
 static void disableNet()
 {
     // FIXME: should check for command line overrides only.
-    if (!settings.useSubstitutes.overridden)
+    if (!settings.getWorkerSettings().useSubstitutes.overridden)
         // FIXME: should not disable local substituters (like file:///).
-        settings.useSubstitutes = false;
-    if (!settings.tarballTtl.overridden)
-        settings.tarballTtl = std::numeric_limits<unsigned int>::max();
-    if (!settings.ttlNarInfoCacheMeta.overridden)
-        settings.ttlNarInfoCacheMeta = std::numeric_limits<unsigned int>::max();
+        settings.getWorkerSettings().useSubstitutes = false;
+    if (!fetchSettings.tarballTtl.overridden)
+        fetchSettings.tarballTtl = std::numeric_limits<unsigned int>::max();
+    if (!settings.getNarInfoDiskCacheSettings().ttlMeta.overridden)
+        settings.getNarInfoDiskCacheSettings().ttlMeta = std::numeric_limits<unsigned int>::max();
     if (!fileTransferSettings.tries.overridden)
         fileTransferSettings.tries = 0;
     if (!fileTransferSettings.connectTimeout.overridden)
@@ -118,6 +122,7 @@ struct NixArgs : virtual MultiCommand, virtual MixCommonArgs, virtual RootArgs
         categories.clear();
         categories[catHelp] = "Help commands";
         categories[Command::catDefault] = "Main commands";
+        categories[Command::catUndocumented] = "Undocumented commands";
         categories[catSecondary] = "Infrequently used commands";
         categories[catUtility] = "Utility/scripting commands";
         categories[catNixInstallation] = "Commands for upgrading or troubleshooting your Nix installation";
@@ -259,7 +264,12 @@ static void showHelp(std::vector<std::string> subcommand, NixArgs & toplevel)
 
     evalSettings.restrictEval = true;
     evalSettings.pureEval = true;
-    EvalState state({}, openStore("dummy://"), fetchSettings, evalSettings);
+    auto statePtr = std::make_shared<EvalState>(
+        LookupPath{},
+        openStore(StoreReference{.variant = StoreReference::Specified{.scheme = "dummy"}}),
+        fetchSettings,
+        evalSettings);
+    auto & state = *statePtr;
 
     auto vGenerateManpage = state.allocValue();
     state.eval(
@@ -377,10 +387,8 @@ void mainWrapped(int argc, char ** argv)
 {
     savedArgv = argv;
 
-    registerCrashHandler();
-
     /* The chroot helper needs to be run before any threads have been
-       started. */
+       started (including Sentry's worker thread). */
 #ifndef _WIN32
     if (argc > 0 && argv[0] == chrootHelperName) {
         chrootHelper(argc, argv);
@@ -388,9 +396,42 @@ void mainWrapped(int argc, char ** argv)
     }
 #endif
 
-    initNix();
-    initGC();
-    flakeSettings.configureEvalSettings(evalSettings);
+    bool sentryEnabled = false;
+
+#if HAVE_SENTRY
+    auto sentryEndpoint = getEnv("NIX_SENTRY_ENDPOINT");
+
+    if (!sentryEndpoint && getEnv("DETSYS_IDS_TELEMETRY") != "disabled") {
+        try {
+            auto p = nixConfDir() / "sentry-endpoint";
+            if (pathExists(p))
+                sentryEndpoint = trim(readFile(p));
+        } catch (...) {
+            ignoreExceptionExceptInterrupt();
+        }
+    }
+
+    if (sentryEndpoint && sentryEndpoint != "") {
+        sentry_options_t * options = sentry_options_new();
+        sentry_options_set_dsn(options, sentryEndpoint->c_str());
+        sentry_options_set_database_path(options, (getCacheDir() / "sentry").string().c_str());
+        sentry_options_set_release(options, fmt("nix@%s", determinateNixVersion).c_str());
+        sentry_options_set_traces_sample_rate(options, 0);
+        sentry_options_set_auto_session_tracking(options, false);
+        sentry_options_set_handler_path(options, CRASHPAD_HANDLER_PATH);
+        sentry_init(options);
+        sentry_set_tag("nix_command", argc > 0 ? std::string(baseNameOf(argv[0])).c_str() : "");
+        sentryEnabled = true;
+    }
+
+    Finally cleanupSentry([&]() {
+        if (sentryEnabled)
+            sentry_shutdown();
+    });
+#endif
+
+    if (!sentryEnabled)
+        registerCrashHandler();
 
     /* Set the build hook location
 
@@ -398,11 +439,15 @@ void mainWrapped(int argc, char ** argv)
        self-aware. That is, it has to know where it is installed. We
        don't think it's sentient.
      */
-    settings.buildHook.setDefault(
+    settings.getWorkerSettings().buildHook.setDefault(
         Strings{
             getNixBin({}).string(),
             "__build-remote",
         });
+
+    initNix();
+    initGC();
+    flakeSettings.configureEvalSettings(evalSettings);
 
 #ifdef __linux__
     if (isRootUser()) {
@@ -428,14 +473,15 @@ void mainWrapped(int argc, char ** argv)
     }
 
     {
-        auto legacy = RegisterLegacyCommand::commands()[programName];
-        if (legacy)
-            return legacy(argc, argv);
+        if (auto legacy = get(RegisterLegacyCommand::commands(), programName))
+            return (*legacy)(argc, argv);
     }
 
     evalSettings.pureEval = true;
 
+#ifndef _WIN32
     setLogFormat("bar");
+#endif
     settings.verboseBuild = false;
 
     // If on a terminal, progress will be displayed via progress bars etc. (thus verbosity=notice)
@@ -459,7 +505,12 @@ void mainWrapped(int argc, char ** argv)
             Xp::FetchTree,
         };
         evalSettings.pureEval = false;
-        EvalState state({}, openStore("dummy://"), fetchSettings, evalSettings);
+        auto statePtr = std::make_shared<EvalState>(
+            LookupPath{},
+            openStore(StoreReference{.variant = StoreReference::Specified{.scheme = "dummy"}}),
+            fetchSettings,
+            evalSettings);
+        auto & state = *statePtr;
         auto builtinsJson = nlohmann::json::object();
         for (auto & builtinPtr : state.getBuiltins().attrs()->lexicographicOrder(state.symbols)) {
             auto & builtin = *builtinPtr;
@@ -519,7 +570,7 @@ void mainWrapped(int argc, char ** argv)
         disableNet();
 
     try {
-        auto isNixCommand = std::regex_search(programName, std::regex("nix$"));
+        auto isNixCommand = programName.ends_with("nix");
         auto allowShebang = isNixCommand && argc > 1;
         args.parseCmdline(argvToStrings(argc, argv), allowShebang);
     } catch (UsageError &) {
@@ -531,16 +582,17 @@ void mainWrapped(int argc, char ** argv)
 
     printTalkative("Nix %s", version());
 
+    std::vector<std::string> subcommand;
+    MultiCommand * command = &args;
+    while (command) {
+        if (command && command->command) {
+            subcommand.push_back(command->command->first);
+            command = dynamic_cast<MultiCommand *>(&*command->command->second);
+        } else
+            break;
+    }
+
     if (args.helpRequested) {
-        std::vector<std::string> subcommand;
-        MultiCommand * command = &args;
-        while (command) {
-            if (command && command->command) {
-                subcommand.push_back(command->command->first);
-                command = dynamic_cast<MultiCommand *>(&*command->command->second);
-            } else
-                break;
-        }
         showHelp(subcommand, args);
         return;
     }
@@ -567,15 +619,20 @@ void mainWrapped(int argc, char ** argv)
         disableNet();
 
     if (args.refresh) {
-        settings.tarballTtl = 0;
-        settings.ttlNegativeNarInfoCache = 0;
-        settings.ttlPositiveNarInfoCache = 0;
-        settings.ttlNarInfoCacheMeta = 0;
+        fetchSettings.tarballTtl = 0;
+        settings.getNarInfoDiskCacheSettings().ttlNegative = 0;
+        settings.getNarInfoDiskCacheSettings().ttlPositive = 0;
+        settings.getNarInfoDiskCacheSettings().ttlMeta = 0;
     }
 
     if (args.command->second->forceImpureByDefault() && !evalSettings.pureEval.overridden) {
         evalSettings.pureEval = false;
     }
+
+#if HAVE_SENTRY
+    if (sentryEnabled)
+        sentry_set_tag("nix_subcommand", concatStringsSep(" ", subcommand).c_str());
+#endif
 
     try {
         args.command->second->run();

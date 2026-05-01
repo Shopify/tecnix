@@ -58,7 +58,7 @@ static RegisterPrimOp primop_worldManifest({
       Uses `--tectonix-git-dir` (defaults to `~/world/git`) and requires
       `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_worldManifest,
+    .impl = prim_worldManifest,
 });
 
 // ============================================================================
@@ -97,7 +97,7 @@ static RegisterPrimOp primop_worldManifestInverted({
       Uses `--tectonix-git-dir` (defaults to `~/world/git`) and requires
       `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_worldManifestInverted,
+    .impl = prim_worldManifestInverted,
 });
 
 // ============================================================================
@@ -125,7 +125,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalTreeSha({
       Uses `--tectonix-git-dir` (defaults to `~/world/git`) and requires
       `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_unsafeTectonixInternalTreeSha,
+    .impl = prim_unsafeTectonixInternalTreeSha,
 });
 
 // ============================================================================
@@ -169,7 +169,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalTree({
 
       Uses `--tectonix-git-dir` (defaults to `~/world/git`).
     )",
-    .fun = prim_unsafeTectonixInternalTree,
+    .impl = prim_unsafeTectonixInternalTree,
 });
 
 // ============================================================================
@@ -206,7 +206,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneSrc({
       Uses `--tectonix-git-dir` (defaults to `~/world/git`) and requires
       `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_unsafeTectonixInternalZoneSrc,
+    .impl = prim_unsafeTectonixInternalZoneSrc,
 });
 
 // ============================================================================
@@ -239,7 +239,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalSparseCheckoutRoots({
 
       Requires `--tectonix-checkout-path` to be set.
     )",
-    .fun = prim_unsafeTectonixInternalSparseCheckoutRoots,
+    .impl = prim_unsafeTectonixInternalSparseCheckoutRoots,
 });
 
 // ============================================================================
@@ -272,7 +272,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalDirtyZones({
 
       Requires `--tectonix-checkout-path` to be set.
     )",
-    .fun = prim_unsafeTectonixInternalDirtyZones,
+    .impl = prim_unsafeTectonixInternalDirtyZones,
 });
 
 // ============================================================================
@@ -306,7 +306,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneIsDirty({
 
       Uses `--tectonix-git-dir` (defaults to `~/world/git`).
     )",
-    .fun = prim_unsafeTectonixInternalZoneIsDirty,
+    .impl = prim_unsafeTectonixInternalZoneIsDirty,
 });
 
 // ============================================================================
@@ -351,7 +351,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneRoot({
 
       Uses `--tectonix-git-dir` (defaults to `~/world/git`).
     )",
-    .fun = prim_unsafeTectonixInternalZoneRoot,
+    .impl = prim_unsafeTectonixInternalZoneRoot,
 });
 
 // ============================================================================
@@ -376,7 +376,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalGitSha({
 
       Requires `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_unsafeTectonixInternalGitSha,
+    .impl = prim_unsafeTectonixInternalGitSha,
 });
 
 } // namespace nix

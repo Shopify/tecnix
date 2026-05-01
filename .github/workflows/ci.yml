@@ -97,9 +97,7 @@ jobs:
     - uses: ./.github/actions/install-nix-action
       with:
         github_token: ${{ github.token }}
-        # TODO: remove false and uncomment following line after merging Shopify/tecnix#27
-        catfood: false
-        #catfood: ${{ github.event_name == 'workflow_dispatch' && inputs.catfood || github.event_name != 'workflow_dispatch' }}
+        dogfood: ${{ github.event_name == 'workflow_dispatch' && inputs.dogfood || github.event_name != 'workflow_dispatch' }}
         # The sandbox would otherwise be disabled by default on Darwin
         extra_nix_config: "sandbox = true"
     # Since ubuntu 22.30, unprivileged usernamespaces are no longer allowed to map to the root user:

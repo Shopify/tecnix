@@ -12,6 +12,7 @@
 
 #ifdef __APPLE__
 #  include <mach-o/dyld.h>
+#  include <mach/mach.h>
 #endif
 
 #ifdef __linux__
@@ -35,7 +36,7 @@ unsigned int getMaxCPU()
         if (!cgroupFS)
             return 0;
 
-        auto cpuFile = *cgroupFS + "/" + getCurrentCgroup() + "/cpu.max";
+        auto cpuFile = *cgroupFS / getCurrentCgroup().rel() / "cpu.max";
 
         auto cpuMax = readFile(cpuFile);
         auto cpuMaxParts = tokenizeString<std::vector<std::string>>(cpuMax, " \n");
@@ -116,13 +117,22 @@ void restoreProcessContext(bool restoreMounts)
         }
     }
 #endif
+
+#ifdef __APPLE__
+    /* Reset the Mach exception ports. Otherwise, if a crashpad_handler is attached to this process, it will be
+       inherited across execve() and receive spurious crash reports from unrelated programs (e.g. in `nix run`).
+       FIXME: it would be better to have Sentry tell crashpad_handler to quit, but it doesn't appear to have an API for
+       that. */
+    task_set_exception_ports(
+        mach_task_self(), EXC_MASK_ALL | EXC_MASK_CRASH, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////
 
-std::optional<Path> getSelfExe()
+std::optional<std::filesystem::path> getSelfExe()
 {
-    static auto cached = []() -> std::optional<Path> {
+    static auto cached = []() -> std::optional<std::filesystem::path> {
 #if defined(__linux__) || defined(__GNU__)
         return readLink(std::filesystem::path{"/proc/self/exe"});
 #elif defined(__APPLE__)
@@ -154,7 +164,7 @@ std::optional<Path> getSelfExe()
         // serialized to JSON and evaluated as a Nix string.
         path.pop_back();
 
-        return Path(path.begin(), path.end());
+        return std::string(path.begin(), path.end());
 #else
         return std::nullopt;
 #endif

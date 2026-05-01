@@ -30,6 +30,7 @@
 #include "nix/util/source-path.hh"
 #include "nix/util/types.hh"
 #include "nix/util/util.hh"
+#include "nix/util/mounted-source-accessor.hh"
 
 namespace nix::flake::primops {
 
@@ -74,14 +75,11 @@ PrimOp getFlake(const Settings & settings)
                 if (auto sourcePath = flakeRef.input.getSourcePath();
                     sourcePath && state.store->isInStore(sourcePath->string())) {
                     auto [storePath, subPath] = state.store->toStorePath(sourcePath->string());
-                    for (auto & c : context) {
-                        if (auto p = std::get_if<NixStringContextElem::Path>(&c.raw); p && p->storePath == storePath) {
-                            auto path = state.storePath(storePath) / CanonPath(subPath);
-                            if (!flakeRef.subdir.empty())
-                                path = path / flakeRef.subdir;
-                            callFlake(state, lockFlake(settings, state, path, lockFlags), v);
-                            return;
-                        }
+                    if (auto mount = state.storeFS->getMount(CanonPath(state.store->printStorePath(storePath)))) {
+                        auto path = state.storePath(storePath) / CanonPath(subPath);
+                        if (!flakeRef.subdir.empty())
+                            path = path / flakeRef.subdir;
+                        return callFlake(state, lockFlake(settings, state, path, lockFlags), v);
                     }
                 }
             }
@@ -108,7 +106,7 @@ PrimOp getFlake(const Settings & settings)
           (builtins.getFlake "github:edolstra/dwarffs").rev
           ```
         )",
-        .fun = prim_getFlake,
+        .impl = prim_getFlake,
     };
 }
 
@@ -149,7 +147,7 @@ nix::PrimOp parseFlakeRef({
       { dir = "lib"; owner = "NixOS"; ref = "23.05"; repo = "nixpkgs"; type = "github"; }
       ```
     )",
-    .fun = prim_parseFlakeRef,
+    .impl = prim_parseFlakeRef,
 });
 
 static void prim_flakeRefToString(EvalState & state, const PosIdx pos, Value ** args, Value & v)
@@ -212,7 +210,7 @@ nix::PrimOp flakeRefToString({
       "github:NixOS/nixpkgs/23.05?dir=lib"
       ```
     )",
-    .fun = prim_flakeRefToString,
+    .impl = prim_flakeRefToString,
 });
 
 } // namespace nix::flake::primops

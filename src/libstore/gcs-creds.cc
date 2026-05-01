@@ -126,9 +126,12 @@ bool isRunningOnGce()
         try {
             FileTransferRequest req(VerbatimURL{std::string(GCE_METADATA_TOKEN_URL)});
             req.headers.emplace_back("Metadata-Flavor", "Google");
-            req.tries = 1; // Single attempt, no retries - fail fast on non-GCE
 
-            getFileTransfer()->download(req);
+            FileTransferSettings gceProbeFileTransferSettings(fileTransferSettings);
+            gceProbeFileTransferSettings.tries = 1; // Single attempt, no retries - fail fast on non-GCE
+            ref<FileTransfer> gceProbeFileTransfer = makeFileTransfer(gceProbeFileTransferSettings);
+
+            gceProbeFileTransfer->download(req);
             result = true;
             debug("GCE metadata server detected");
         } catch (...) {

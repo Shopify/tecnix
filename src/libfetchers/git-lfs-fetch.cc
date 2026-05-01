@@ -2,9 +2,11 @@
 #include "nix/fetchers/git-utils.hh"
 #include "nix/store/filetransfer.hh"
 #include "nix/util/base-n.hh"
+#include "nix/util/os-string.hh"
 #include "nix/util/processes.hh"
 #include "nix/util/url.hh"
 #include "nix/util/users.hh"
+#include "nix/util/util.hh"
 #include "nix/util/hash.hh"
 #include "nix/store/ssh.hh"
 
@@ -60,24 +62,27 @@ static LfsApiInfo getLfsApi(const ParsedURL & url)
         auto args = getNixSshOpts();
 
         if (url.authority->port)
-            args.push_back(fmt("-p%d", *url.authority->port));
+            args.push_back(string_to_os_string(fmt("-p%d", *url.authority->port)));
 
         std::ostringstream hostnameAndUser;
         if (url.authority->user)
             hostnameAndUser << *url.authority->user << "@";
         hostnameAndUser << url.authority->host;
-        args.push_back(std::move(hostnameAndUser).str());
+        args.push_back(string_to_os_string(std::move(hostnameAndUser).str()));
 
-        args.push_back("--");
-        args.push_back("git-lfs-authenticate");
+        args.push_back(OS_STR("--"));
+        args.push_back(OS_STR("git-lfs-authenticate"));
         // FIXME %2F encode slashes? Does this command take/accept percent encoding?
-        args.push_back(url.renderPath(/*encode=*/false));
-        args.push_back("download");
+        args.push_back(string_to_os_string(url.renderPath(/*encode=*/false)));
+        args.push_back(OS_STR("download"));
 
         auto [status, output] = runProgram({.program = "ssh", .args = args});
 
         if (output.empty())
-            throw Error("git-lfs-authenticate: no output (cmd: 'ssh %s')", concatStringsSep(" ", args));
+            throw Error(
+                "git-lfs-authenticate: no output (cmd: 'ssh %s')",
+                concatMapStringsSep(
+                    " ", args, [](const OsString & s) { return escapeShellArgAlways(os_string_to_string(s)); }));
 
         auto queryResp = nlohmann::json::parse(output);
         auto headerIt = queryResp.find("header");
@@ -334,19 +339,19 @@ void Fetch::fetch(
     auto localLfsPath =
         gitDir / "lfs" / "objects" / pointer->oid.substr(0, 2) / pointer->oid.substr(2, 2) / pointer->oid;
     if (pathExists(localLfsPath)) {
-        debug("using local git lfs object %s", localLfsPath);
+        debug("using local git lfs object %s", PathFmt(localLfsPath));
         auto localContent = readFile(localLfsPath);
         sizeCallback(localContent.length());
         sink(localContent);
         return;
     }
 
-    std::filesystem::path cacheDir = getCacheDir() / "git-lfs";
+    auto cacheDir = getCacheDir() / "git-lfs";
     std::string key = hashString(HashAlgorithm::SHA256, pointerFilePath.rel()).to_string(HashFormat::Base16, false)
                       + "/" + pointer->oid;
-    std::filesystem::path cachePath = cacheDir / key;
+    auto cachePath = cacheDir / key;
     if (pathExists(cachePath)) {
-        debug("using cache entry %s -> %s", key, cachePath);
+        debug("using cache entry %s -> %s", key, PathFmt(cachePath));
         auto cacheContent = readFile(cachePath);
         sizeCallback(cacheContent.length());
         sink(cacheContent);
@@ -376,7 +381,7 @@ void Fetch::fetch(
         sizeCallback(size);
         downloadToSink(ourl, authHeader, sink, sha256, size);
 
-        debug("creating cache entry %s -> %s", key, cachePath);
+        debug("creating cache entry %s -> %s", key, PathFmt(cachePath));
         if (!pathExists(cachePath.parent_path()))
             createDirs(cachePath.parent_path());
         writeFile(cachePath, sink.s);
