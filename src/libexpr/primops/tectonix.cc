@@ -210,6 +210,42 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneSrc({
 });
 
 // ============================================================================
+// builtins.unsafeTectonixInternalZonePath zonePath
+// Same as unsafeTectonixInternalZoneSrc but returns a path instead of a string.
+// ============================================================================
+static void prim_unsafeTectonixInternalZonePath(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zonePath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalZonePath");
+
+    validateZonePath(state, pos, zonePath);
+
+    auto storePath = state.getZoneStorePath(zonePath);
+    state.allowPath(storePath);
+    v.mkPath(state.storePath(storePath), state.mem);
+}
+
+static RegisterPrimOp primop_unsafeTectonixInternalZonePath({
+    .name = "__unsafeTectonixInternalZonePath",
+    .args = {"zonePath"},
+    .doc = R"(
+      Get the source of a zone as a path value.
+
+      With `lazy-trees = true`, returns a virtual store path that is only
+      materialized when used as a derivation input (devirtualized).
+
+      In source-available mode with uncommitted changes, uses checkout content
+      (always eager for dirty zones).
+
+      Example: `builtins.unsafeTectonixInternalZonePath "//areas/tools/tec"`
+
+      Uses `--tectonix-git-dir` (defaults to `~/world/git`) and requires
+      `--tectonix-git-sha` to be set.
+    )",
+    .fun = prim_unsafeTectonixInternalZonePath,
+});
+
+// ============================================================================
 // builtins.unsafeTectonixInternalSparseCheckoutRoots
 // Returns list of zone IDs in sparse checkout
 // ============================================================================
