@@ -90,7 +90,7 @@ let
 
 in
 stdenv.mkDerivation (finalAttrs: {
-  pname = "determinate-nix";
+  pname = "tecnix";
   version = nix-cli.version;
 
   /**
