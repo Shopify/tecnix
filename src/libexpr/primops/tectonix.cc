@@ -242,7 +242,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalZonePath({
       Uses `--tectonix-git-dir` (defaults to `~/world/git`) and requires
       `--tectonix-git-sha` to be set.
     )",
-    .fun = prim_unsafeTectonixInternalZonePath,
+    .impl = prim_unsafeTectonixInternalZonePath,
 });
 
 // ============================================================================
