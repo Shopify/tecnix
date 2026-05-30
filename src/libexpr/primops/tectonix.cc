@@ -260,18 +260,38 @@ static RegisterPrimOp primop_unsafeTectonixInternalDirtyZones({
     .name = "__unsafeTectonixInternalDirtyZones",
     .args = {},
     .doc = R"(
-      Get the dirty status of zones in the sparse checkout.
+      Get the dirty status of zones in the checkout.
 
       Returns an attrset mapping zone paths to booleans indicating whether
-      the zone has uncommitted changes.
-
-      Only includes zones that are in the sparse checkout.
+      the zone has uncommitted changes. Sparse checkouts include all sparse
+      roots with clean zones set to false. Full checkouts include dirty zones
+      only so the evaluator does not eagerly expand every zone.
 
       Example: `builtins.unsafeTectonixInternalDirtyZones."//areas/tools/dev"` returns `true` or `false`.
 
       Requires `--tectonix-checkout-path` to be set.
     )",
     .fun = prim_unsafeTectonixInternalDirtyZones,
+});
+
+// ============================================================================
+// builtins.__unsafeTectonixInternalFullCheckout
+// Returns whether source-available mode points at a non-sparse/full checkout
+// ============================================================================
+static void prim_unsafeTectonixInternalFullCheckout(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    v.mkBool(state.isTectonixFullCheckout());
+}
+
+static RegisterPrimOp primop_unsafeTectonixInternalFullCheckout({
+    .name = "__unsafeTectonixInternalFullCheckout",
+    .args = {},
+    .doc = R"(
+      Return true when `--tectonix-checkout-path` points at a non-sparse/full
+      checkout (`core.sparseCheckout` unset or false). This lets Tectonix treat
+      zones as source-available without materializing a root entry for every zone.
+    )",
+    .fun = prim_unsafeTectonixInternalFullCheckout,
 });
 
 // ============================================================================
@@ -285,14 +305,7 @@ static void prim_unsafeTectonixInternalZoneIsDirty(EvalState & state, const PosI
 
     validateZonePath(state, pos, zonePath);
 
-    bool isDirty = false;
-    if (state.isTectonixSourceAvailable()) {
-        auto & dirtyZones = state.getTectonixDirtyZones();
-        auto it = dirtyZones.find(std::string(zonePath));
-        isDirty = it != dirtyZones.end() && it->second.dirty;
-    }
-
-    v.mkBool(isDirty);
+    v.mkBool(state.isTectonixZoneDirty(zonePath));
 }
 
 static RegisterPrimOp primop_unsafeTectonixInternalZoneIsDirty({

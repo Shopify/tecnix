@@ -485,6 +485,44 @@ bool EvalState::isTectonixSourceAvailable() const
     return !settings.tectonixCheckoutPath.get().empty();
 }
 
+bool EvalState::isTectonixFullCheckout() const
+{
+    std::call_once(tectonixFullCheckoutFlag, [this]() {
+        tectonixFullCheckout = false;
+        if (!isTectonixSourceAvailable())
+            return;
+
+        StringMap gitEnvironment = getEnv();
+        gitEnvironment.erase("GIT_DIR");
+        gitEnvironment.erase("GIT_WORK_TREE");
+        gitEnvironment.erase("GIT_COMMON_DIR");
+
+        auto checkoutPath = settings.tectonixCheckoutPath.get();
+        auto [gitConfigCode, gitConfigOutput] = runProgram(
+            {.program = "git",
+             .args = {"-C", checkoutPath, "config", "--bool", "--get", "core.sparseCheckout"},
+             .environment = gitEnvironment});
+
+        // If core.sparseCheckout is unset, git config exits non-zero. That is a
+        // normal full-checkout state. Other failures will be caught later by the
+        // git-status path and treated as clean.
+        if (!statusOk(gitConfigCode)) {
+            tectonixFullCheckout = true;
+            debug("source checkout at '%s' has no sparse-checkout config; treating as full checkout", checkoutPath);
+            return;
+        }
+
+        auto value = trim(gitConfigOutput);
+        tectonixFullCheckout = value != "true";
+        debug(
+            "source checkout at '%s' core.sparseCheckout=%s; fullCheckout=%s",
+            checkoutPath,
+            value,
+            tectonixFullCheckout ? "true" : "false");
+    });
+    return tectonixFullCheckout;
+}
+
 // Helper to normalize zone paths: strip leading // prefix
 // Zone paths in manifest have // prefix (e.g., //areas/tools/dev)
 // Filesystem operations need paths without // (e.g., areas/tools/dev)
@@ -494,6 +532,22 @@ static std::string normalizeZonePath(std::string_view zonePath)
     if (hasPrefix(path, "//"))
         path = path.substr(2);
     return path;
+}
+
+static std::optional<std::string> findZonePathForRepoPath(const nlohmann::json & manifest, std::string_view repoPath)
+{
+    std::string candidate(repoPath);
+    while (!candidate.empty()) {
+        auto zonePath = "//" + candidate;
+        if (manifest.contains(zonePath))
+            return zonePath;
+
+        auto slash = candidate.rfind('/');
+        if (slash == std::string::npos)
+            break;
+        candidate.resize(slash);
+    }
+    return std::nullopt;
 }
 
 // Helper to sanitize zone path for use in store path names.
@@ -627,10 +681,18 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
         if (!isTectonixSourceAvailable())
             return;
 
-        // Get sparse checkout roots (zone IDs)
-        auto & sparseRoots = getTectonixSparseCheckoutRoots();
-        if (sparseRoots.empty())
-            return;
+        bool fullCheckout = isTectonixFullCheckout();
+
+        // In sparse checkout mode, use the explicit root set. In full checkout
+        // mode, avoid expanding every zone eagerly; dirty files will be mapped
+        // to zones directly from their repo-relative paths.
+        const std::set<std::string> * sparseRoots = nullptr;
+        if (!fullCheckout) {
+            auto & roots = getTectonixSparseCheckoutRoots();
+            if (roots.empty())
+                return;
+            sparseRoots = &roots;
+        }
 
         // Get manifest (uses cached parsed JSON)
         const nlohmann::json * manifest;
@@ -644,21 +706,26 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
             return;
         }
 
-        // Build map of zone ID -> zone path for sparse roots only
+        // Build map of zone ID -> zone path for sparse roots only. Full
+        // checkouts do not need this map because every zone is physically
+        // available and clean zones can stay implicit.
         std::map<std::string, std::string> zoneIdToPath;
-        for (auto & [path, value] : manifest->items()) {
-            if (!value.contains("id") || !value.at("id").is_string()) {
-                warn("zone '%s' in manifest has missing or non-string 'id' field", path);
-                continue;
+        if (!fullCheckout) {
+            for (auto & [path, value] : manifest->items()) {
+                if (!value.contains("id") || !value.at("id").is_string()) {
+                    warn("zone '%s' in manifest has missing or non-string 'id' field", path);
+                    continue;
+                }
+                auto & id = value.at("id").get_ref<const std::string &>();
+                if (sparseRoots->count(id))
+                    zoneIdToPath[id] = path;
             }
-            auto & id = value.at("id").get_ref<const std::string &>();
-            if (sparseRoots.count(id))
-                zoneIdToPath[id] = path;
-        }
 
-        // Initialize all sparse-checked-out zones as not dirty
-        for (auto & [zoneId, zonePath] : zoneIdToPath) {
-            tectonixDirtyZones[zonePath] = {};
+            // Initialize all sparse-checked-out zones as not dirty. Full
+            // checkouts only materialize dirty entries.
+            for (auto & [zoneId, zonePath] : zoneIdToPath) {
+                tectonixDirtyZones[zonePath] = {};
+            }
         }
 
         // Get dirty files via git status with -z for NUL-separated output
@@ -710,11 +777,22 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
             }
 
             for (const auto & filePath : pathsToCheck) {
+                auto repoPath = filePath.substr(1);
+
+                if (fullCheckout) {
+                    if (auto zonePath = findZonePathForRepoPath(*manifest, repoPath)) {
+                        auto & info = tectonixDirtyZones[*zonePath];
+                        info.dirty = true;
+                        info.dirtyFiles.insert(repoPath);
+                    }
+                    continue;
+                }
+
                 for (auto & [zonePath, info] : tectonixDirtyZones) {
                     auto normalized = "/" + normalizeZonePath(zonePath);
                     if (hasPrefix(filePath, normalized + "/") || filePath == normalized) {
                         info.dirty = true;
-                        info.dirtyFiles.insert(filePath.substr(1));
+                        info.dirtyFiles.insert(repoPath);
                         break;
                     }
                 }
@@ -724,9 +802,19 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
         size_t dirtyCount = 0;
         for (const auto & [_, info] : tectonixDirtyZones)
             if (info.dirty) dirtyCount++;
-        debug("computed dirty zones: %d of %d zones are dirty", dirtyCount, tectonixDirtyZones.size());
+        debug("computed dirty zones: %d of %d materialized zones are dirty", dirtyCount, tectonixDirtyZones.size());
     });
     return tectonixDirtyZones;
+}
+
+bool EvalState::isTectonixZoneDirty(std::string_view zonePath) const
+{
+    if (!isTectonixSourceAvailable())
+        return false;
+
+    auto & dirtyZones = getTectonixDirtyZones();
+    auto it = dirtyZones.find(std::string(zonePath));
+    return it != dirtyZones.end() && it->second.dirty;
 }
 
 // Path to the tectonix manifest file within the world repository

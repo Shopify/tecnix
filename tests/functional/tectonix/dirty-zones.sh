@@ -10,6 +10,16 @@ HEAD_SHA=$(get_head_sha "$TEST_WORLD")
 
 echo "Testing dirty zone detection..."
 
+# Test worlds are regular/full checkouts unless sparse-checkout is explicitly enabled.
+full_checkout=$(tectonix_eval_json "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalFullCheckout' \
+    --option tectonix-checkout-path "$TEST_WORLD")
+echo "Full checkout status: $full_checkout"
+
+if [[ "$full_checkout" != "true" ]]; then
+    fail "Checkout should be detected as full when core.sparseCheckout is unset"
+fi
+
 # First, verify zone is clean
 zone_is_dirty=$(tectonix_eval_json "$TEST_WORLD/.git" "$HEAD_SHA" \
     'builtins.unsafeTectonixInternalZoneIsDirty "//areas/tools/dev"' \
@@ -54,6 +64,27 @@ echo "Unmodified zone dirty status: $clean_zone_dirty"
 
 if [[ "$clean_zone_dirty" == "true" ]]; then
     fail "Unmodified zone should not be dirty"
+fi
+
+# Enabling sparse checkout should flip the full-checkout detector while retaining
+# dirty-zone behavior via sparse-checkout-roots.
+git -C "$TEST_WORLD" config core.sparseCheckout true
+sparse_full_checkout=$(tectonix_eval_json "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalFullCheckout' \
+    --option tectonix-checkout-path "$TEST_WORLD")
+echo "Sparse checkout full status: $sparse_full_checkout"
+
+if [[ "$sparse_full_checkout" != "false" ]]; then
+    fail "Checkout should not be detected as full when core.sparseCheckout=true"
+fi
+
+sparse_zone_dirty=$(tectonix_eval_json "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalZoneIsDirty "//areas/tools/dev"' \
+    --option tectonix-checkout-path "$TEST_WORLD")
+echo "Sparse dirty zone status: $sparse_zone_dirty"
+
+if [[ "$sparse_zone_dirty" != "true" ]]; then
+    fail "Sparse dirty zone should still be dirty after enabling sparse checkout"
 fi
 
 echo "Dirty zone tests passed!"

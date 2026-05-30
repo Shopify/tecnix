@@ -530,6 +530,10 @@ private:
     /** Cache: world path → tree SHA (lazy computed, cached at each path level) */
     const ref<boost::concurrent_flat_map<std::string, Hash>> worldTreeShaCache;
 
+    /** Lazy-initialized full-checkout detection (thread-safe via once_flag) */
+    mutable std::once_flag tectonixFullCheckoutFlag;
+    mutable bool tectonixFullCheckout = false;
+
     /** Lazy-initialized set of zone IDs in sparse checkout (thread-safe via once_flag) */
     mutable std::once_flag tectonixSparseCheckoutRootsFlag;
     mutable std::set<std::string> tectonixSparseCheckoutRoots;
@@ -635,11 +639,17 @@ public:
     /** Check if we're in source-available mode */
     bool isTectonixSourceAvailable() const;
 
+    /** Check if source-available mode points at a non-sparse/full checkout */
+    bool isTectonixFullCheckout() const;
+
     /** Get set of zone IDs in sparse checkout (source-available mode only) */
     const std::set<std::string> & getTectonixSparseCheckoutRoots() const;
 
-    /** Get map of zone path → dirty status (only for sparse-checked-out zones) */
+    /** Get map of zone path → dirty status */
     const std::map<std::string, ZoneDirtyInfo> & getTectonixDirtyZones() const;
+
+    /** Check whether a zone has uncommitted changes in source-available mode */
+    bool isTectonixZoneDirty(std::string_view zonePath) const;
 
     /** Get cached manifest content (thread-safe, lazy-loaded) */
     const std::string & getManifestContent() const;
