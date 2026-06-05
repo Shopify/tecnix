@@ -43,12 +43,12 @@ scope: {
   });
 
   libgit2 = pkgs.libgit2.overrideAttrs (prevAttrs: {
-    version = "1.9.0-shopify-sdir";
+    version = "1.9.3-shopify-sdir";
     src = pkgs.fetchFromGitHub {
       owner = "Shopify";
       repo = "libgit2";
-      rev = "0def884ade4cb7c53ab62ae4c59be176606c851e";
-      hash = "sha256-s0CeQZzz7FSux3wXQO6vePg3/yy2ivC44J01w8/Jxqs=";
+      rev = "a9fcda0bb13e1a30bf0d9edee2ab273ab8c0b92d";
+      hash = "sha256-haEZXPV3hNTUhbdEQ/38ZoV0c9qWV84B5VgJ2lq+3E8=";
     };
     patches = lib.filter (
       patch: !(lib.hasSuffix "libgit2-darwin-case-sensitive-build.patch" (toString patch))
