@@ -42,6 +42,19 @@ scope: {
         (prevAttrs.postInstall or "");
   });
 
+  libgit2 = pkgs.libgit2.overrideAttrs (prevAttrs: {
+    version = "1.9.0-shopify-sdir";
+    src = pkgs.fetchFromGitHub {
+      owner = "Shopify";
+      repo = "libgit2";
+      rev = "a9bf5b63e0380efddcd0b5070a69297fa74c8d63";
+      hash = "sha256-rDr+WnFEKYCvkevViVfu5Fxqp5+xBds0lSwy3kw8uIA=";
+    };
+    patches = lib.filter (
+      patch: !(lib.hasSuffix "libgit2-darwin-case-sensitive-build.patch" (toString patch))
+    ) (prevAttrs.patches or [ ]);
+  });
+
   # TODO: Remove this when https://github.com/NixOS/nixpkgs/pull/442682 is included in a stable release
   toml11 =
     if lib.versionAtLeast pkgs.toml11.version "4.4.0" then
