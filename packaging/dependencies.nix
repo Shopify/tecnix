@@ -47,8 +47,8 @@ scope: {
     src = pkgs.fetchFromGitHub {
       owner = "Shopify";
       repo = "libgit2";
-      rev = "a9bf5b63e0380efddcd0b5070a69297fa74c8d63";
-      hash = "sha256-rDr+WnFEKYCvkevViVfu5Fxqp5+xBds0lSwy3kw8uIA=";
+      rev = "0def884ade4cb7c53ab62ae4c59be176606c851e";
+      hash = "sha256-s0CeQZzz7FSux3wXQO6vePg3/yy2ivC44J01w8/Jxqs=";
     };
     patches = lib.filter (
       patch: !(lib.hasSuffix "libgit2-darwin-case-sensitive-build.patch" (toString patch))

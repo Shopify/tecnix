@@ -539,7 +539,7 @@ private:
     mutable std::set<std::string> tectonixSparseCheckoutRoots;
 
     /** Per-zone dirty status: whether the zone is dirty, and if so, which
-     *  repo-relative file paths are dirty (from git status). */
+     *  repo-relative tracked checkout paths differ from disk. */
     struct ZoneDirtyInfo {
         bool dirty = false;
         boost::unordered_flat_set<std::string> dirtyFiles; // repo-relative paths

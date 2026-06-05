@@ -89,6 +89,9 @@ struct GitRepo
 
     virtual WorkdirInfo getWorkdirInfo() = 0;
 
+    /** Return tracked checkout paths that differ from disk. */
+    virtual WorkdirInfo getDirtyWorkdirInfo() = 0;
+
     static WorkdirInfo getCachedWorkdirInfo(const std::filesystem::path & path);
 
     /* Get the ref that HEAD points to. */

@@ -562,6 +562,35 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         return info;
     }
 
+    WorkdirInfo getDirtyWorkdirInfo() override
+    {
+        WorkdirInfo info;
+
+        std::function<int(const char * path, unsigned int statusFlags)> statusCallback = [&](const char * path,
+                                                                                             unsigned int statusFlags) {
+            if (statusFlags == GIT_STATUS_CURRENT)
+                return 0;
+
+            auto canonPath = CanonPath(path);
+            if (statusFlags & GIT_STATUS_WT_DELETED)
+                info.deletedFiles.insert(canonPath);
+            else
+                info.dirtyFiles.insert(canonPath);
+
+            info.isDirty = true;
+            return 0;
+        };
+
+        git_status_options options = GIT_STATUS_OPTIONS_INIT;
+        options.show = GIT_STATUS_SHOW_WORKDIR_ONLY;
+        options.flags |= GIT_STATUS_OPT_EXCLUDE_SUBMODULES;
+
+        if (git_status_foreach_ext(*this, &options, &statusCallbackTrampoline, &statusCallback))
+            throw Error("getting dirty working directory files: %s", git_error_last()->message);
+
+        return info;
+    }
+
     std::optional<std::string> getWorkdirRef() override
     {
         Reference ref;

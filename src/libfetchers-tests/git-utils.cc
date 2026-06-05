@@ -2,6 +2,7 @@
 #include "nix/util/file-system.hh"
 #include <gmock/gmock.h>
 #include <git2/global.h>
+#include <git2/index.h>
 #include <git2/repository.h>
 #include <git2/signature.h>
 #include <git2/types.h>
@@ -173,6 +174,52 @@ TEST_F(GitUtilsTest, peel_reference)
 
     git_signature_free(sig);
     git_repository_free(rawRepo);
+}
+
+TEST_F(GitUtilsTest, getDirtyWorkdirInfo_reports_tracked_modifications_and_deletions)
+{
+    git_repository * rawRepo = nullptr;
+    ASSERT_EQ(git_repository_open(&rawRepo, tmpDir.string().c_str()), 0);
+
+    writeFile((tmpDir / "modified.txt").string(), "clean\n");
+    writeFile((tmpDir / "deleted.txt").string(), "clean\n");
+
+    git_index * index = nullptr;
+    ASSERT_EQ(git_repository_index(&index, rawRepo), 0);
+    ASSERT_EQ(git_index_add_bypath(index, "modified.txt"), 0);
+    ASSERT_EQ(git_index_add_bypath(index, "deleted.txt"), 0);
+    ASSERT_EQ(git_index_write(index), 0);
+
+    git_oid treeOid;
+    ASSERT_EQ(git_index_write_tree(&treeOid, index), 0);
+
+    git_tree * tree = nullptr;
+    ASSERT_EQ(git_tree_lookup(&tree, rawRepo, &treeOid), 0);
+
+    git_signature * sig = nullptr;
+    ASSERT_EQ(git_signature_now(&sig, "nix", "nix@example.com"), 0);
+
+    git_oid commitOid;
+    ASSERT_EQ(git_commit_create_v(&commitOid, rawRepo, "HEAD", sig, sig, nullptr, "initial commit", tree, 0), 0);
+
+    git_signature_free(sig);
+    git_tree_free(tree);
+    git_index_free(index);
+    git_repository_free(rawRepo);
+
+    writeFile((tmpDir / "modified.txt").string(), "dirty\n");
+    std::filesystem::remove(tmpDir / "deleted.txt");
+    writeFile((tmpDir / "untracked.txt").string(), "untracked\n");
+
+    auto workdirInfo = openRepo()->getDirtyWorkdirInfo();
+
+    ASSERT_TRUE(workdirInfo.isDirty);
+    ASSERT_TRUE(workdirInfo.dirtyFiles.contains(CanonPath("modified.txt")));
+    ASSERT_TRUE(workdirInfo.deletedFiles.contains(CanonPath("deleted.txt")));
+    ASSERT_FALSE(workdirInfo.dirtyFiles.contains(CanonPath("untracked.txt")));
+    ASSERT_FALSE(workdirInfo.deletedFiles.contains(CanonPath("untracked.txt")));
+    ASSERT_TRUE(workdirInfo.files.empty());
+    ASSERT_FALSE(workdirInfo.headRev.has_value());
 }
 
 // ============================================================================

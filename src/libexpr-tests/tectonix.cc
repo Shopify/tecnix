@@ -435,6 +435,26 @@ TEST_F(TectonixTest, dirtyZones_empty_without_checkout)
     ASSERT_THAT(v, IsAttrsOfSize(0));
 }
 
+TEST_F(TectonixTest, dirtyZones_marks_modified_tracked_file_zone_dirty)
+{
+    writeFile("areas/tools/dev/zone.nix", "{ dirty = true; }");
+
+    auto ctx = createTectonixContext(true);
+    auto v = ctx->eval(R"(builtins.unsafeTectonixInternalZoneIsDirty "//areas/tools/dev")");
+
+    ASSERT_THAT(v, IsTrue());
+}
+
+TEST_F(TectonixTest, dirtyZones_marks_deleted_tracked_file_zone_dirty)
+{
+    std::filesystem::remove(repoPath / "areas/tools/dev/zone.nix");
+
+    auto ctx = createTectonixContext(true);
+    auto v = ctx->eval(R"(builtins.unsafeTectonixInternalZoneIsDirty "//areas/tools/dev")");
+
+    ASSERT_THAT(v, IsTrue());
+}
+
 // ============================================================================
 // Phase 3: EvalState Method Tests - getWorldRepo
 // ============================================================================
