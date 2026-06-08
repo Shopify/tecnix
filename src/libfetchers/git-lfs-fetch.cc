@@ -184,6 +184,26 @@ static std::string getLfsEndpointUrl(git_repository * repo)
     return "";
 }
 
+static std::filesystem::path getLfsStorageDir(git_repository * repo)
+{
+    auto gitDir = std::filesystem::path(git_repository_commondir(repo));
+
+    GitConfig config;
+    if (!git_repository_config(Setter(config), repo)) {
+        GitConfigEntry entry;
+        if (!git_config_get_entry(Setter(entry), config.get(), "lfs.storage")) {
+            std::filesystem::path storage(entry->value);
+            if (!storage.empty()) {
+                // git-lfs: an absolute path is used as-is, a relative path is
+                // resolved against the git common directory.
+                return storage.is_absolute() ? storage : gitDir / storage;
+            }
+        }
+    }
+
+    return gitDir / "lfs"; // git-lfs default
+}
+
 static std::optional<Pointer> parseLfsPointer(std::string_view content, std::string_view filename)
 {
     // https://github.com/git-lfs/git-lfs/blob/2ef4108/docs/spec.md
@@ -335,9 +355,8 @@ void Fetch::fetch(
     }
 
     // Check the local git LFS object store before hitting the network
-    auto gitDir = std::filesystem::path(git_repository_commondir(repo));
-    auto localLfsPath =
-        gitDir / "lfs" / "objects" / pointer->oid.substr(0, 2) / pointer->oid.substr(2, 2) / pointer->oid;
+    auto localLfsPath = getLfsStorageDir((git_repository *) repo) / "objects" / pointer->oid.substr(0, 2)
+                        / pointer->oid.substr(2, 2) / pointer->oid;
     if (pathExists(localLfsPath)) {
         debug("using local git lfs object %s", PathFmt(localLfsPath));
         auto localContent = readFile(localLfsPath);
