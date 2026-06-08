@@ -195,7 +195,7 @@ static std::filesystem::path getLfsStorageDir(git_repository * repo)
             std::filesystem::path storage(entry->value);
             if (!storage.empty()) {
                 // git-lfs: an absolute path is used as-is, a relative path is
-                // resolved against the git directory.
+                // resolved against the git common directory.
                 return storage.is_absolute() ? storage : gitDir / storage;
             }
         }
