@@ -175,6 +175,7 @@ suites = [
       'impure-env.sh',
       'debugger.sh',
       'extra-sandbox-profile.sh',
+      'regression-reference-checks.sh',
       'help.sh',
       'symlinks.sh',
       'external-builders.sh',
