@@ -24,6 +24,7 @@
 
 #include <curl/curl.h>
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <queue>
@@ -586,6 +587,14 @@ struct curlFileTransfer : public FileTransfer
 #endif
             curl_easy_setopt(req, CURLOPT_CONNECTTIMEOUT, fileTransfer.settings.connectTimeout.get());
 
+            /* Enable TCP keepalive to detect dead connections and server closures.
+               Probes every 30s to catch network failures and idle timeouts early. */
+            curl_easy_setopt(req, CURLOPT_TCP_KEEPALIVE, 1L);
+            curl_easy_setopt(req, CURLOPT_TCP_KEEPIDLE, 30L);
+            curl_easy_setopt(req, CURLOPT_TCP_KEEPINTVL, 30L);
+            /* Don't reuse idle connections older than 90s. */
+            curl_easy_setopt(req, CURLOPT_MAXAGE_CONN, 90L);
+
             curl_easy_setopt(req, CURLOPT_LOW_SPEED_LIMIT, 1L);
             curl_easy_setopt(req, CURLOPT_LOW_SPEED_TIME, fileTransfer.settings.stalledDownloadTimeout.get());
 
@@ -689,11 +698,45 @@ struct curlFileTransfer : public FileTransfer
                 // We treat most errors as transient, but won't retry when hopeless
                 Error err = Transient;
 
-                if (httpStatus == 404 || httpStatus == 410 || code == CURLE_FILE_COULDNT_READ_FILE) {
+                // S3 returns certain retryable errors as HTTP 400/500/503 with XML error codes.
+                // These take precedence over the generic HTTP status handling below.
+                // Only parse the response body on status codes where S3 XML errors can appear.
+                static constexpr std::array<std::string_view, 12> s3RetryableErrors{{
+                    "IncompleteBody",       // HTTP 400 - network issue
+                    "InternalError",        // HTTP 500 - S3 internal failure
+                    "InternalFailure",      // HTTP 500 - alias for InternalError
+                    "InternalServerError",  // HTTP 500 - alias for InternalError
+                    "RequestExpired",       // HTTP 400 - clock skew / slow upload
+                    "RequestTimeout",       // HTTP 400 - stale connection reuse
+                    "RequestTimeTooSkewed", // HTTP 403 - clock drift
+                    "RequestThrottled",     // HTTP 400 - throttling variant
+                    "SlowDown",             // HTTP 503 - throttling
+                    "ServiceUnavailable",   // HTTP 503 - temporary unavailability
+                    "Throttling",           // HTTP 400 - throttling variant
+                    "ThrottledException",   // HTTP 400 - throttling variant
+                }};
+                // S3 error responses have the form <Error><Code>...</Code>...</Error>.
+                // Require the <Error> root to avoid matching unrelated XML with a <Code> element.
+                static std::regex s3ErrorCodeRegex("<Error>[^]*<Code>([^<]+)</Code>");
+                std::smatch s3Match;
+                bool isS3XmlStatus = httpStatus == 400 || httpStatus == 403 || httpStatus == 500 || httpStatus == 503;
+                auto s3ErrorCode =
+                    (isS3XmlStatus && errorSink && std::regex_search(errorSink->s, s3Match, s3ErrorCodeRegex))
+                        ? s3Match[1].str()
+                        : "";
+
+                if (std::find(s3RetryableErrors.begin(), s3RetryableErrors.end(), s3ErrorCode)
+                    != s3RetryableErrors.end()) {
+                    debug("S3 error '%s', will retry", s3ErrorCode);
+                } else if (httpStatus == 404 || httpStatus == 410 || code == CURLE_FILE_COULDNT_READ_FILE) {
                     // The file is definitely not there
                     err = NotFound;
-                } else if (httpStatus == 401 || httpStatus == 403 || httpStatus == 407) {
-                    // Don't retry on authentication/authorization failures
+                } else if (httpStatus == 401 || httpStatus == 407) {
+                    err = Unauthorized;
+                } else if (httpStatus == 403) {
+                    // Don't retry on authentication/authorization failures.
+                    // Note: the only reason we treat this differently from 401/407 is S3 returns 403 if a file doesn't
+                    // exist and the bucket is unlistable.
                     err = Forbidden;
                 } else if (httpStatus == 429) {
                     // 429 means too many requests, so we retry (with a substantially longer delay)
@@ -1053,23 +1096,40 @@ struct curlFileTransfer : public FileTransfer
         return ItemHandle(item.get_ptr());
     }
 
-    ItemHandle enqueueFileTransfer(const FileTransferRequest & request, Callback<FileTransferResult> callback) override
+    inline ref<TransferItem>
+    makeTransferItem(const FileTransferRequest & request, Callback<FileTransferResult> callback)
     {
         /* Handle s3:// URIs by converting to HTTPS and optionally adding auth */
         if (request.uri.scheme() == "s3") {
             auto modifiedRequest = request;
             modifiedRequest.setupForS3();
-            return enqueueItem(make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback)));
+            return make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback));
         }
 
         /* Handle gs:// URIs by converting to HTTPS and adding OAuth2 bearer token */
         if (request.uri.scheme() == "gs") {
             auto modifiedRequest = request;
             modifiedRequest.setupForGcs();
-            return enqueueItem(make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback)));
+            return make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback));
         }
 
-        return enqueueItem(make_ref<TransferItem>(*this, request, std::move(callback)));
+        return make_ref<TransferItem>(*this, request, std::move(callback));
+    }
+
+    ItemHandle
+    enqueueFileTransfer(const FileTransferRequest & request, Callback<FileTransferResult> callback) noexcept override
+    {
+        const auto item = makeTransferItem(request, std::move(callback));
+
+        try {
+            return enqueueItem(item);
+        } catch (const nix::BaseError &) {
+            // NOTE(cole-h): catches both nix::Error and nix::Interrupted -- enqueueItem calls
+            // writeFull which may throw nix::Interrupted, and the rest of enqueueItem may throw
+            // nix::Error
+            item->failEx(std::current_exception());
+            return ItemHandle(item.get_ptr());
+        }
     }
 
     void unpauseTransfer(std::weak_ptr<Item> item)
@@ -1164,7 +1224,7 @@ void FileTransferRequest::setupForGcs()
     }
 }
 
-std::future<FileTransferResult> FileTransfer::enqueueFileTransfer(const FileTransferRequest & request)
+std::future<FileTransferResult> FileTransfer::enqueueFileTransfer(const FileTransferRequest & request) noexcept
 {
     auto promise = std::make_shared<std::promise<FileTransferResult>>();
     enqueueFileTransfer(request, {[promise](std::future<FileTransferResult> fut) {

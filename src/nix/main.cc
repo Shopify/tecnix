@@ -23,6 +23,7 @@
 #include "nix/flake/flake.hh"
 #include "nix/flake/settings.hh"
 #include "nix/util/json-utils.hh"
+#include "nix/util/sentry.hh"
 
 #include "self-exe.hh"
 #include "crash-handler.hh"
@@ -383,6 +384,33 @@ struct CmdHelpStores : Command
 
 static auto rCmdHelpStores = registerCommand<CmdHelpStores>("help-stores");
 
+static void terminateHandler()
+{
+    // Add the exception type and message to the Sentry crash report.
+    auto ex = std::current_exception();
+    if (ex) {
+        try {
+            std::rethrow_exception(ex);
+        } catch (BaseError & e) {
+            try {
+                nix::setSentryTag("terminate_exception_type", typeid(e).name());
+                nix::setSentryTag("terminate_exception_msg", e.message().c_str());
+            } catch (...) {
+            }
+        } catch (const std::exception & e) {
+            try {
+                nix::setSentryTag("terminate_exception_type", typeid(e).name());
+                nix::setSentryTag("terminate_exception_msg", e.what());
+            } catch (...) {
+            }
+        }
+    }
+
+    // Call the original terminate handler.
+    std::set_terminate(nullptr);
+    std::terminate();
+}
+
 void mainWrapped(int argc, char ** argv)
 {
     savedArgv = argv;
@@ -420,7 +448,9 @@ void mainWrapped(int argc, char ** argv)
         sentry_options_set_auto_session_tracking(options, false);
         sentry_options_set_handler_path(options, CRASHPAD_HANDLER_PATH);
         sentry_init(options);
-        sentry_set_tag("nix_command", argc > 0 ? std::string(baseNameOf(argv[0])).c_str() : "");
+        setSentryTag = [](const char * key, const char * value) { sentry_set_tag(key, value); };
+        setSentryTag("nix_command", argc > 0 ? std::string(baseNameOf(argv[0])).c_str() : "");
+        std::set_terminate(terminateHandler);
         sentryEnabled = true;
     }
 
@@ -459,6 +489,8 @@ void mainWrapped(int argc, char ** argv)
         }
     }
 #endif
+
+    Finally f([] { logger->stop(); });
 
     programPath = argv[0];
     auto programName = std::string(baseNameOf(programPath));
@@ -629,10 +661,7 @@ void mainWrapped(int argc, char ** argv)
         evalSettings.pureEval = false;
     }
 
-#if HAVE_SENTRY
-    if (sentryEnabled)
-        sentry_set_tag("nix_subcommand", concatStringsSep(" ", subcommand).c_str());
-#endif
+    setSentryTag("nix_subcommand", concatStringsSep(" ", subcommand).c_str());
 
     try {
         args.command->second->run();

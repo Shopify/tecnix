@@ -257,7 +257,7 @@ EvalMemory::EvalMemory()
     assertGCInitialized();
 }
 
-thread_local EvalState::EvalContext EvalState::evalContext;
+[[gnu::tls_model("initial-exec")]] thread_local EvalState::EvalContext EvalState::evalContext;
 
 EvalState::EvalState(
     const LookupPath & lookupPathFromArguments,
@@ -301,8 +301,9 @@ EvalState::EvalState(
            instance if we're evaluating a file from the physical
            /nix/store while using a chroot store, and also for lazy
            mounted fetchTree. */
-        auto accessor = settings.pureEval ? storeFS.cast<SourceAccessor>()
-                                          : makeUnionSourceAccessor({getFSSourceAccessor(), storeFS});
+        auto accessor = settings.pureEval
+                            ? storeFS.cast<SourceAccessor>()
+                            : makeUnionSourceAccessor({getFSSourceAccessor(), storeFS}, storeFS.cast<SourceAccessor>());
 
         /* Apply access control if needed. */
         if (settings.restrictEval || settings.pureEval)
@@ -320,6 +321,10 @@ EvalState::EvalState(
     , derivationInternal{internalFS->addFile(
           CanonPath("derivation-internal.nix"),
 #include "primops/derivation.nix.gen.hh"
+          )}
+    , importedDrvToDerivation{internalFS->addFile(
+          CanonPath("imported-drv-to-derivation.nix"),
+#include "imported-drv-to-derivation.nix.gen.hh"
           )}
     , store(store)
     , buildStore(buildStore ? buildStore : store)
@@ -2163,7 +2168,7 @@ void ExprLambda::eval(EvalState & state, Env & env, Value & v)
     v.mkLambda(&env, this);
 }
 
-thread_local size_t EvalState::callDepth = 0;
+[[gnu::tls_model("initial-exec")]] thread_local size_t EvalState::callDepth = 0;
 
 void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes, const PosIdx pos)
 {

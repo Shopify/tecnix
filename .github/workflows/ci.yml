@@ -151,14 +151,14 @@ jobs:
             runs-on: macos-14
             os: darwin
             rust-installer: false
-          #- scenario: on ubuntu (rust)
-          #  runs-on: ubuntu-24.04
-          #  os: linux
-          #  rust-installer: true
-          #- scenario: on macos (rust)
-          #  runs-on: macos-14
-          #  os: darwin
-          #  rust-installer: true
+          - scenario: on ubuntu (rust)
+            runs-on: ubuntu-24.04
+            os: linux
+            rust-installer: true
+          - scenario: on macos (rust)
+            runs-on: macos-14
+            os: darwin
+            rust-installer: true
     name: installer test ${{ matrix.scenario }}
     runs-on: ${{ matrix.runs-on }}
     steps:

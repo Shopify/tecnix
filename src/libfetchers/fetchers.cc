@@ -174,8 +174,7 @@ bool Input::isFinal() const
 
 std::optional<std::filesystem::path> Input::isRelative() const
 {
-    assert(scheme);
-    return scheme->isRelative(*this);
+    return scheme ? scheme->isRelative(*this) : std::nullopt;
 }
 
 Attrs Input::toAttrs() const
@@ -299,21 +298,6 @@ std::pair<ref<SourceAccessor>, Input> Input::getAccessor(const Settings & settin
     }
 }
 
-/**
- * Helper class that ensures that paths in substituted source trees
- * are rendered as `«input»/path` rather than
- * `«input»/nix/store/<hash>-source/path`.
- */
-struct SubstitutedSourceAccessor : ForwardingSourceAccessor
-{
-    using ForwardingSourceAccessor::ForwardingSourceAccessor;
-
-    std::string showPath(const CanonPath & path) override
-    {
-        return displayPrefix + path.abs() + displaySuffix;
-    }
-};
-
 std::pair<ref<SourceAccessor>, Input> Input::getAccessorUnchecked(const Settings & settings, Store & store) const
 {
     // FIXME: cache the accessor
@@ -326,7 +310,7 @@ std::pair<ref<SourceAccessor>, Input> Input::getAccessorUnchecked(const Settings
         storePath = computeStorePath(store);
 
     auto makeStoreAccessor = [&]() -> std::pair<ref<SourceAccessor>, Input> {
-        auto accessor = make_ref<SubstitutedSourceAccessor>(store.requireStoreObjectAccessor(*storePath));
+        auto accessor = store.requireStoreObjectAccessor(*storePath);
 
         // FIXME: use the NAR hash for fingerprinting Git trees since it may have a .gitattributes file and we don't
         // know if we used `git archive` or libgit2 to fetch it.
@@ -418,19 +402,20 @@ Input Input::applyOverrides(std::optional<std::string> ref, std::optional<Hash> 
 
 void Input::clone(const Settings & settings, Store & store, const std::filesystem::path & destDir) const
 {
-    assert(scheme);
+    if (!scheme)
+        throw Error("cannot clone unsupported input '%s'", attrsToJSON(attrs));
     scheme->clone(settings, store, *this, destDir);
 }
 
 std::optional<std::filesystem::path> Input::getSourcePath() const
 {
-    assert(scheme);
-    return scheme->getSourcePath(*this);
+    return scheme ? scheme->getSourcePath(*this) : std::nullopt;
 }
 
 void Input::putFile(const CanonPath & path, std::string_view contents, std::optional<std::string> commitMsg) const
 {
-    assert(scheme);
+    if (!scheme)
+        throw Error("unsupported input '%s' does not support modifying file '%s'", attrsToJSON(attrs), path);
     return scheme->putFile(*this, path, contents, commitMsg);
 }
 

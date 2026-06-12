@@ -1040,6 +1040,9 @@ std::map<StorePath, StorePath> copyPaths(
     CheckSigsFlag checkSigs,
     SubstituteFlag substitute)
 {
+    for (auto & path : storePaths)
+        dstStore.addTempRoot(path);
+
     auto valid = dstStore.queryValidPaths(storePaths, substitute);
 
     StorePathSet missing;
@@ -1269,8 +1272,7 @@ void Store::signPathInfo(ValidPathInfo & info)
     auto secretKeyFiles = settings.secretKeyFiles;
 
     for (auto & secretKeyFile : secretKeyFiles.get()) {
-        SecretKey secretKey(readFile(secretKeyFile));
-        LocalSigner signer(std::move(secretKey));
+        LocalSigner signer(SecretKey::parse(readFile(secretKeyFile)));
         info.sign(*this, signer);
     }
 }
@@ -1282,8 +1284,7 @@ void Store::signRealisation(Realisation & realisation)
     auto secretKeyFiles = settings.secretKeyFiles;
 
     for (auto & secretKeyFile : secretKeyFiles.get()) {
-        SecretKey secretKey(readFile(secretKeyFile));
-        LocalSigner signer(std::move(secretKey));
+        LocalSigner signer(SecretKey::parse(readFile(secretKeyFile)));
         realisation.sign(realisation.id, signer);
     }
 }
