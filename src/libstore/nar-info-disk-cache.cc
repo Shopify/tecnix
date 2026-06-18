@@ -67,10 +67,8 @@ struct NarInfoDiskCacheImpl : NarInfoDiskCache
 
     struct Cache
     {
-        int id;
         std::string storeDir;
-        bool wantMassQuery;
-        int priority;
+        CacheInfo info;
     };
 
     struct State
@@ -156,14 +154,15 @@ struct NarInfoDiskCacheImpl : NarInfoDiskCache
                     .use()
                     // Use a minimum TTL to prevent --refresh from
                     // nuking the entire disk cache.
-                    (now - std::max(settings.ttlNegative.get(), 3600U))(
-                        now - std::max(settings.ttlPositive.get(), 30 * 24 * 3600U))
+                    .apply(now - std::max(settings.ttlNegative.get(), 3600U))
+                    .apply(now - std::max(settings.ttlPositive.get(), 30 * 24 * 3600U))
                     .exec();
 
                 debug("deleted %d entries from the NAR info disk cache", sqlite3_changes(state->db));
 
                 SQLiteStmt(state->db, "insert or replace into LastPurge(dummy, value) values ('', ?)")
-                    .use()(now)
+                    .use()
+                    .apply(now)
                     .exec();
             }
         });
@@ -187,22 +186,23 @@ private:
                the the subtraction would promote time_t to unsigned if time_t is
                32 bit. */
             auto timestamp = static_cast<int64_t>(time(nullptr)) - static_cast<int64_t>(settings.ttlMeta.get());
-            auto queryCache(state.queryCache.use()(uri)(timestamp));
+            auto queryCache(state.queryCache.use().apply(uri).apply(timestamp));
             if (!queryCache.next())
                 return std::nullopt;
             auto cache = Cache{
-                .id = (int) queryCache.getInt(0),
                 .storeDir = queryCache.getStr(1),
-                .wantMassQuery = queryCache.getInt(2) != 0,
-                .priority = (int) queryCache.getInt(3),
-            };
+                .info = {
+                    .id = (int) queryCache.getInt(0),
+                    .wantMassQuery = queryCache.getInt(2) != 0,
+                    .priority = (int) queryCache.getInt(3),
+                }};
             state.caches.emplace(uri, cache);
         }
         return getCache(state, uri);
     }
 
 public:
-    int createCache(const std::string & uri, const std::string & storeDir, bool wantMassQuery, int priority) override
+    int createCache(const std::string & uri, const std::string & storeDir, const CacheInfo & info) override
     {
         return retrySQLite<int>([&]() {
             auto state(_state.lock());
@@ -213,27 +213,27 @@ public:
             auto cache(queryCacheRaw(*state, uri));
 
             if (cache)
-                return cache->id;
+                return cache->info.id;
 
-            Cache ret{
-                .id = -1, // set below
-                .storeDir = storeDir,
-                .wantMassQuery = wantMassQuery,
-                .priority = priority,
-            };
+            Cache ret{.storeDir = storeDir, .info = info};
 
             {
-                auto r(state->insertCache.use()(uri)(time(nullptr))(storeDir) (wantMassQuery) (priority));
+                auto r(state->insertCache.use()
+                           .apply(uri)
+                           .apply(time(nullptr))
+                           .apply(storeDir)
+                           .apply(info.wantMassQuery)
+                           .apply(info.priority));
                 if (!r.next()) {
                     unreachable();
                 }
-                ret.id = (int) r.getInt(0);
+                ret.info.id = (int) r.getInt(0);
             }
 
             state->caches[uri] = ret;
 
             txn.commit();
-            return ret.id;
+            return ret.info.id;
         });
     }
 
@@ -244,7 +244,7 @@ public:
             auto cache(queryCacheRaw(*state, uri));
             if (!cache)
                 return std::nullopt;
-            return CacheInfo{.id = cache->id, .wantMassQuery = cache->wantMassQuery, .priority = cache->priority};
+            return cache->info;
         });
     }
 
@@ -259,8 +259,11 @@ public:
 
                 auto now = time(nullptr);
 
-                auto queryNAR(
-                    state->queryNAR.use()(cache.id)(hashPart) (now - settings.ttlNegative)(now - settings.ttlPositive));
+                auto queryNAR(state->queryNAR.use()
+                                  .apply(cache.info.id)
+                                  .apply(hashPart)
+                                  .apply(now - settings.ttlNegative)
+                                  .apply(now - settings.ttlPositive));
 
                 if (!queryNAR.next())
                     return {oUnknown, 0};
@@ -302,8 +305,11 @@ public:
 
                 auto now = time(nullptr);
 
-                auto queryRealisation(state->queryRealisation.use()(cache.id)(id.to_string())(
-                    now - settings.ttlNegative)(now - settings.ttlPositive));
+                auto queryRealisation(state->queryRealisation.use()
+                                          .apply(cache.info.id)
+                                          .apply(id.to_string())
+                                          .apply(now - settings.ttlNegative)
+                                          .apply(now - settings.ttlPositive));
 
                 if (!queryRealisation.next())
                     return {oUnknown, 0};
@@ -337,21 +343,30 @@ public:
 
                 // assert(hashPart == storePathToHash(info->path));
 
-                state->insertNAR
-                    .use()(cache.id)(hashPart) (std::string(info->path.name()))(
-                        narInfo ? narInfo->url : "", narInfo != 0)(narInfo ? narInfo->compression : "", narInfo != 0)(
+                state->insertNAR.use()
+                    .apply(cache.info.id)
+                    .apply(hashPart)
+                    .apply(std::string(info->path.name()))
+                    .apply(narInfo ? narInfo->url : "", narInfo != 0)
+                    .apply(narInfo ? narInfo->compression : "", narInfo != 0)
+                    .apply(
                         narInfo && narInfo->fileHash ? narInfo->fileHash->to_string(HashFormat::Nix32, true) : "",
-                        narInfo && narInfo->fileHash)(
-                        narInfo ? narInfo->fileSize : 0, narInfo != 0 && narInfo->fileSize)(info->narHash.to_string(
-                        HashFormat::Nix32, true))(info->narSize)(concatStringsSep(" ", info->shortRefs()))(
-                        info->deriver ? std::string(info->deriver->to_string()) : "", (bool) info->deriver)(
-                        concatStringsSep(" ", Signature::toStrings(info->sigs)))(renderContentAddress(info->ca))(
+                        narInfo && narInfo->fileHash)
+                    .apply(narInfo ? narInfo->fileSize : 0, narInfo != 0 && narInfo->fileSize)
+                    .apply(info->narHash.to_string(HashFormat::Nix32, true))
+                    .apply(info->narSize)
+                    .apply(concatStringsSep(" ", info->shortRefs()))
+                    .apply(info->deriver ? std::string(info->deriver->to_string()) : "", (bool) info->deriver)
+                    .apply(concatStringsSep(" ", Signature::toStrings(info->sigs)))
+                    .apply(renderContentAddress(info->ca))
+                    .apply(
                         info->provenance ? info->provenance->to_json_str() : "",
-                        experimentalFeatureSettings.isEnabled(Xp::Provenance) && info->provenance)(time(nullptr))
+                        experimentalFeatureSettings.isEnabled(Xp::Provenance) && info->provenance)
+                    .apply(time(nullptr))
                     .exec();
 
             } else {
-                state->insertMissingNAR.use()(cache.id)(hashPart) (time(nullptr)).exec();
+                state->insertMissingNAR.use().apply(cache.info.id).apply(hashPart).apply(time(nullptr)).exec();
             }
         });
     }
@@ -363,9 +378,11 @@ public:
 
             auto & cache(getCache(*state, uri));
 
-            state->insertRealisation
-                .use()(cache.id)(realisation.id.to_string())(static_cast<nlohmann::json>(realisation).dump())(
-                    time(nullptr))
+            state->insertRealisation.use()
+                .apply(cache.info.id)
+                .apply(realisation.id.to_string())
+                .apply(static_cast<nlohmann::json>(realisation).dump())
+                .apply(time(nullptr))
                 .exec();
         });
     }
@@ -376,7 +393,11 @@ public:
             auto state(_state.lock());
 
             auto & cache(getCache(*state, uri));
-            state->insertMissingRealisation.use()(cache.id)(id.to_string())(time(nullptr)).exec();
+            state->insertMissingRealisation.use()
+                .apply(cache.info.id)
+                .apply(id.to_string())
+                .apply(time(nullptr))
+                .exec();
         });
     }
 };
