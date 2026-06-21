@@ -51,6 +51,9 @@ struct Input;
 } // namespace fetchers
 struct EvalSettings;
 class EvalState;
+/** A connection to a worldtree daemon, defined in eval.cc (it owns the C++ worldtree
+ *  client). Held by pointer here so the worldtree client header stays out of eval.hh. */
+struct WorldtreeConn;
 class StorePath;
 struct SingleDerivedPath;
 enum RepairFlag : bool;
@@ -555,10 +558,42 @@ private:
     mutable SharedSync<std::map<std::string, StorePath>> tectonixCheckoutZoneCache_;
 
     /**
+     * Lazily-connected worldtree daemon control connection (zone tree shas + the dirty
+     * set), or null when `tectonix-worldtree-socket` is unset or the daemon is
+     * unreachable. Connected at most once; thread-safe via once_flag.
+     */
+    mutable std::once_flag worldtreeControlConnFlag;
+    mutable std::shared_ptr<WorldtreeConn> worldtreeControlConn_;
+
+    /**
      * Mount a zone by tree SHA, returning a (potentially virtual) store path.
      * Caches by tree SHA for deduplication across world revisions.
      */
     StorePath mountZoneByTreeSha(const Hash & treeSha, std::string_view zonePath);
+
+    /**
+     * The worldtree control connection if `tectonix-worldtree-socket` is set and the
+     * daemon is reachable, else null (callers fall back to the libgit2 path). Connects
+     * at most once.
+     */
+    std::shared_ptr<WorldtreeConn> worldtreeControlConn() const;
+
+    /**
+     * Open a fresh connection to the configured worldtree socket + workspace, or null
+     * on failure (a warning is logged). Used for the shared control connection and for
+     * each zone's content accessor, so different zones' content reads run on their own
+     * connection rather than serializing on one.
+     */
+    std::shared_ptr<WorldtreeConn> connectWorldtree() const;
+
+    /**
+     * Devirtualization tail shared by both worldtree source paths (own-workspace mount
+     * FS and socket-served foreign-SHA): copy `accessor` to the store (eager) or mount
+     * it at a virtual store path (lazy-trees), deduplicating by the zone's `treeSha`
+     * (the daemon's working-tree oid — committed when clean, synthesized when dirty).
+     * The caller picks `accessor`; this owns the store-path identity and cache.
+     */
+    StorePath worldtreeMountAccessor(const Hash & treeSha, std::string_view zonePath, ref<SourceAccessor> accessor);
 
     /**
      * Get zone store path from checkout (for dirty zones).

@@ -543,6 +543,35 @@ struct EvalSettings : Config
           for tectonix builtins. This enables local development workflows where changes
           are visible before committing.
         )"};
+
+    Setting<std::string> tectonixWorldtreeSocket{
+        this,
+        "",
+        "tectonix-worldtree-socket",
+        R"(
+          Path to a worldtree daemon (`worldtreed`) control socket.
+
+          When set, the tectonix builtins read the working copy from the daemon over
+          its socket instead of walking the git repository and checkout with libgit2:
+          zone tree shas, the dirty-zone set, and zone source content are all served by
+          O(changes) RPCs against the workspace named by `tectonix-worldtree-workspace`.
+          This replaces the two libgit2 couplings — the per-zone tree-sha walk and the
+          O(working-tree) `git status` dirty scan — that dominate evaluation in a large
+          checkout. Empty (the default) keeps the libgit2 path. If the daemon cannot be
+          reached the evaluator logs a warning and falls back to libgit2, so setting this
+          is always safe.
+        )"};
+
+    Setting<uint64_t> tectonixWorldtreeWorkspace{
+        this,
+        0,
+        "tectonix-worldtree-workspace",
+        R"(
+          The worldtree workspace id to read when `tectonix-worldtree-socket` is set.
+
+          A worldtree daemon hosts many workspaces; this selects which one backs this
+          evaluation. Ignored when `tectonix-worldtree-socket` is empty.
+        )"};
 };
 
 /**

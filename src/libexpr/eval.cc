@@ -8,6 +8,7 @@
 #include "nix/util/exit.hh"
 #include "nix/util/types.hh"
 #include "nix/util/util.hh"
+#include "nix/util/worldtree-client.hh"
 #include "nix/util/environment-variables.hh"
 #include "nix/store/store-api.hh"
 #include "nix/store/derivations.hh"
@@ -538,8 +539,234 @@ static std::string sanitizeZoneNameForStore(std::string_view zonePath)
     return result;
 }
 
+// ============================================================================
+// Worldtree daemon integration (design §5.1 / §5.1a)
+//
+// When `tectonix-worldtree-socket` is set, three tectonix couplings move off the
+// libgit2 repo+checkout walk and onto O(changes) RPCs against a worldtreed workspace:
+//   * getTectonixDirtyZones() -> `dirty_zones`     — the tracked-dirty set;
+//   * getWorldTreeSha()       -> `zone_tree_shas`  — the working-tree subtree oid
+//       (the committed oid when clean, the synthesized frontier oid when dirty;
+//       the zone's build-cache key);
+//   * getZoneStorePath()      -> source bytes, split by the §5.1a dichotomy:
+//       - the workspace's *own* state (a checkout/mount path is set) is materialized,
+//         so its merged working tree is read as plain local files — never the socket;
+//       - with no local checkout, a foreign SHA is *always clean*, so clean committed
+//         content is streamed over the socket by a `WorldtreeSourceAccessor`
+//         (one `read_tree` prefetch + lazy `read_blobs`).
+// Every routing point falls back to the libgit2 path when the socket is unset or the
+// daemon is unreachable, so enabling the socket is always safe.
+//
+// One `read_tree` ships the whole zone subtree skeleton; this bounds the descent well
+// past any real zone depth (the daemon stops at the true leaves regardless), so the
+// prefetch is never silently truncated.
+static constexpr uint32_t WORLDTREE_PREFETCH_DEPTH = 1u << 20;
+
+/** Reinterpret a 20-byte worldtree object id as a Nix SHA-1 Hash. */
+static Hash oidToHash(const worldtree::Oid & oid)
+{
+    Hash h(HashAlgorithm::SHA1);
+    assert(h.hashSize == oid.size());
+    std::memcpy(h.hash, oid.data(), oid.size());
+    return h;
+}
+
+/**
+ * A single connection to a worldtree daemon bound to one workspace. The transport is a
+ * synchronous, one-call-at-a-time client, so every verb is serialized under `mutex`;
+ * cross-zone parallelism comes from each zone's content accessor holding its *own*
+ * `WorldtreeConn` (see `getZoneStorePath`), not from concurrency within one connection.
+ */
+struct WorldtreeConn
+{
+    uint64_t ws;
+    std::mutex mutex;
+    worldtree::Client client;
+
+    WorldtreeConn(worldtree::Client && client, uint64_t ws)
+        : ws(ws), client(std::move(client))
+    {
+    }
+
+    /** World paths (`//zone`) of zones with tracked working-copy changes. */
+    std::vector<std::string> dirtyZones()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return client.dirtyZones(ws);
+    }
+
+    /** One zone's working-tree subtree oid, or nullopt when absent or out of scope. */
+    std::optional<Hash> zoneTreeSha(std::string_view worldPath)
+    {
+        // `zone_tree_shas` expects World paths (`//zone`); normalize to that form.
+        std::string wp =
+            hasPrefix(worldPath, "//") ? std::string(worldPath) : "//" + std::string(worldPath);
+        std::lock_guard<std::mutex> lock(mutex);
+        auto resp = client.zoneTreeShas(ws, {wp});
+        if (resp.empty() || !resp.front().treeSha)
+            return std::nullopt;
+        return oidToHash(*resp.front().treeSha);
+    }
+
+    /** Prefetch a committed subtree skeleton; entry paths are relative to `rel`. */
+    std::vector<worldtree::TreeEntry> readTree(std::string_view rel, uint32_t depth)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return client.readTree(ws, std::string(rel), depth);
+    }
+
+    /** Decoded bytes of one committed blob by oid, or nullopt when absent. */
+    std::optional<std::string> readBlob(const worldtree::Oid & oid)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto blobs = client.readBlobs(ws, {oid});
+        if (blobs.empty())
+            return std::nullopt;
+        return blobs.front().content;
+    }
+};
+
+/**
+ * The §5.1a source accessor: a `GitSourceAccessor`-shaped view of a *clean committed*
+ * zone subtree served over `worldtree.sock`, with no per-SHA delegate FUSE mount. One
+ * `read_tree` prefetch ships the whole skeleton (path/mode/oid/size, no content), after
+ * which `maybeLstat`/`readDirectory`/`readLink` are answered locally with zero
+ * round-trips; `readFile` fetches the blob by oid on first touch and caches it (blobs
+ * are immutable, so the cache never staleness-checks). Used only when there is no local
+ * checkout — the divergent-SHA path, which is clean by construction.
+ */
+struct WorldtreeSourceAccessor : SourceAccessor
+{
+    std::shared_ptr<WorldtreeConn> conn;
+    std::string zoneRel; // ws-relative, no leading `//` (e.g. "areas/tools/dev")
+
+    struct Node
+    {
+        uint32_t mode = 0;
+        worldtree::Oid oid{};
+        uint64_t size = 0;
+        bool isDir = false;
+    };
+
+    std::once_flag prefetchFlag;
+    // Skeleton keyed by zone-relative path ("" is the zone root). `read_tree` returns
+    // entry paths relative to the requested root (= the zone), so no prefix-stripping.
+    std::map<std::string, Node> nodes;
+    std::map<std::string, std::set<std::string>> dirChildren;
+
+    // Immutable blob content cache, by oid. Per-accessor; a host-shared content-addressed
+    // cache across zones/builds (§5.1a) is a future optimization layered on this.
+    std::mutex blobMutex;
+    std::map<worldtree::Oid, std::string> blobCache;
+
+    WorldtreeSourceAccessor(std::shared_ptr<WorldtreeConn> conn, std::string zoneRel)
+        : conn(std::move(conn)), zoneRel(std::move(zoneRel))
+    {
+    }
+
+    static std::string key(const CanonPath & path)
+    {
+        return path.isRoot() ? std::string() : std::string(path.rel());
+    }
+
+    static Type typeOfMode(uint32_t mode, bool isDir)
+    {
+        if (isDir)
+            return tDirectory;
+        if ((mode & 0170000) == 0120000)
+            return tSymlink;
+        return tRegular;
+    }
+
+    void prefetch()
+    {
+        std::call_once(prefetchFlag, [this]() {
+            auto entries = conn->readTree(zoneRel, WORLDTREE_PREFETCH_DEPTH);
+            nodes[""] = Node{.mode = 0040000, .isDir = true}; // the zone root itself
+            for (auto & e : entries) {
+                bool isDir = (e.mode & 0170000) == 0040000;
+                nodes[e.path] = Node{.mode = e.mode, .oid = e.oid, .size = e.size, .isDir = isDir};
+                auto slash = e.path.rfind('/');
+                std::string parent = slash == std::string::npos ? "" : e.path.substr(0, slash);
+                std::string base = slash == std::string::npos ? e.path : e.path.substr(slash + 1);
+                dirChildren[parent].insert(base);
+            }
+        });
+    }
+
+    std::optional<Stat> maybeLstat(const CanonPath & path) override
+    {
+        prefetch();
+        auto it = nodes.find(key(path));
+        if (it == nodes.end())
+            return std::nullopt;
+        const auto & n = it->second;
+        Stat st;
+        st.type = typeOfMode(n.mode, n.isDir);
+        if (st.type == tRegular) {
+            st.fileSize = n.size;
+            st.isExecutable = (n.mode & 0111) != 0;
+        }
+        return st;
+    }
+
+    DirEntries readDirectory(const CanonPath & path) override
+    {
+        prefetch();
+        DirEntries entries;
+        auto it = dirChildren.find(key(path));
+        if (it == dirChildren.end())
+            return entries;
+        auto dir = key(path);
+        for (const auto & base : it->second) {
+            auto childKey = dir.empty() ? base : dir + "/" + base;
+            std::optional<Type> type;
+            if (auto n = nodes.find(childKey); n != nodes.end())
+                type = typeOfMode(n->second.mode, n->second.isDir);
+            entries[base] = type;
+        }
+        return entries;
+    }
+
+    std::string readFile(const CanonPath & path) override
+    {
+        prefetch();
+        auto it = nodes.find(key(path));
+        if (it == nodes.end() || it->second.isDir)
+            throw Error("worldtree: '%s' is not a readable file in zone '%s'",
+                showPath(path), zoneRel);
+        const auto & oid = it->second.oid;
+        {
+            std::lock_guard<std::mutex> lock(blobMutex);
+            if (auto c = blobCache.find(oid); c != blobCache.end())
+                return c->second;
+        }
+        auto content = conn->readBlob(oid); // network read, no lock held
+        if (!content)
+            throw Error("worldtree: content for '%s' is missing from the workspace",
+                showPath(path));
+        std::lock_guard<std::mutex> lock(blobMutex);
+        return blobCache.try_emplace(oid, std::move(*content)).first->second;
+    }
+
+    std::string readLink(const CanonPath & path) override
+    {
+        // A symlink's target is stored as its blob content.
+        return readFile(path);
+    }
+};
+
 Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
 {
+    // Worldtree mode: the daemon is authoritative for a zone's working-tree oid
+    // (committed when clean, the synthesized frontier oid when dirty — §5.1a). A
+    // non-zone path or one outside the workspace's scope comes back absent; fall through
+    // to the libgit2 committed walk for those (and whenever no socket is configured).
+    if (auto control = worldtreeControlConn()) {
+        if (auto sha = control->zoneTreeSha(worldPath))
+            return *sha;
+    }
+
     auto path = normalizeZonePath(worldPath);
 
     // Check cache first
@@ -645,6 +872,17 @@ const std::set<std::string> & EvalState::getTectonixSparseCheckoutRoots() const
 const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDirtyZones() const
 {
     std::call_once(tectonixDirtyZonesFlag, [this]() {
+        // Worldtree mode: the daemon is authoritative for the tracked-dirty set
+        // (design §5.1), derived from the materialization frontier in O(changes) — no
+        // O(working-tree) `git status` scan. It reports zone granularity (World paths);
+        // per-file detail is unneeded because worldtree source reads never go through
+        // the checkout overlay (the materialized mount already merges the edits).
+        if (auto control = worldtreeControlConn()) {
+            for (auto & zone : control->dirtyZones())
+                tectonixDirtyZones[zone] = ZoneDirtyInfo{.dirty = true};
+            return;
+        }
+
         if (!isTectonixSourceAvailable())
             return;
 
@@ -806,6 +1044,42 @@ const nlohmann::json & EvalState::getManifestJson() const
 
 StorePath EvalState::getZoneStorePath(std::string_view zonePath)
 {
+    // Worldtree mode (design §5.1a): the daemon owns the zone's identity and its source.
+    // The working-tree oid is the dedup/build key (clean → committed, dirty →
+    // synthesized). Source bytes follow the §5.1a dichotomy below. This returns before
+    // the libgit2 dirty/clean split, so the checkout overlay is never built in this mode.
+    if (auto control = worldtreeControlConn()) {
+        auto treeSha = control->zoneTreeSha(zonePath);
+        if (!treeSha)
+            throw Error(
+                "worldtree: zone '%s' is absent or outside this workspace's visibility scope",
+                zonePath);
+
+        ref<SourceAccessor> accessor = [&]() -> ref<SourceAccessor> {
+            if (isTectonixSourceAvailable()) {
+                // The workspace's own state: the materialized mount already presents the
+                // merged working tree (base ⊕ uncommitted edits), so read it as local
+                // files — at full speed, never over the socket (§5.1a).
+                auto fullPath = std::filesystem::path(settings.tectonixCheckoutPath.get())
+                    / normalizeZonePath(zonePath);
+                if (!std::filesystem::exists(fullPath))
+                    throw Error(
+                        "worldtree: zone '%s' is not materialized at '%s'", zonePath, fullPath.string());
+                return makeFSSourceAccessor(fullPath);
+            }
+            // No local checkout: a foreign SHA is always clean, so serve clean committed
+            // content over the socket. Each zone gets its own connection so cross-zone
+            // reads run concurrently rather than serializing on the control connection.
+            auto conn = connectWorldtree();
+            if (!conn)
+                throw Error(
+                    "worldtree: lost the daemon connection while opening zone '%s'", zonePath);
+            return make_ref<WorldtreeSourceAccessor>(conn, normalizeZonePath(zonePath));
+        }();
+
+        return worldtreeMountAccessor(*treeSha, zonePath, accessor);
+    }
+
     // Check dirty status using original zonePath (with // prefix) since
     // tectonixDirtyZones keys come directly from manifest with // prefix
     const ZoneDirtyInfo * dirtyInfo = nullptr;
@@ -898,6 +1172,63 @@ StorePath EvalState::mountZoneByTreeSha(const Hash & treeSha, std::string_view z
     cache->emplace(treeSha, storePath);
 
     debug("mounted zone %s (tree %s) at %s", zonePath, treeSha.gitRev(), store->printStorePath(storePath));
+
+    return storePath;
+}
+
+std::shared_ptr<WorldtreeConn> EvalState::connectWorldtree() const
+{
+    auto socketPath = settings.tectonixWorldtreeSocket.get();
+    if (socketPath.empty())
+        return nullptr;
+    auto ws = settings.tectonixWorldtreeWorkspace.get();
+    try {
+        return std::make_shared<WorldtreeConn>(worldtree::Client::connect(socketPath), ws);
+    } catch (std::exception & e) {
+        warn("worldtree: cannot reach daemon at '%s': %s; falling back to libgit2", socketPath, e.what());
+        return nullptr;
+    }
+}
+
+std::shared_ptr<WorldtreeConn> EvalState::worldtreeControlConn() const
+{
+    std::call_once(worldtreeControlConnFlag, [this]() { worldtreeControlConn_ = connectWorldtree(); });
+    return worldtreeControlConn_;
+}
+
+StorePath EvalState::worldtreeMountAccessor(const Hash & treeSha, std::string_view zonePath, ref<SourceAccessor> accessor)
+{
+    std::string name = "zone-" + sanitizeZoneNameForStore(zonePath);
+
+    if (!settings.lazyTrees) {
+        // Eager: copy the zone content into the store now (content-addressed by content).
+        auto storePath = fetchToStore(
+            fetchSettings, *store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
+        allowPath(storePath);
+        return storePath;
+    }
+
+    // Lazy-trees: mount at a virtual store path, deduplicated by the daemon's working-tree
+    // oid so a zone evaluated twice in one EvalState mounts once (same shape as
+    // mountZoneByTreeSha — the two share tectonixZoneCache_'s tree-oid keyspace).
+    {
+        auto cache = tectonixZoneCache_.readLock();
+        if (auto it = cache->find(treeSha); it != cache->end())
+            return it->second;
+    }
+
+    auto storePath = StorePath::random(name);
+
+    auto cache = tectonixZoneCache_.lock();
+    if (auto it = cache->find(treeSha); it != cache->end())
+        return it->second;
+
+    storeFS->mount(CanonPath(store->printStorePath(storePath)), accessor);
+    allowPath(storePath);
+    cache->emplace(treeSha, storePath);
+
+    debug("worldtree: mounted zone %s (tree %s) at %s",
+          zonePath, treeSha.gitRev(), store->printStorePath(storePath));
 
     return storePath;
 }

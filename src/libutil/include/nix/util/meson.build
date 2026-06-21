@@ -104,5 +104,6 @@ headers = [ config_pub_h ] + files(
   'users.hh',
   'util.hh',
   'variant-wrapper.hh',
+  'worldtree-client.hh',
   'xml-writer.hh',
 )
