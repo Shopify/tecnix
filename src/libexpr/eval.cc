@@ -728,7 +728,14 @@ struct WorldtreeSourceAccessor : SourceAccessor
         return entries;
     }
 
-    std::string readFile(const CanonPath & path) override
+    // Override the streaming variant. The base's `std::string readFile(path)` is a
+    // non-virtual convenience wrapper (it funnels through this one), so overriding *it*
+    // does not compile — every accessor implements the Sink form instead. Blob bytes come
+    // from the per-accessor oid cache, else a single socket read. `blobCache` is a
+    // node-based `std::map`, so a reference into it stays valid after the lock is dropped
+    // (entries are only inserted, never erased) — letting the potentially-large sink write
+    // run lock-free, as the prior string-returning version did for its network read.
+    void readFile(const CanonPath & path, Sink & sink, fun<void(uint64_t)> sizeCallback) override
     {
         prefetch();
         auto it = nodes.find(key(path));
@@ -736,17 +743,24 @@ struct WorldtreeSourceAccessor : SourceAccessor
             throw Error("worldtree: '%s' is not a readable file in zone '%s'",
                 showPath(path), zoneRel);
         const auto & oid = it->second.oid;
+
+        const std::string * content = nullptr;
         {
             std::lock_guard<std::mutex> lock(blobMutex);
             if (auto c = blobCache.find(oid); c != blobCache.end())
-                return c->second;
+                content = &c->second;
         }
-        auto content = conn->readBlob(oid); // network read, no lock held
-        if (!content)
-            throw Error("worldtree: content for '%s' is missing from the workspace",
-                showPath(path));
-        std::lock_guard<std::mutex> lock(blobMutex);
-        return blobCache.try_emplace(oid, std::move(*content)).first->second;
+        if (!content) {
+            auto fetched = conn->readBlob(oid); // network read, no lock held
+            if (!fetched)
+                throw Error("worldtree: content for '%s' is missing from the workspace",
+                    showPath(path));
+            std::lock_guard<std::mutex> lock(blobMutex);
+            content = &blobCache.try_emplace(oid, std::move(*fetched)).first->second;
+        }
+
+        sizeCallback(content->size());
+        sink(*content);
     }
 
     std::string readLink(const CanonPath & path) override
