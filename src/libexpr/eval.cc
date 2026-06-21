@@ -765,8 +765,12 @@ struct WorldtreeSourceAccessor : SourceAccessor
 
     std::string readLink(const CanonPath & path) override
     {
-        // A symlink's target is stored as its blob content.
-        return readFile(path);
+        // A symlink's target is stored as its blob content. Qualify the call: declaring
+        // the Sink-based `readFile` override above hides the base's non-virtual
+        // `std::string readFile(path)` convenience wrapper in this scope (C++ name
+        // hiding), so name it explicitly — it dispatches back through our override and
+        // returns the blob bytes as a string.
+        return SourceAccessor::readFile(path);
     }
 };
 
