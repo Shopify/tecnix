@@ -113,9 +113,12 @@ EOF
 # Verify the provenance of all store paths.
 nix provenance verify --all
 
-# Verification should fail if the sources cannot be fetched
+# Verification should fail if the sources cannot be fetched. Note that
+# `nix provenance verify` re-fetches sources from their origin (it uses
+# "refresh" semantics), so this fails even though the fetched tree is
+# still cached in $XDG_CACHE_HOME/nix and the source store paths are
+# still valid.
 mv "$flake1Dir" "$flake1Dir-tmp"
-rm -rf "$TEST_HOME/.cache"
 expectStderr 1 nix provenance verify --all | grepQuiet "Git repository.*does not exist"
 mv "$flake1Dir-tmp" "$flake1Dir"
 

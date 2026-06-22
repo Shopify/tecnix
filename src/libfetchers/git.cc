@@ -824,6 +824,19 @@ struct GitInputScheme : InputScheme
         if (!rev)
             return std::nullopt;
 
+        /* Ignore the fetcher cache specifically for 'tarball-ttl = 0'
+           to allow "refresh" semantics to force re-downloading Git
+           sources with a rev. This is relied on by commands like
+           'nix provenance verify' to validate that sources can be
+           fetched even if they are already cached. This does not use
+           general cache semantics (i.e. 'lookupStorePathWithTTL')
+           because a given rev will always have the same tree and does
+           not need to be expired by TTL. */
+        if (fetchSettings.tarballTtl.get() == 0) {
+            debug("ignoring cache for git input '%s' because of 'tarball-ttl = 0'", input.to_string());
+            return std::nullopt;
+        }
+
         auto url = getStrAttr(input.attrs, "url");
 
         Cache::Key cacheKey{

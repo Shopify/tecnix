@@ -5,6 +5,7 @@
 #include "nix/store/provenance.hh"
 #include "nix/flake/provenance.hh"
 #include "nix/fetchers/provenance.hh"
+#include "nix/fetchers/fetch-settings.hh"
 #include "nix/util/provenance.hh"
 #include "nix/util/json-utils.hh"
 #include "nix/fetchers/fetch-to-store.hh"
@@ -556,6 +557,13 @@ struct CmdProvenanceVerify : StorePathsCommand
 
     void run(ref<Store> store, StorePaths && storePaths) override
     {
+        /* Verification must re-fetch the recorded sources from their
+           origin to prove they are still retrievable. Force "refresh"
+           semantics so that fetchers bypass the tarball/Git rev caches
+           (which would otherwise serve a previously fetched store path
+           even when the original source has disappeared). */
+        fetchSettings.tarballTtl = 0;
+
         bool first = true;
         bool success = true;
 
