@@ -70,4 +70,53 @@ if [[ "$zone_is_dirty" == "true" ]]; then
     fail "Zone should not be dirty in clean repo"
 fi
 
+# ==================================================================
+# Zone source subpath tests
+# ==================================================================
+echo "Testing zone source subpath access..."
+
+# Test: Subpath for a single file
+subpath_src=$(tectonix_eval "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalZoneSrcSubpath "//areas/tools/dev" "zone.nix"')
+echo "Subpath source (file): $subpath_src"
+
+# Verify it's a store path
+if [[ ! "$subpath_src" =~ ^${NIX_STORE_DIR:-/nix/store}/ ]]; then
+    fail "Subpath source should be a store path, got: $subpath_src"
+fi
+
+# Verify subpath result differs from full zone source
+if [[ "$subpath_src" == "$zone_src" ]]; then
+    fail "Subpath source should differ from full zone source"
+fi
+
+# Test: Subpath for a subdirectory
+subpath_dir_src=$(tectonix_eval "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalZoneSrcSubpath "//areas/tools/dev" "src"')
+echo "Subpath source (dir): $subpath_dir_src"
+
+if [[ ! "$subpath_dir_src" =~ ^${NIX_STORE_DIR:-/nix/store}/ ]]; then
+    fail "Subpath dir source should be a store path, got: $subpath_dir_src"
+fi
+
+# Test: Invalid subpath - empty string
+echo "Testing invalid subpath: empty string..."
+expect_failure tectonix_eval "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalZoneSrcSubpath "//areas/tools/dev" ""'
+
+# Test: Invalid subpath - absolute path
+echo "Testing invalid subpath: absolute path..."
+expect_failure tectonix_eval "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalZoneSrcSubpath "//areas/tools/dev" "/zone.nix"'
+
+# Test: Invalid subpath - parent traversal
+echo "Testing invalid subpath: parent traversal..."
+expect_failure tectonix_eval "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalZoneSrcSubpath "//areas/tools/dev" "../tools/tec/zone.nix"'
+
+# Test: Invalid subpath - nonexistent path
+echo "Testing invalid subpath: nonexistent..."
+expect_failure tectonix_eval "$TEST_WORLD/.git" "$HEAD_SHA" \
+    'builtins.unsafeTectonixInternalZoneSrcSubpath "//areas/tools/dev" "nonexistent.nix"'
+
 echo "Basic tests passed!"

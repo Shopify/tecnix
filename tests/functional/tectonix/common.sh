@@ -39,6 +39,8 @@ MANIFEST_EOF
     # Create zone files
     echo '{ }' > areas/tools/dev/zone.nix
     echo 'Dev zone README' > areas/tools/dev/README.md
+    mkdir -p areas/tools/dev/src
+    echo '{ main = true; }' > areas/tools/dev/src/main.nix
     echo '{ }' > areas/tools/tec/zone.nix
     echo '{ }' > areas/platform/core/zone.nix
     echo 'Test World' > README.md

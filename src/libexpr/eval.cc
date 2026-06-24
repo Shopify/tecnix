@@ -30,6 +30,7 @@
 #include "nix/util/processes.hh"
 #include "nix/store/async-path-writer.hh"
 #include "nix/expr/parallel-eval.hh"
+#include "nix/util/forwarding-source-accessor.hh"
 
 #include "parser-tab.hh"
 
@@ -537,6 +538,26 @@ static std::string sanitizeZoneNameForStore(std::string_view zonePath)
     return result;
 }
 
+// Helper to sanitize a subpath for use in store path names.
+// Same rules as sanitizeZoneNameForStore.
+static std::string sanitizeSubpath(std::string_view subpath)
+{
+    std::string result;
+    result.reserve(subpath.size());
+    for (char c : subpath) {
+        if (c == '/') {
+            result += '-';
+        } else if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                   (c >= 'A' && c <= 'Z') || c == '+' || c == '-' ||
+                   c == '.' || c == '_' || c == '?' || c == '=') {
+            result += c;
+        } else {
+            result += '_';
+        }
+    }
+    return result;
+}
+
 Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
 {
     auto path = normalizeZonePath(worldPath);
@@ -902,6 +923,41 @@ StorePath EvalState::mountZoneByTreeSha(const Hash & treeSha, std::string_view z
 }
 
 /**
+ * Wraps a SourceAccessor so that all operations are rooted at `prefix`.
+ * E.g., readFile("/foo") becomes next->readFile(prefix / "/foo").
+ */
+struct PrefixSourceAccessor : ForwardingSourceAccessor
+{
+    CanonPath prefix;
+
+    PrefixSourceAccessor(ref<SourceAccessor> next, CanonPath prefix)
+        : ForwardingSourceAccessor(next), prefix(std::move(prefix))
+    {
+    }
+
+    std::string readFile(const CanonPath & path) override
+    { return next->readFile(prefix / path); }
+
+    void readFile(const CanonPath & path, Sink & sink, std::function<void(uint64_t)> sizeCallback) override
+    { next->readFile(prefix / path, sink, sizeCallback); }
+
+    std::optional<Stat> maybeLstat(const CanonPath & path) override
+    { return next->maybeLstat(prefix / path); }
+
+    DirEntries readDirectory(const CanonPath & path) override
+    { return next->readDirectory(prefix / path); }
+
+    std::string readLink(const CanonPath & path) override
+    { return next->readLink(prefix / path); }
+
+    std::string showPath(const CanonPath & path) override
+    { return next->showPath(prefix / path); }
+
+    std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override
+    { return next->getPhysicalPath(prefix / path); }
+};
+
+/**
  * Overlays dirty files from disk on top of a clean git tree accessor.
  */
 struct DirtyOverlaySourceAccessor : SourceAccessor
@@ -1045,6 +1101,166 @@ EvalState::getZoneFromCheckout(std::string_view zonePath, const boost::unordered
     storeFS->mount(CanonPath(store->printStorePath(storePath)), makeDirtyAccessor());
     allowPath(storePath);
     cache->emplace(std::string(zonePath), storePath);
+    return storePath;
+}
+
+StorePath EvalState::getZoneSubpathStorePath(std::string_view zonePath, std::string_view subpath)
+{
+    auto subpathCanon = CanonPath("/" + std::string(subpath));
+
+    // Check dirty status
+    const ZoneDirtyInfo * dirtyInfo = nullptr;
+    if (isTectonixSourceAvailable()) {
+        auto & dirtyZones = getTectonixDirtyZones();
+        auto it = dirtyZones.find(std::string(zonePath));
+        if (it != dirtyZones.end() && it->second.dirty)
+            dirtyInfo = &it->second;
+    }
+
+    if (dirtyInfo) {
+        debug("getZoneSubpathStorePath: %s/%s is dirty, using checkout", zonePath, subpath);
+        return getZoneSubpathFromCheckout(zonePath, subpath, &dirtyInfo->dirtyFiles);
+    }
+
+    // Clean zone: get tree SHA and accessor to validate subpath exists
+    auto treeSha = getWorldTreeSha(zonePath);
+    auto repo = getWorldRepo();
+    auto commitHash = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(), HashAlgorithm::SHA1);
+    auto opts = makeZoneAccessorOptions(repo, commitHash, normalizeZonePath(zonePath));
+    auto accessor = repo->getAccessor(treeSha, opts, "zone");
+
+    // Eagerly validate that the subpath exists in the zone
+    if (!accessor->pathExists(subpathCanon))
+        throw Error("subpath '%s' does not exist in zone '%s'", subpath, zonePath);
+
+    if (!settings.lazyTrees) {
+        debug("getZoneSubpathStorePath: %s/%s clean, eager copy from git (tree %s)", zonePath, subpath, treeSha.gitRev());
+
+        std::string name = "zone-" + sanitizeZoneNameForStore(zonePath) + "-" + sanitizeSubpath(subpath);
+        auto storePath = fetchToStore(
+            fetchSettings, *store,
+            SourcePath(accessor, subpathCanon),
+            FetchMode::Copy, name);
+
+        allowPath(storePath);
+        return storePath;
+    }
+
+    debug("getZoneSubpathStorePath: %s/%s clean, lazy mount (tree %s)", zonePath, subpath, treeSha.gitRev());
+    return mountZoneSubpathByTreeSha(treeSha, zonePath, subpath);
+}
+
+StorePath EvalState::mountZoneSubpathByTreeSha(const Hash & treeSha, std::string_view zonePath, std::string_view subpath)
+{
+    auto cacheKey = std::make_pair(treeSha, std::string(subpath));
+
+    // Read lock fast path
+    {
+        auto cache = tectonixZoneSubpathCache_.readLock();
+        auto it = cache->find(cacheKey);
+        if (it != cache->end()) return it->second;
+    }
+
+    // Write lock check for races
+    {
+        auto cache = tectonixZoneSubpathCache_.lock();
+        auto it = cache->find(cacheKey);
+        if (it != cache->end()) return it->second;
+    }
+
+    // Expensive work without holding lock
+    auto repo = getWorldRepo();
+    auto commitHash = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(), HashAlgorithm::SHA1);
+    auto opts = makeZoneAccessorOptions(repo, commitHash, std::string(zonePath));
+    auto accessor = repo->getAccessor(treeSha, opts, "zone");
+
+    auto subpathCanon = CanonPath("/" + std::string(subpath));
+    auto prefixedAccessor = make_ref<PrefixSourceAccessor>(accessor, subpathCanon);
+
+    std::string name = "zone-" + sanitizeZoneNameForStore(zonePath) + "-" + sanitizeSubpath(subpath);
+    auto storePath = StorePath::random(name);
+
+    // Re-acquire lock and check before mounting
+    auto cache = tectonixZoneSubpathCache_.lock();
+    auto it = cache->find(cacheKey);
+    if (it != cache->end()) return it->second;
+
+    storeFS->mount(CanonPath(store->printStorePath(storePath)), prefixedAccessor);
+    allowPath(storePath);
+    cache->emplace(cacheKey, storePath);
+
+    debug("mounted zone subpath %s/%s (tree %s) at %s",
+          zonePath, subpath, treeSha.gitRev(), store->printStorePath(storePath));
+
+    return storePath;
+}
+
+StorePath EvalState::getZoneSubpathFromCheckout(std::string_view zonePath, std::string_view subpath, const boost::unordered_flat_set<std::string> * dirtyFiles)
+{
+    auto zone = normalizeZonePath(zonePath);
+    std::string name = "zone-" + sanitizeZoneNameForStore(zonePath) + "-" + sanitizeSubpath(subpath);
+    auto checkoutPath = settings.tectonixCheckoutPath.get();
+    auto fullPath = std::filesystem::path(checkoutPath) / zone;
+    auto subpathCanon = CanonPath("/" + std::string(subpath));
+
+    auto makeDirtyAccessor = [&]() -> ref<SourceAccessor> {
+        auto repo = getWorldRepo();
+        auto commitHash = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(), HashAlgorithm::SHA1);
+        auto zoneOpts = makeZoneAccessorOptions(repo, commitHash, zone);
+        auto baseAccessor = repo->getAccessor(getWorldTreeSha(zone), zoneOpts, "zone");
+        boost::unordered_flat_set<std::string> zoneDirtyFiles;
+        if (dirtyFiles) {
+            auto zonePrefix = zone + "/";
+            for (auto & f : *dirtyFiles)
+                if (f.starts_with(zonePrefix))
+                    zoneDirtyFiles.insert(f.substr(zonePrefix.size()));
+        }
+        return make_ref<DirtyOverlaySourceAccessor>(
+            baseAccessor, makeFSSourceAccessor(fullPath), std::move(zoneDirtyFiles));
+    };
+
+    if (!settings.lazyTrees) {
+        auto accessor = makeDirtyAccessor();
+
+        // Eagerly validate subpath exists
+        if (!accessor->pathExists(subpathCanon))
+            throw Error("subpath '%s' does not exist in zone '%s'", subpath, zonePath);
+
+        auto storePath = fetchToStore(
+            fetchSettings, *store,
+            SourcePath(accessor, subpathCanon),
+            FetchMode::Copy, name);
+        allowPath(storePath);
+        return storePath;
+    }
+
+    auto cacheKey = std::make_pair(std::string(zonePath), std::string(subpath));
+
+    {
+        auto cache = tectonixCheckoutZoneSubpathCache_.readLock();
+        auto it = cache->find(cacheKey);
+        if (it != cache->end()) return it->second;
+    }
+
+    auto cache = tectonixCheckoutZoneSubpathCache_.lock();
+    auto it = cache->find(cacheKey);
+    if (it != cache->end()) return it->second;
+
+    if (!std::filesystem::exists(fullPath))
+        throw Error("zone '%s' not found in checkout at '%s'", zonePath, fullPath.string());
+
+    auto dirtyAccessor = makeDirtyAccessor();
+
+    // Eagerly validate subpath exists
+    if (!dirtyAccessor->pathExists(subpathCanon))
+        throw Error("subpath '%s' does not exist in zone '%s'", subpath, zonePath);
+
+    auto prefixedAccessor = make_ref<PrefixSourceAccessor>(dirtyAccessor, subpathCanon);
+
+    auto storePath = StorePath::random(name);
+    storeFS->mount(CanonPath(store->printStorePath(storePath)), prefixedAccessor);
+    allowPath(storePath);
+    cache->emplace(cacheKey, storePath);
     return storePath;
 }
 

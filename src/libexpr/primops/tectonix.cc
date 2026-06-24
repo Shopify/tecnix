@@ -246,6 +246,74 @@ static RegisterPrimOp primop_unsafeTectonixInternalZonePath({
 });
 
 // ============================================================================
+// builtins.unsafeTectonixInternalZoneSrcSubpath zonePath subpath
+// Returns a store path containing only the specified subpath of a zone
+// ============================================================================
+
+// Validate a subpath: must be non-empty, relative, no ".." components
+static void validateSubpath(EvalState & state, const PosIdx pos, std::string_view subpath)
+{
+    if (subpath.empty())
+        state.error<EvalError>("subpath must not be empty")
+            .atPos(pos).debugThrow();
+
+    if (subpath.starts_with("/"))
+        state.error<EvalError>("subpath '%s' must be relative (no leading '/')", subpath)
+            .atPos(pos).debugThrow();
+
+    // Check for ".." components
+    auto p = std::string(subpath);
+    for (size_t i = 0; i < p.size(); ) {
+        auto next = p.find('/', i);
+        auto component = p.substr(i, next == std::string::npos ? next : next - i);
+        if (component == ".." || component == ".")
+            state.error<EvalError>("subpath '%s' contains invalid component '%s'", subpath, component)
+                .atPos(pos).debugThrow();
+        if (next == std::string::npos) break;
+        i = next + 1;
+    }
+}
+
+static void prim_unsafeTectonixInternalZoneSrcSubpath(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zonePath = state.forceStringNoCtx(*args[0], pos,
+        "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalZoneSrcSubpath");
+
+    auto subpath = state.forceStringNoCtx(*args[1], pos,
+        "while evaluating the 'subpath' argument to builtins.unsafeTectonixInternalZoneSrcSubpath");
+
+    validateZonePath(state, pos, zonePath);
+    validateSubpath(state, pos, subpath);
+
+    auto storePath = state.getZoneSubpathStorePath(zonePath, subpath);
+    state.allowAndSetStorePathString(storePath, v);
+}
+
+static RegisterPrimOp primop_unsafeTectonixInternalZoneSrcSubpath({
+    .name = "__unsafeTectonixInternalZoneSrcSubpath",
+    .args = {"zonePath", "subpath"},
+    .doc = R"(
+      Get a subpath of a zone's source as a store path.
+
+      Unlike `unsafeTectonixInternalZoneSrc` which returns the entire zone,
+      this returns a store path containing only the specified file or subdirectory.
+      This is more efficient when only a subset of the zone content is needed.
+
+      The subpath must be relative (no leading `/`), non-empty, and must not
+      contain `.` or `..` components.
+
+      With `lazy-trees = true`, returns a virtual store path that is only
+      materialized when used as a derivation input (devirtualized).
+
+      Example: `builtins.unsafeTectonixInternalZoneSrcSubpath "//areas/tools/tec" "src/lib"`
+
+      Uses `--tectonix-git-dir` (defaults to `~/world/git`) and requires
+      `--tectonix-git-sha` to be set.
+    )",
+    .fun = prim_unsafeTectonixInternalZoneSrcSubpath,
+});
+
+// ============================================================================
 // builtins.unsafeTectonixInternalSparseCheckoutRoots
 // Returns list of zone IDs in sparse checkout
 // ============================================================================
