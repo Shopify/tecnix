@@ -190,6 +190,102 @@ pathWithSubmodules=$(nix eval --impure --raw --expr "(builtins.fetchGit { url = 
 [[ -e $pathWithoutExportIgnore/exclude-from-root ]]
 [[ -e $pathWithoutExportIgnore/sub/exclude-from-sub ]]
 
+test_submodule_shallow_fast_path() {
+  local repoA=$TEST_ROOT/submodule_shallow/a
+  local repoB=$TEST_ROOT/submodule_shallow/b
+
+  rm -rf "$TEST_HOME"/.cache/nix
+
+  createGitRepo "$repoB"
+  addGitContent "$repoB"
+  local firstRev
+  firstRev=$(git -C "$repoB" rev-parse HEAD)
+  echo "dolor sit amet" > "$repoB"/content
+  git -C "$repoB" commit -am "Second commit"
+  local subRev
+  subRev=$(git -C "$repoB" rev-parse HEAD)
+
+  createGitRepo "$repoA"
+  git -C "$repoA" submodule add "$repoB" b
+  git -C "$repoA" add b
+  addGitContent "$repoA"
+
+  local rev
+  rev=$(git -C "$repoA" rev-parse HEAD)
+  local out
+  out=$(_NIX_FORCE_HTTP=1 nix eval --impure --raw --expr "(builtins.fetchGit { url = \"file://$repoA\"; rev = \"$rev\"; shallow = true; submodules = true; }).outPath")
+  test -e "$out"/b/content
+
+  local submoduleCacheRepos=()
+  for cacheRepo in "$TEST_HOME"/.cache/nix/gitv3/*; do
+    [[ -d "$cacheRepo"/objects ]] || continue
+    if git -C "$cacheRepo" --git-dir . cat-file -e "$subRev^{commit}" 2>/dev/null; then
+      submoduleCacheRepos+=("$cacheRepo")
+      [[ $(git -C "$cacheRepo" --git-dir . rev-parse --is-shallow-repository) == true ]]
+      if git -C "$cacheRepo" --git-dir . cat-file -e "$firstRev^{commit}" 2>/dev/null; then
+        fail "submodule cache unexpectedly contains previous commit"
+      fi
+    fi
+  done
+  [[ ${#submoduleCacheRepos[@]} == 1 ]]
+}
+test_submodule_shallow_fast_path
+
+test_submodule_shallow_fallback() {
+  local repoA=$TEST_ROOT/submodule_shallow_fallback/a
+  local repoB=$TEST_ROOT/submodule_shallow_fallback/b
+
+  rm -rf "$TEST_HOME"/.cache/nix
+
+  createGitRepo "$repoB"
+  echo "one" > "$repoB"/content
+  git -C "$repoB" add content
+  git -C "$repoB" commit -m "First commit"
+  echo "two" > "$repoB"/content
+  git -C "$repoB" commit -am "Second commit"
+  local pinnedRev
+  pinnedRev=$(git -C "$repoB" rev-parse HEAD)
+  echo "three" > "$repoB"/content
+  git -C "$repoB" commit -am "Third commit"
+  local tipRev
+  tipRev=$(git -C "$repoB" rev-parse HEAD)
+
+  createGitRepo "$repoA"
+  git -C "$repoA" submodule add "$repoB" b
+  git -C "$repoA"/b checkout --quiet "$pinnedRev"
+  echo "root" > "$repoA"/content
+  git -C "$repoA" add .gitmodules b content
+  git -C "$repoA" commit -m "Add submodule"
+
+  local rev
+  rev=$(git -C "$repoA" rev-parse HEAD)
+  local out
+  # Protocol v1 rejects shallow fetching the pinned non-tip commit by SHA,
+  # but the full all-refs fallback can fetch it.
+  out=$(
+    GIT_CONFIG_COUNT=2 \
+    GIT_CONFIG_KEY_0=protocol.file.allow \
+    GIT_CONFIG_VALUE_0=always \
+    GIT_CONFIG_KEY_1=protocol.version \
+    GIT_CONFIG_VALUE_1=1 \
+    _NIX_FORCE_HTTP=1 \
+      nix eval --impure --raw --expr "(builtins.fetchGit { url = \"file://$repoA\"; rev = \"$rev\"; shallow = true; submodules = true; }).outPath"
+  )
+  [[ $(< "$out"/b/content) == two ]]
+
+  local submoduleCacheRepos=()
+  for cacheRepo in "$TEST_HOME"/.cache/nix/gitv3/*; do
+    [[ -d "$cacheRepo"/objects ]] || continue
+    if git -C "$cacheRepo" --git-dir . cat-file -e "$pinnedRev^{commit}" 2>/dev/null; then
+      submoduleCacheRepos+=("$cacheRepo")
+      [[ $(git -C "$cacheRepo" --git-dir . rev-parse --is-shallow-repository) == false ]]
+      git -C "$cacheRepo" --git-dir . cat-file -e "$tipRev^{commit}"
+    fi
+  done
+  [[ ${#submoduleCacheRepos[@]} == 1 ]]
+}
+test_submodule_shallow_fallback
+
 test_submodule_nested() {
   local repoA=$TEST_ROOT/submodule_nested/a
   local repoB=$TEST_ROOT/submodule_nested/b
