@@ -599,30 +599,33 @@ Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
     return currentSha;
 }
 
+std::filesystem::path EvalState::resolveGitDir() const
+{
+    auto checkoutPath = settings.tectonixCheckoutPath.get();
+    auto dotGitPath = std::filesystem::path(checkoutPath) / ".git";
+
+    if (std::filesystem::is_directory(dotGitPath)) {
+        return dotGitPath;
+    } else if (std::filesystem::is_regular_file(dotGitPath)) {
+        auto gitdirContent = readFile(dotGitPath.string());
+        // Parse "gitdir: <path>\n"
+        if (hasPrefix(gitdirContent, "gitdir: ")) {
+            auto path = trim(gitdirContent.substr(8));
+            auto gitDir = std::filesystem::path(path);
+            // Handle relative paths
+            if (gitDir.is_relative())
+                gitDir = std::filesystem::path(checkoutPath) / gitDir;
+            return gitDir;
+        }
+    }
+    return {};
+}
+
 const std::set<std::string> & EvalState::getTectonixSparseCheckoutRoots() const
 {
     std::call_once(tectonixSparseCheckoutRootsFlag, [this]() {
         if (isTectonixSourceAvailable()) {
-            auto checkoutPath = settings.tectonixCheckoutPath.get();
-
-            // Read .git to find the actual git directory
-            // It can be either a directory or a file containing "gitdir: <path>"
-            auto dotGitPath = std::filesystem::path(checkoutPath) / ".git";
-            std::filesystem::path gitDir;
-
-            if (std::filesystem::is_directory(dotGitPath)) {
-                gitDir = dotGitPath;
-            } else if (std::filesystem::is_regular_file(dotGitPath)) {
-                auto gitdirContent = readFile(dotGitPath.string());
-                // Parse "gitdir: <path>\n"
-                if (hasPrefix(gitdirContent, "gitdir: ")) {
-                    auto path = trim(gitdirContent.substr(8));
-                    gitDir = std::filesystem::path(path);
-                    // Handle relative paths
-                    if (gitDir.is_relative())
-                        gitDir = std::filesystem::path(checkoutPath) / gitDir;
-                }
-            }
+            auto gitDir = resolveGitDir();
 
             if (!gitDir.empty()) {
                 // Read sparse-checkout-roots
@@ -639,6 +642,69 @@ const std::set<std::string> & EvalState::getTectonixSparseCheckoutRoots() const
         }
     });
     return tectonixSparseCheckoutRoots;
+}
+
+bool EvalState::ensureZoneInSparseCheckout(std::string_view zonePath)
+{
+    if (!isTectonixSourceAvailable() || !settings.tectonixAutoSparseCheckout)
+        return false;
+
+    auto zone = normalizeZonePath(zonePath);
+    auto checkoutPath = settings.tectonixCheckoutPath.get();
+    auto fullPath = std::filesystem::path(checkoutPath) / zone;
+
+    // Fast path: zone already on disk
+    if (std::filesystem::exists(fullPath))
+        return false;
+
+    std::lock_guard<std::mutex> lock(sparseCheckoutMutex_);
+
+    // Double-check after acquiring lock
+    if (std::filesystem::exists(fullPath))
+        return false;
+
+    // Look up zone ID from manifest
+    std::string zoneId;
+    try {
+        auto & manifest = getManifestJson();
+        auto zoneKey = std::string(zonePath);
+        if (manifest.contains(zoneKey) && manifest.at(zoneKey).contains("id")) {
+            zoneId = manifest.at(zoneKey).at("id").get<std::string>();
+        }
+    } catch (...) {
+        warn("failed to look up zone ID for '%s' from manifest", zonePath);
+        return false;
+    }
+
+    if (zoneId.empty()) {
+        debug("ensureZoneInSparseCheckout: no zone ID found for '%s'", zonePath);
+        return false;
+    }
+
+    // Run git sparse-checkout add
+    // The zone path for sparse-checkout needs a leading / (e.g., /areas/tools/foo)
+    auto sparsePattern = "/" + zone;
+    try {
+        runProgram("git", true, {"-C", checkoutPath, "sparse-checkout", "add", sparsePattern});
+    } catch (ExecError & e) {
+        warn("failed to add '%s' to sparse checkout: %s", zonePath, e.what());
+        return false;
+    }
+
+    // Append zone ID to sparse-checkout-roots
+    auto gitDir = resolveGitDir();
+    if (!gitDir.empty()) {
+        auto sparseRootsPath = gitDir / "info" / "sparse-checkout-roots";
+        std::ofstream ofs(sparseRootsPath, std::ios::app);
+        if (ofs) {
+            ofs << zoneId << "\n";
+        } else {
+            warn("failed to append zone ID '%s' to %s", zoneId, sparseRootsPath.string());
+        }
+    }
+
+    printInfo("auto-added zone '%s' (id: %s) to sparse checkout", zonePath, zoneId);
+    return true;
 }
 
 const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDirtyZones() const
@@ -805,6 +871,9 @@ const nlohmann::json & EvalState::getManifestJson() const
 
 StorePath EvalState::getZoneStorePath(std::string_view zonePath)
 {
+    // Auto-add zone to sparse checkout if not present on disk
+    ensureZoneInSparseCheckout(zonePath);
+
     // Check dirty status using original zonePath (with // prefix) since
     // tectonixDirtyZones keys come directly from manifest with // prefix
     const ZoneDirtyInfo * dirtyInfo = nullptr;
@@ -1038,8 +1107,16 @@ EvalState::getZoneFromCheckout(std::string_view zonePath, const boost::unordered
     if (it != cache->end())
         return it->second;
 
-    if (!std::filesystem::exists(fullPath))
-        throw Error("zone '%s' not found in checkout at '%s'", zonePath, fullPath.string());
+    if (!std::filesystem::exists(fullPath)) {
+        // Zone is in sparse-checkout-roots but files are missing; try to restore
+        try {
+            runProgram("git", true, {"-C", checkoutPath, "checkout", "HEAD", "--", zone});
+        } catch (ExecError &) {
+            // Restore failed, fall through to error
+        }
+        if (!std::filesystem::exists(fullPath))
+            throw Error("zone '%s' not found in checkout at '%s'", zonePath, fullPath.string());
+    }
 
     auto storePath = StorePath::random(name);
     storeFS->mount(CanonPath(store->printStorePath(storePath)), makeDirtyAccessor());
