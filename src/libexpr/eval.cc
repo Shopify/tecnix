@@ -871,13 +871,23 @@ struct WorldtreeSourceAccessor : SourceAccessor
 
 Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
 {
-    // Worldtree mode: the daemon is authoritative for a zone's working-tree oid
-    // (committed when clean, the synthesized frontier oid when dirty — §5.1a). A
-    // non-zone path or one outside the workspace's scope comes back absent; fall through
-    // to the libgit2 committed walk for those (and whenever no socket is configured).
+    // Worldtree mode (design §5.1a): the daemon is authoritative for a world path's
+    // working-tree oid (committed when clean, the synthesized frontier oid when dirty).
+    // With the socket set the daemon is the sole source of truth — a worldtree sandbox has
+    // no git repo to fall back to. An absent oid is a *normal* daemon verdict for a path
+    // that is missing or outside this workspace's visibility scope (the handler encodes it
+    // as an empty tree_sha in a successful response, which maps to nullopt here), so it must
+    // be treated as terminal: falling through to the libgit2 walk would silently serve a
+    // zone the daemon deliberately hid, or committed content at a different generation than
+    // the pinned session — the exact silent downgrade decision #1 forbids. libgit2 (below)
+    // is reachable only when no socket is configured. Mirrors getZoneStorePath /
+    // getManifestContent.
     if (auto control = worldtreeControlConn()) {
         if (auto sha = control->zoneTreeSha(worldPath))
             return *sha;
+        throw Error(
+            "worldtree: world path '%s' is absent or outside this workspace's visibility scope",
+            worldPath);
     }
 
     auto path = normalizeZonePath(worldPath);
@@ -1172,6 +1182,16 @@ const std::string & EvalState::getManifestContent() const
                 debug("loaded manifest over the worldtree socket at the pinned SHA");
                 return;
             }
+            // The socket is set but neither source produced a manifest: Mode A had no
+            // checkout file on disk (above) AND this control conn is bound, not an RO
+            // session (so it carries no in-band manifest). With the socket set the daemon
+            // is the sole source of truth (decisions #1/#6) — fail loud rather than
+            // silently reading stale/wrong committed content from libgit2. This also keeps
+            // getTectonixDirtyZones' fail-loud catch intact (it relies on this throwing).
+            throw Error(
+                "worldtree: manifest.json is unavailable (socket is set: no checkout "
+                "manifest on disk and the control connection is bound, not an RO session) "
+                "— refusing to fall back to libgit2");
         }
 
         // Socket unset (plain local eval): read the committed manifest via libgit2.

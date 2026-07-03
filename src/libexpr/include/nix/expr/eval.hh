@@ -559,8 +559,11 @@ private:
 
     /**
      * Lazily-connected worldtree daemon control connection (zone tree shas + the dirty
-     * set), or null when `tectonix-worldtree-socket` is unset or the daemon is
-     * unreachable. Connected at most once; thread-safe via once_flag.
+     * set), or null only when `tectonix-worldtree-socket` is unset (plain local eval).
+     * With the socket set an unreachable daemon THROWS rather than yielding null — there
+     * is no null-on-unreachable and no libgit2 fallback (fail-loud; see the
+     * `tectonix-worldtree-socket` setting doc). Connected at most once; thread-safe via
+     * once_flag.
      */
     mutable std::once_flag worldtreeControlConnFlag;
     mutable std::shared_ptr<WorldtreeConn> worldtreeControlConn_;
@@ -572,17 +575,22 @@ private:
     StorePath mountZoneByTreeSha(const Hash & treeSha, std::string_view zonePath);
 
     /**
-     * The worldtree control connection if `tectonix-worldtree-socket` is set and the
-     * daemon is reachable, else null (callers fall back to the libgit2 path). Connects
-     * at most once.
+     * The worldtree control connection. Non-null when `tectonix-worldtree-socket` is set
+     * and the daemon is reachable; null *only* when the socket is unset (the sole signal
+     * that callers may use the libgit2 path). When the socket is set but the daemon is
+     * unreachable or refuses, this THROWS — it never returns null-on-failure and there is
+     * no libgit2 fallback (fail-loud). Connects at most once.
      */
     std::shared_ptr<WorldtreeConn> worldtreeControlConn() const;
 
     /**
-     * Open a fresh connection to the configured worldtree socket + workspace, or null
-     * on failure (a warning is logged). Used for the shared control connection and for
-     * each zone's content accessor, so different zones' content reads run on their own
-     * connection rather than serializing on one.
+     * Open a fresh connection to the configured worldtree socket + workspace. Returns null
+     * *only* when the socket is unset; with the socket set, a connection failure PROPAGATES
+     * (throws `ProtocolError`) — no warning, no null-on-failure, no fallback (fail-loud;
+     * see the `worldtreeControlConn()` block comment and the `tectonix-worldtree-socket`
+     * setting doc). Used for the shared control connection and for each zone's content
+     * accessor, so different zones' content reads run on their own connection rather than
+     * serializing on one.
      */
     std::shared_ptr<WorldtreeConn> connectWorldtree() const;
 
