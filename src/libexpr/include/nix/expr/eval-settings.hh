@@ -557,9 +557,13 @@ struct EvalSettings : Config
           O(changes) RPCs against the workspace named by `tectonix-worldtree-workspace`.
           This replaces the two libgit2 couplings — the per-zone tree-sha walk and the
           O(working-tree) `git status` dirty scan — that dominate evaluation in a large
-          checkout. Empty (the default) keeps the libgit2 path. If the daemon cannot be
-          reached the evaluator logs a warning and falls back to libgit2, so setting this
-          is always safe.
+          checkout.
+
+          Empty (the default) keeps the libgit2 path. When set, the daemon is the sole
+          source of truth (a worldtree sandbox has no git repo to fall back to): an
+          unreachable daemon, or one that refuses a request, is a hard failure — evaluation
+          aborts rather than silently reading stale or wrong content from libgit2. Set this
+          only where a daemon is actually serving the source.
         )"};
 
     Setting<uint64_t> tectonixWorldtreeWorkspace{

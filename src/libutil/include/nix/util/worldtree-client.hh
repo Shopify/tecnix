@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -46,6 +47,15 @@ enum class ErrorCode : int {
     Unsupported = 12,
     Io = 13,
     Internal = 14,
+    /// The requested base commit is not covered by the daemon's current generation (not
+    /// yet replicated on this host). **Retryable**: the caller should surface an
+    /// actionable "retry once the SHA replicates" message, not a hard failure.
+    BaseCommitUnreachable = 15,
+    /// A single response chunk would exceed the transport's frame ceiling
+    /// (`MAX_FRAME`). **Terminal** (not retryable): the object is too large to serve in
+    /// this protocol version. Distinct from a transport-level framing overflow, which is
+    /// a [`ProtocolError`].
+    ResponseTooLarge = 16,
 };
 
 /// A typed `ERROR` reply from the daemon: it processed the request and refused it. The
@@ -94,6 +104,30 @@ struct Blob
     std::optional<std::string> content;
 };
 
+/// One `dirty_zones` detail entry: a dirty zone's World path plus its changed working-copy
+/// files (staged ∪ unstaged), each **relative to the workspace root** (the daemon's
+/// `StatusEntry.path` form). The daemon computes these while mapping files to zones, so they
+/// ride along for free — letting Tectonix reconstruct a full per-file `ZoneDirtyInfo` without
+/// its own `git status` walk.
+struct ZoneDirty
+{
+    std::string zone;
+    std::vector<std::string> files;
+};
+
+/// The result of `scoped.open_ro`: an **ephemeral read-only session** pinned at a base
+/// commit (worldtree design §5.1a/§6.1). `ws` *is* the session id — every subsequent read
+/// verb ([`Client::readTree`], [`Client::readBlobs`], [`Client::zoneTreeShas`],
+/// [`Client::dirtyZones`]) addresses it, so no verb grows a `session_id`. `manifest` is the
+/// raw `.meta/manifest.json` bytes at the pinned SHA, delivered in-band (no libgit2, no path
+/// traversal). `basePin` is the generation the session refcounts (observability only).
+struct RoSession
+{
+    uint64_t ws;
+    std::string manifest;
+    uint64_t basePin;
+};
+
 /// A synchronous, one-call-at-a-time client over a single daemon connection. Not
 /// thread-safe: a connection multiplexes by request id, but this client issues one
 /// request and drains to its reply before the next, which is all Tectonix's
@@ -112,8 +146,13 @@ public:
     ~Client();
 
     /// `tecnix.dirty_zones` — the World paths (`//areas/...`) of zones with tracked
-    /// working-copy changes.
+    /// working-copy changes (the flat projection; see [`dirtyZoneEntries`] for per-file detail).
     std::vector<std::string> dirtyZones(uint64_t ws);
+
+    /// `tecnix.dirty_zones` — the dirty set with each zone's changed files. Empty from an
+    /// older daemon (which sends only the flat `zones`); the caller then falls back to
+    /// [`dirtyZones`] (dirty flag only, no per-file detail).
+    std::vector<ZoneDirty> dirtyZoneEntries(uint64_t ws);
 
     /// `tecnix.zone_tree_shas` — the working-tree subtree oid of each requested zone, in
     /// request order. An empty `zones` resolves the dirty set (the common call). A clean
@@ -128,12 +167,54 @@ public:
     /// `tecnix.read_blobs` — the decoded bytes of each blob oid, in request order.
     std::vector<Blob> readBlobs(uint64_t ws, const std::vector<Oid> & oids);
 
+    /// `scoped.open_ro` — open an **ephemeral read-only session** pinned at `baseSha`
+    /// (20 raw commit-oid bytes), optionally confined to a zone cone. `visibilityMode` is
+    /// `""`/`"full"` for full visibility (the zone lists must then be empty) or `"scoped"`
+    /// with `visibleZoneIds`/`visibleZonePaths` naming the cone. Returns the session `ws`
+    /// + the in-band manifest + the pinned generation. Throws [`RpcError`] with
+    /// `BaseCommitUnreachable` (retryable) if the SHA is not covered by the current
+    /// generation, or `Denied` if the connection may not open sessions.
+    RoSession openRo(
+        const Oid & baseSha,
+        const std::string & visibilityMode,
+        const std::vector<std::string> & visibleZoneIds,
+        const std::vector<std::string> & visibleZonePaths);
+
+    /// `scoped.close_ro` — release a session opened on **this** connection. Idempotent and
+    /// ownership-gated: closing an id this connection never owned is a clean no-op.
+    void closeRo(uint64_t ws);
+
 private:
     explicit Client(int fd);
 
-    /// Issue `method` with an encoded `payload`, returning the response payload (or
-    /// throwing on an `ERROR` reply / transport failure).
+    /// A single decoded reply frame addressed to our request (transport detail).
+    struct RecvFrame
+    {
+        uint64_t kind = 0;
+        uint64_t errorCode = 0;
+        std::string payload;
+        std::string errorMsg;
+        bool havePayload = false;
+    };
+
+    /// Encode + write one REQUEST frame, returning its request id.
+    uint64_t send(const std::string & method, const std::string & payload);
+
+    /// Read frames until one is addressed to `id` (skipping the daemon's opening CREDIT
+    /// frame and any stray frame), returning it. Enforces the [`MAX_FRAME`] length cap.
+    RecvFrame recvFor(uint64_t id);
+
+    /// A **one-shot** call: issue `method`, return the single RESPONSE payload (throwing on
+    /// an ERROR reply / transport failure). For verbs the daemon does not stream.
     std::string call(const std::string & method, const std::string & payload);
+
+    /// A **streaming** call: issue `method`, then invoke `onChunk` for each RESPONSE chunk
+    /// in order, returning once STREAM_END arrives (throwing on an ERROR reply). Used by
+    /// the read verbs, which the daemon serves as a chunked stream (design §6.6).
+    void callStream(
+        const std::string & method,
+        const std::string & payload,
+        const std::function<void(std::string_view)> & onChunk);
 
     void writeAll(const std::string & bytes);
 

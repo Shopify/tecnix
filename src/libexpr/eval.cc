@@ -554,8 +554,11 @@ static std::string sanitizeZoneNameForStore(std::string_view zonePath)
 //       - with no local checkout, a foreign SHA is *always clean*, so clean committed
 //         content is streamed over the socket by a `WorldtreeSourceAccessor`
 //         (one `read_tree` prefetch + lazy `read_blobs`).
-// Every routing point falls back to the libgit2 path when the socket is unset or the
-// daemon is unreachable, so enabling the socket is always safe.
+// Fail-loud contract: when the socket is SET, the daemon is the sole source of truth — a
+// worldtree sandbox has no git repo to fall back to. A daemon that is unreachable, or that
+// refuses/errors a request, is a hard failure (the error propagates), never a silent
+// downgrade. libgit2 / the checkout walk are reached ONLY when the socket is UNSET (plain
+// local, non-worldtree eval). This is the load-bearing invariant behind the two modes.
 //
 // One `read_tree` ships the whole zone subtree skeleton; this bounds the descent well
 // past any real zone depth (the daemon stops at the true leaves regardless), so the
@@ -583,9 +586,64 @@ struct WorldtreeConn
     std::mutex mutex;
     worldtree::Client client;
 
+    // Session state (design §5.1a/§6.1). A conn is either *bound* (ws is the sandbox's own
+    // workspace, set at construction — the `tec <cmd>` control conn) or a *session* (ws is an
+    // ephemeral RO workspace this conn opened via `open_ro`, pinned at a SHA — the `tec --sha`
+    // path). `ownsSession` is set iff we opened one, so the destructor releases exactly what
+    // we created (§6.1: "the new workspace is owned by the calling sandbox").
+    bool ownsSession = false;
+    std::string sessionManifest_; // in-band `.meta/manifest.json` at the pinned SHA
+    uint64_t basePin = 0;         // generation the session refcounts (observability)
+
     WorldtreeConn(worldtree::Client && client, uint64_t ws)
         : ws(ws), client(std::move(client))
     {
+    }
+
+    ~WorldtreeConn()
+    {
+        // RAII release of an ephemeral RO session: the daemon also drops it on disconnect, so
+        // this is the prompt, well-behaved path. Best-effort — a destructor must not throw,
+        // and a lost connection (the very case where close would fail) already frees it
+        // daemon-side.
+        if (ownsSession) {
+            try {
+                std::lock_guard<std::mutex> lock(mutex);
+                client.closeRo(ws);
+            } catch (...) {
+            }
+        }
+    }
+
+    /**
+     * Open an ephemeral RO session pinned at `baseSha`, confined to a zone cone (empty cone ⇒
+     * full visibility). Replaces `ws` with the returned session id and caches the in-band
+     * manifest; every subsequent read verb on this conn then addresses the session. One
+     * session per conn (the conn *is* the session once opened).
+     */
+    void openSession(
+        const Hash & baseSha,
+        const std::string & visMode,
+        const std::vector<std::string> & zoneIds,
+        const std::vector<std::string> & zonePaths)
+    {
+        worldtree::Oid oid{};
+        assert(baseSha.hashSize == oid.size());
+        std::memcpy(oid.data(), baseSha.hash, oid.size());
+        std::lock_guard<std::mutex> lock(mutex);
+        auto session = client.openRo(oid, visMode, zoneIds, zonePaths);
+        ws = session.ws;
+        sessionManifest_ = std::move(session.manifest);
+        basePin = session.basePin;
+        ownsSession = true;
+    }
+
+    /** The session's in-band manifest, or nullopt when this conn is bound (not a session). */
+    std::optional<std::string> sessionManifest() const
+    {
+        if (!ownsSession)
+            return std::nullopt;
+        return sessionManifest_;
     }
 
     /** World paths (`//zone`) of zones with tracked working-copy changes. */
@@ -593,6 +651,13 @@ struct WorldtreeConn
     {
         std::lock_guard<std::mutex> lock(mutex);
         return client.dirtyZones(ws);
+    }
+
+    /** The dirty set with each zone's changed files (for full `ZoneDirtyInfo`). */
+    std::vector<worldtree::ZoneDirty> dirtyZoneEntries()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return client.dirtyZoneEntries(ws);
     }
 
     /** One zone's working-tree subtree oid, or nullopt when absent or out of scope. */
@@ -633,7 +698,13 @@ struct WorldtreeConn
  * which `maybeLstat`/`readDirectory`/`readLink` are answered locally with zero
  * round-trips; `readFile` fetches the blob by oid on first touch and caches it (blobs
  * are immutable, so the cache never staleness-checks). Used only when there is no local
- * checkout — the divergent-SHA path, which is clean by construction.
+ * checkout — the `tec --sha` path, which is clean by construction.
+ *
+ * Confinement (design §10.1, the load-bearing constraint): `conn` holds an ephemeral RO
+ * session opened `scoped([zone])`, so the daemon — the authority — refuses any path read
+ * outside the zone cone. This accessor is *also* rooted at the zone (all reads go through
+ * `zoneRel`), and its constructor rejects a `zoneRel` that could escape, as
+ * defense-in-depth. The two together guarantee a zone build cannot traverse out of its root.
  */
 struct WorldtreeSourceAccessor : SourceAccessor
 {
@@ -659,9 +730,24 @@ struct WorldtreeSourceAccessor : SourceAccessor
     std::mutex blobMutex;
     std::map<worldtree::Oid, std::string> blobCache;
 
-    WorldtreeSourceAccessor(std::shared_ptr<WorldtreeConn> conn, std::string zoneRel)
+    WorldtreeSourceAccessor(std::shared_ptr<WorldtreeConn> conn, std::string zoneRel, const Hash & treeSha)
         : conn(std::move(conn)), zoneRel(std::move(zoneRel))
     {
+        // Defense-in-depth escape guard: the zone root we prefetch from must be a plain
+        // ws-relative path. A leading `/` or any `..` component would let a read reach
+        // outside the zone cone (the daemon would still refuse it, but we never form the
+        // request). This is the C++ half of the confinement invariant.
+        if (hasPrefix(this->zoneRel, "/"))
+            throw Error("worldtree: zone root '%s' must be workspace-relative", this->zoneRel);
+        for (auto & c : tokenizeString<std::vector<std::string>>(this->zoneRel, "/"))
+            if (c == ".." || c == ".")
+                throw Error("worldtree: zone root '%s' contains an illegal path component", this->zoneRel);
+
+        // A stable, content-addressed eval-cache key (design §5.1a): the committed subtree
+        // oid uniquely identifies this accessor's bytes, so two evaluations of the same zone
+        // at the same content share the fetch cache — and, unlike a checkout-derived default,
+        // it is correct for socket-served content that has no local path.
+        fingerprint = "worldtree:" + treeSha.gitRev();
     }
 
     static std::string key(const CanonPath & path)
@@ -771,6 +857,15 @@ struct WorldtreeSourceAccessor : SourceAccessor
         // hiding), so name it explicitly — it dispatches back through our override and
         // returns the blob bytes as a string.
         return SourceAccessor::readFile(path);
+    }
+
+    std::optional<time_t> getLastModified() override
+    {
+        // The wire carries no timestamps — committed blobs are content-addressed, not dated.
+        // Return an explicit "unknown" (matching the base default) rather than silently
+        // inheriting a value that would be meaningless for socket-served content; the
+        // content-addressed `fingerprint` above is the correct cache key here, not mtime.
+        return std::nullopt;
     }
 };
 
@@ -890,14 +985,39 @@ const std::set<std::string> & EvalState::getTectonixSparseCheckoutRoots() const
 const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDirtyZones() const
 {
     std::call_once(tectonixDirtyZonesFlag, [this]() {
-        // Worldtree mode: the daemon is authoritative for the tracked-dirty set
-        // (design §5.1), derived from the materialization frontier in O(changes) — no
-        // O(working-tree) `git status` scan. It reports zone granularity (World paths);
-        // per-file detail is unneeded because worldtree source reads never go through
-        // the checkout overlay (the materialized mount already merges the edits).
+        // Worldtree mode: the daemon is authoritative for the tracked-dirty set (design
+        // §5.1), derived from the materialization frontier in O(changes) — no O(working-tree)
+        // `git status` scan. Reconstruct a *full* ZoneDirtyInfo so every consumer (notably
+        // the `__unsafeTectonixInternalDirtyZones` primop) sees every manifest zone with an
+        // accurate flag, matching the libgit2 path's shape:
+        //   (1) init every manifest zone clean — the manifest is served over the socket in
+        //       `tec --sha` mode and read from the checkout in `tec <cmd>` mode (see
+        //       getManifestContent); either way it enumerates the full zone set;
+        //   (2) overlay the daemon's per-zone dirty files (empty for a clean --sha session,
+        //       the real staged ∪ unstaged set for a bound sandbox workspace).
         if (auto control = worldtreeControlConn()) {
-            for (auto & zone : control->dirtyZones())
-                tectonixDirtyZones[zone] = ZoneDirtyInfo{.dirty = true};
+            const nlohmann::json * manifest;
+            try {
+                manifest = &getManifestJson();
+            } catch (nlohmann::json::parse_error & e) {
+                warn("failed to parse manifest for dirty zone detection: %s", e.what());
+                return;
+            } catch (Error &) {
+                // Manifest unavailable (e.g. daemon refused) — fail loud rather than report a
+                // misleading empty/partial dirty set.
+                throw;
+            }
+            for (auto & [zonePath, value] : manifest->items())
+                if (value.is_object() && value.contains("id") && value.at("id").is_string())
+                    tectonixDirtyZones[zonePath] = {};
+            for (auto & entry : control->dirtyZoneEntries()) {
+                // A dirty zone the daemon names but the manifest omits still surfaces (a zone
+                // added in this workspace) — insert-or-update keeps the two sources unioned.
+                auto & info = tectonixDirtyZones[entry.zone];
+                info.dirty = true;
+                for (auto & f : entry.files)
+                    info.dirtyFiles.insert(f);
+            }
             return;
         }
 
@@ -1031,7 +1151,9 @@ const std::string & EvalState::getManifestContent() const
     std::call_once(tectonixManifestFlag, [this]() {
         auto fullPath = CanonPath(TECTONIX_MANIFEST_PATH);
 
-        // In source-available mode, check checkout first
+        // Mode A (`tec <cmd>`, materialized checkout): the working tree is the source of
+        // truth and may carry uncommitted manifest edits (a zone added/removed in this
+        // sandbox), so read the local file — never a stale committed copy.
         if (isTectonixSourceAvailable()) {
             auto manifestPath = std::filesystem::path(settings.tectonixCheckoutPath.get()) / ".meta" / "manifest.json";
             if (std::filesystem::exists(manifestPath)) {
@@ -1041,7 +1163,18 @@ const std::string & EvalState::getManifestContent() const
             }
         }
 
-        // Fall back to git
+        // Mode B (`tec --sha`, no checkout): the manifest at the pinned SHA is delivered
+        // in-band by the daemon in the control session's `open_ro` response — no libgit2, no
+        // path traversal to `.meta`. Fail-loud: with the socket set this is the only source.
+        if (auto control = worldtreeControlConn()) {
+            if (auto m = control->sessionManifest()) {
+                tectonixManifestContent = std::move(*m);
+                debug("loaded manifest over the worldtree socket at the pinned SHA");
+                return;
+            }
+        }
+
+        // Socket unset (plain local eval): read the committed manifest via libgit2.
         auto accessor = getWorldGitAccessor();
         if (!accessor->pathExists(fullPath))
             throw Error("manifest.json does not exist at %s in world", TECTONIX_MANIFEST_PATH);
@@ -1075,9 +1208,10 @@ StorePath EvalState::getZoneStorePath(std::string_view zonePath)
 
         ref<SourceAccessor> accessor = [&]() -> ref<SourceAccessor> {
             if (isTectonixSourceAvailable()) {
-                // The workspace's own state: the materialized mount already presents the
-                // merged working tree (base ⊕ uncommitted edits), so read it as local
-                // files — at full speed, never over the socket (§5.1a).
+                // Mode A (`tec <cmd>`): the sandbox's own materialized mount already presents
+                // the merged working tree (base ⊕ uncommitted edits), so read it as local
+                // files — at full speed, never over the socket (§5.1a). `treeSha` here is the
+                // bound workspace's dirty frontier oid, the correct build key.
                 auto fullPath = std::filesystem::path(settings.tectonixCheckoutPath.get())
                     / normalizeZonePath(zonePath);
                 if (!std::filesystem::exists(fullPath))
@@ -1085,14 +1219,22 @@ StorePath EvalState::getZoneStorePath(std::string_view zonePath)
                         "worldtree: zone '%s' is not materialized at '%s'", zonePath, fullPath.string());
                 return makeFSSourceAccessor(fullPath);
             }
-            // No local checkout: a foreign SHA is always clean, so serve clean committed
-            // content over the socket. Each zone gets its own connection so cross-zone
-            // reads run concurrently rather than serializing on the control connection.
+            // Mode B (`tec --sha`): no checkout — a foreign SHA is clean by construction, so
+            // serve committed content over the socket. Open a fresh connection with its own
+            // ephemeral RO session **scoped to this zone's cone** (design §10.1 confinement),
+            // pinned at the target SHA; the daemon then refuses any read outside the zone
+            // root. A per-zone connection also lets cross-zone reads run concurrently instead
+            // of serializing on the control connection. The session releases when the accessor
+            // (its sole owner) drops.
             auto conn = connectWorldtree();
             if (!conn)
                 throw Error(
                     "worldtree: lost the daemon connection while opening zone '%s'", zonePath);
-            return make_ref<WorldtreeSourceAccessor>(conn, normalizeZonePath(zonePath));
+            auto sha = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(), HashAlgorithm::SHA1);
+            auto worldPath =
+                hasPrefix(zonePath, "//") ? std::string(zonePath) : "//" + std::string(zonePath);
+            conn->openSession(sha, "scoped", {}, {worldPath});
+            return make_ref<WorldtreeSourceAccessor>(conn, normalizeZonePath(zonePath), *treeSha);
         }();
 
         return worldtreeMountAccessor(*treeSha, zonePath, accessor);
@@ -1197,20 +1339,37 @@ StorePath EvalState::mountZoneByTreeSha(const Hash & treeSha, std::string_view z
 std::shared_ptr<WorldtreeConn> EvalState::connectWorldtree() const
 {
     auto socketPath = settings.tectonixWorldtreeSocket.get();
+    // The socket being unset is the *only* non-worldtree signal — plain local eval, where
+    // libgit2 is the source. Returning nullptr here routes callers to that path.
     if (socketPath.empty())
         return nullptr;
+    // Fail-loud (the load-bearing invariant): with the socket SET there is no git repo to
+    // fall back to, so an unreachable daemon is a hard error — let `Client::connect`'s
+    // `ProtocolError` propagate rather than silently degrading to libgit2 (which would read
+    // the wrong content, or none). A bare (bound) connection; a session is opened by the
+    // caller when one is needed.
     auto ws = settings.tectonixWorldtreeWorkspace.get();
-    try {
-        return std::make_shared<WorldtreeConn>(worldtree::Client::connect(socketPath), ws);
-    } catch (std::exception & e) {
-        warn("worldtree: cannot reach daemon at '%s': %s; falling back to libgit2", socketPath, e.what());
-        return nullptr;
-    }
+    return std::make_shared<WorldtreeConn>(worldtree::Client::connect(socketPath), ws);
 }
 
 std::shared_ptr<WorldtreeConn> EvalState::worldtreeControlConn() const
 {
-    std::call_once(worldtreeControlConnFlag, [this]() { worldtreeControlConn_ = connectWorldtree(); });
+    std::call_once(worldtreeControlConnFlag, [this]() {
+        auto conn = connectWorldtree();
+        // Mode B (`tec --sha`, no local checkout): the control connection hosts a
+        // *full-visibility* ephemeral RO session pinned at the target SHA. It answers the
+        // host-level control-plane reads — the in-band manifest (getManifestContent), the
+        // dirty set (getTectonixDirtyZones, empty for a clean session), and zone tree oids
+        // (getWorldTreeSha/getZoneStorePath). Full visibility is correct here: confinement
+        // (§10.1) is a per-zone *source*-read hardening, not a control-plane boundary. In
+        // Mode A (`tec <cmd>`) the conn stays bound to the sandbox's own workspace (no
+        // session) and these reads run against it directly.
+        if (conn && !isTectonixSourceAvailable()) {
+            auto sha = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(), HashAlgorithm::SHA1);
+            conn->openSession(sha, "full", {}, {});
+        }
+        worldtreeControlConn_ = conn;
+    });
     return worldtreeControlConn_;
 }
 

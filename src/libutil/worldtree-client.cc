@@ -53,10 +53,29 @@ constexpr uint32_t F_PAYLOAD = 4;
 constexpr uint32_t F_ERROR_CODE = 6;
 constexpr uint32_t F_ERROR_MSG = 7;
 
-// Frame::kind values.
+// Frame::kind values (must match wt_proto::FrameKind in frame.rs).
 constexpr uint64_t KIND_REQUEST = 1;
 constexpr uint64_t KIND_RESPONSE = 2;
 constexpr uint64_t KIND_ERROR = 3;
+// CANCEL/CREDIT complete the wire enum (must match frame.rs) but the client neither sends
+// CANCEL nor tracks CREDIT explicitly — it issues one request at a time and skips the
+// daemon's opening CREDIT by request-id mismatch. Marked maybe_unused so a -Werror build
+// keeps the documentation without complaint.
+[[maybe_unused]] constexpr uint64_t KIND_CANCEL = 4;
+[[maybe_unused]] constexpr uint64_t KIND_CREDIT = 5;
+constexpr uint64_t KIND_STREAM_END = 6;
+
+// The transport's hard per-frame ceiling (the daemon's `MAX_FRAME`,
+// `wt-controlplane/src/rpc/codec.rs`): 256 MiB. A length prefix larger than this is a
+// framing violation (or a hostile/corrupt peer) — reject it *before* allocating, so a
+// bogus varint can never drive an unbounded `readN`.
+constexpr uint64_t MAX_FRAME = 256ull * 1024 * 1024;
+
+// A liveness backstop on blocking reads: no single `read()` may stall longer than this
+// (a wedged daemon must surface as an error, not an indefinite hang). It bounds one
+// syscall, not a whole streamed response, so a large multi-chunk read still completes as
+// long as bytes keep arriving.
+constexpr int RECV_TIMEOUT_SECS = 120;
 
 // ---- protobuf encode (append to a buffer) -----------------------------------
 
@@ -236,14 +255,30 @@ Client Client::connect(const std::string & socketPath)
         throw ProtocolError("worldtree: socket path too long: " + socketPath);
     std::memcpy(addr.sun_path, socketPath.c_str(), socketPath.size());
 
-    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    // Close-on-exec atomically where the platform supports it (Linux `SOCK_CLOEXEC`), so a
+    // daemon connection can never leak into a Tectonix build child through a racing fork.
+    // macOS lacks `SOCK_CLOEXEC`; the `fcntl` below is the portable fallback there.
+    int sockType = SOCK_STREAM;
+#ifdef SOCK_CLOEXEC
+    sockType |= SOCK_CLOEXEC;
+#endif
+    int fd = ::socket(AF_UNIX, sockType, 0);
     if (fd < 0)
         throw ProtocolError(std::string("worldtree: socket(): ") + std::strerror(errno));
 
-    // Close-on-exec: a daemon connection must not leak into Tectonix build children.
+    // Fallback close-on-exec for platforms without SOCK_CLOEXEC (and harmless where the
+    // flag already took): a daemon connection must not leak into Tectonix build children.
     int flags = ::fcntl(fd, F_GETFD);
     if (flags >= 0)
         ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+
+    // A receive timeout so a wedged daemon surfaces as a clean transport error rather than
+    // an indefinite hang inside a build. Best-effort: a kernel that rejects the option
+    // just leaves reads blocking, the prior behavior.
+    struct timeval tv{};
+    tv.tv_sec = RECV_TIMEOUT_SECS;
+    tv.tv_usec = 0;
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
         int e = errno;
@@ -282,6 +317,11 @@ void Client::refill()
         if (n < 0) {
             if (errno == EINTR)
                 continue;
+            // SO_RCVTIMEO fired: the daemon has gone quiet mid-reply. Surface it as a
+            // clear transport error rather than the opaque "Resource temporarily
+            // unavailable" of a raw EAGAIN.
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                throw ProtocolError("worldtree: timed out waiting for the daemon to reply");
             throw ProtocolError(std::string("worldtree: read(): ") + std::strerror(errno));
         }
         if (n == 0)
@@ -324,7 +364,7 @@ std::string Client::readN(uint64_t n)
 
 // ---- the call: write one REQUEST frame, drain to its reply ------------------
 
-std::string Client::call(const std::string & method, const std::string & payload)
+uint64_t Client::send(const std::string & method, const std::string & payload)
 {
     uint64_t id = nextId_++;
 
@@ -339,20 +379,22 @@ std::string Client::call(const std::string & method, const std::string & payload
     putVarint(wire, frame.size());
     wire += frame;
     writeAll(wire);
+    return id;
+}
 
-    // Read frames until we see the RESPONSE/ERROR for our request id. The daemon's
-    // opening CREDIT frame (request_id 0) and any other non-matching frame are skipped.
+Client::RecvFrame Client::recvFor(uint64_t id)
+{
+    // Read frames until we see one for our request id. The daemon's opening CREDIT frame
+    // (request_id 0) and any other non-matching frame are skipped.
     for (;;) {
         uint64_t len = readVarint();
+        if (len > MAX_FRAME)
+            throw ProtocolError("worldtree: reply frame exceeds the maximum frame size");
         std::string body = readN(len);
 
         Reader r(body);
+        RecvFrame fr;
         uint64_t frRequestId = 0;
-        uint64_t frKind = 0;
-        uint64_t frErrorCode = 0;
-        std::string frPayload;
-        std::string frErrorMsg;
-        bool havePayload = false;
 
         while (!r.atEnd()) {
             uint64_t tag = r.varint();
@@ -367,23 +409,23 @@ std::string Client::call(const std::string & method, const std::string & payload
             case F_KIND:
                 if (wire != WIRE_VARINT)
                     throw ProtocolError("worldtree: bad wire type for kind");
-                frKind = r.varint();
+                fr.kind = r.varint();
                 break;
             case F_PAYLOAD:
                 if (wire != WIRE_LEN)
                     throw ProtocolError("worldtree: bad wire type for payload");
-                frPayload = std::string(r.bytes());
-                havePayload = true;
+                fr.payload = std::string(r.bytes());
+                fr.havePayload = true;
                 break;
             case F_ERROR_CODE:
                 if (wire != WIRE_VARINT)
                     throw ProtocolError("worldtree: bad wire type for error_code");
-                frErrorCode = r.varint();
+                fr.errorCode = r.varint();
                 break;
             case F_ERROR_MSG:
                 if (wire != WIRE_LEN)
                     throw ProtocolError("worldtree: bad wire type for error_msg");
-                frErrorMsg = std::string(r.bytes());
+                fr.errorMsg = std::string(r.bytes());
                 break;
             default:
                 r.skip(wire); // method, credit, or a field a newer daemon added
@@ -393,13 +435,45 @@ std::string Client::call(const std::string & method, const std::string & payload
 
         if (frRequestId != id)
             continue; // CREDIT (id 0) or a stray frame — not ours
+        return fr;
+    }
+}
 
-        if (frKind == KIND_RESPONSE)
-            return havePayload ? frPayload : std::string();
-        if (frKind == KIND_ERROR)
-            throw RpcError(static_cast<ErrorCode>(frErrorCode),
-                frErrorMsg.empty() ? "worldtree: daemon returned an error" : frErrorMsg);
-        throw ProtocolError("worldtree: unexpected frame kind in reply to a request");
+std::string Client::call(const std::string & method, const std::string & payload)
+{
+    uint64_t id = send(method, payload);
+    RecvFrame fr = recvFor(id);
+    if (fr.kind == KIND_RESPONSE)
+        return fr.havePayload ? fr.payload : std::string();
+    if (fr.kind == KIND_ERROR)
+        throw RpcError(static_cast<ErrorCode>(fr.errorCode),
+            fr.errorMsg.empty() ? "worldtree: daemon returned an error" : fr.errorMsg);
+    throw ProtocolError("worldtree: unexpected frame kind in reply to a request");
+}
+
+void Client::callStream(
+    const std::string & method,
+    const std::string & payload,
+    const std::function<void(std::string_view)> & onChunk)
+{
+    uint64_t id = send(method, payload);
+    // A streamed reply is zero or more RESPONSE chunks (in order) terminated by a single
+    // STREAM_END, or an ERROR that ends the stream. Unlike a one-shot RESPONSE, the reader
+    // must consume every frame through the terminator so the connection is left clean for
+    // the next call.
+    for (;;) {
+        RecvFrame fr = recvFor(id);
+        if (fr.kind == KIND_RESPONSE) {
+            if (fr.havePayload)
+                onChunk(fr.payload);
+            continue;
+        }
+        if (fr.kind == KIND_STREAM_END)
+            return;
+        if (fr.kind == KIND_ERROR)
+            throw RpcError(static_cast<ErrorCode>(fr.errorCode),
+                fr.errorMsg.empty() ? "worldtree: daemon returned an error" : fr.errorMsg);
+        throw ProtocolError("worldtree: unexpected frame kind in a streamed reply");
     }
 }
 
@@ -424,6 +498,40 @@ std::vector<std::string> Client::dirtyZones(uint64_t ws)
             r.skip(wire);
     }
     return zones;
+}
+
+std::vector<ZoneDirty> Client::dirtyZoneEntries(uint64_t ws)
+{
+    std::string req;
+    putVarintField(req, 1, ws); // DirtyZonesReq { ws = 1 }
+
+    std::string resp = call("tecnix.dirty_zones", req);
+
+    std::vector<ZoneDirty> out;
+    Reader r(resp);
+    while (!r.atEnd()) {
+        uint64_t tag = r.varint();
+        uint32_t field = static_cast<uint32_t>(tag >> 3);
+        uint32_t wire = static_cast<uint32_t>(tag & 0x7);
+        if (field == 2 && wire == WIRE_LEN) { // DirtyZonesResp { entries = 2 (repeated ZoneDirty) }
+            Reader e(r.bytes());
+            ZoneDirty entry;
+            while (!e.atEnd()) {
+                uint64_t etag = e.varint();
+                uint32_t efield = static_cast<uint32_t>(etag >> 3);
+                uint32_t ewire = static_cast<uint32_t>(etag & 0x7);
+                if (efield == 1 && ewire == WIRE_LEN) // ZoneDirty { zone = 1 (string) }
+                    entry.zone = std::string(e.bytes());
+                else if (efield == 2 && ewire == WIRE_LEN) // ZoneDirty { files = 2 (repeated string) }
+                    entry.files.emplace_back(e.bytes());
+                else
+                    e.skip(ewire);
+            }
+            out.push_back(std::move(entry));
+        } else
+            r.skip(wire); // field 1 (flat `zones`) is the projection of `entries` — skip it here
+    }
+    return out;
 }
 
 std::vector<ZoneSha> Client::zoneTreeShas(uint64_t ws, const std::vector<std::string> & zones)
@@ -469,56 +577,59 @@ std::vector<TreeEntry> Client::readTree(uint64_t ws, const std::string & path, u
     putLenField(req, 2, path);
     putVarintField(req, 3, depth);
 
-    std::string resp = call("tecnix.read_tree", req);
-
+    // The daemon streams the skeleton as one or more `ReadTreeResp` chunks (each a subset of
+    // the entries) terminated by STREAM_END; a small tree arrives as a single chunk. Every
+    // chunk parses identically — accumulate all of their entries into one vector.
     std::vector<TreeEntry> out;
-    Reader r(resp);
-    while (!r.atEnd()) {
-        uint64_t tag = r.varint();
-        uint32_t field = static_cast<uint32_t>(tag >> 3);
-        uint32_t wire = static_cast<uint32_t>(tag & 0x7);
-        if (field == 1 && wire == WIRE_LEN) { // ReadTreeResp { entries = 1 (repeated TreeEntry) }
-            Reader e(r.bytes());
-            TreeEntry entry{};
-            std::optional<Oid> oid;
-            while (!e.atEnd()) {
-                uint64_t etag = e.varint();
-                uint32_t efield = static_cast<uint32_t>(etag >> 3);
-                uint32_t ewire = static_cast<uint32_t>(etag & 0x7);
-                switch (efield) {
-                case 1: // path (bytes)
-                    if (ewire != WIRE_LEN)
-                        throw ProtocolError("worldtree: bad wire type for tree-entry path");
-                    entry.path = std::string(e.bytes());
-                    break;
-                case 2: // mode (uint32)
-                    if (ewire != WIRE_VARINT)
-                        throw ProtocolError("worldtree: bad wire type for tree-entry mode");
-                    entry.mode = static_cast<uint32_t>(e.varint());
-                    break;
-                case 3: // oid (bytes)
-                    if (ewire != WIRE_LEN)
-                        throw ProtocolError("worldtree: bad wire type for tree-entry oid");
-                    oid = toOid(e.bytes());
-                    break;
-                case 4: // size (uint64)
-                    if (ewire != WIRE_VARINT)
-                        throw ProtocolError("worldtree: bad wire type for tree-entry size");
-                    entry.size = e.varint();
-                    break;
-                default:
-                    e.skip(ewire);
-                    break;
+    callStream("tecnix.read_tree", req, [&out](std::string_view chunk) {
+        Reader r(chunk);
+        while (!r.atEnd()) {
+            uint64_t tag = r.varint();
+            uint32_t field = static_cast<uint32_t>(tag >> 3);
+            uint32_t wire = static_cast<uint32_t>(tag & 0x7);
+            if (field == 1 && wire == WIRE_LEN) { // ReadTreeResp { entries = 1 (repeated TreeEntry) }
+                Reader e(r.bytes());
+                TreeEntry entry{};
+                std::optional<Oid> oid;
+                while (!e.atEnd()) {
+                    uint64_t etag = e.varint();
+                    uint32_t efield = static_cast<uint32_t>(etag >> 3);
+                    uint32_t ewire = static_cast<uint32_t>(etag & 0x7);
+                    switch (efield) {
+                    case 1: // path (bytes)
+                        if (ewire != WIRE_LEN)
+                            throw ProtocolError("worldtree: bad wire type for tree-entry path");
+                        entry.path = std::string(e.bytes());
+                        break;
+                    case 2: // mode (uint32)
+                        if (ewire != WIRE_VARINT)
+                            throw ProtocolError("worldtree: bad wire type for tree-entry mode");
+                        entry.mode = static_cast<uint32_t>(e.varint());
+                        break;
+                    case 3: // oid (bytes)
+                        if (ewire != WIRE_LEN)
+                            throw ProtocolError("worldtree: bad wire type for tree-entry oid");
+                        oid = toOid(e.bytes());
+                        break;
+                    case 4: // size (uint64)
+                        if (ewire != WIRE_VARINT)
+                            throw ProtocolError("worldtree: bad wire type for tree-entry size");
+                        entry.size = e.varint();
+                        break;
+                    default:
+                        e.skip(ewire);
+                        break;
+                    }
                 }
-            }
-            // A tree node always carries a 20-byte oid; an empty/absent one is malformed.
-            if (!oid)
-                throw ProtocolError("worldtree: tree entry missing its object id");
-            entry.oid = *oid;
-            out.push_back(std::move(entry));
-        } else
-            r.skip(wire);
-    }
+                // A tree node always carries a 20-byte oid; an empty/absent one is malformed.
+                if (!oid)
+                    throw ProtocolError("worldtree: tree entry missing its object id");
+                entry.oid = *oid;
+                out.push_back(std::move(entry));
+            } else
+                r.skip(wire);
+        }
+    });
     return out;
 }
 
@@ -529,53 +640,114 @@ std::vector<Blob> Client::readBlobs(uint64_t ws, const std::vector<Oid> & oids)
     for (const auto & oid : oids)
         putLenFieldAlways(req, 2, std::string_view(reinterpret_cast<const char *>(oid.data()), oid.size()));
 
-    std::string resp = call("tecnix.read_blobs", req);
-
+    // Streamed as one or more `ReadBlobsResp` chunks (each a subset of the requested blobs)
+    // terminated by STREAM_END. Accumulate every chunk's blobs, preserving request order
+    // (the daemon emits them in the order asked).
     std::vector<Blob> out;
+    callStream("tecnix.read_blobs", req, [&out](std::string_view chunk) {
+        Reader r(chunk);
+        while (!r.atEnd()) {
+            uint64_t tag = r.varint();
+            uint32_t field = static_cast<uint32_t>(tag >> 3);
+            uint32_t wire = static_cast<uint32_t>(tag & 0x7);
+            if (field == 1 && wire == WIRE_LEN) { // ReadBlobsResp { blobs = 1 (repeated Blob) }
+                Reader e(r.bytes());
+                std::optional<Oid> oid;
+                std::string content;
+                bool present = false;
+                while (!e.atEnd()) {
+                    uint64_t etag = e.varint();
+                    uint32_t efield = static_cast<uint32_t>(etag >> 3);
+                    uint32_t ewire = static_cast<uint32_t>(etag & 0x7);
+                    switch (efield) {
+                    case 1: // oid (bytes)
+                        if (ewire != WIRE_LEN)
+                            throw ProtocolError("worldtree: bad wire type for blob oid");
+                        oid = toOid(e.bytes());
+                        break;
+                    case 2: // content (bytes)
+                        if (ewire != WIRE_LEN)
+                            throw ProtocolError("worldtree: bad wire type for blob content");
+                        content = std::string(e.bytes());
+                        break;
+                    case 3: // present (bool)
+                        if (ewire != WIRE_VARINT)
+                            throw ProtocolError("worldtree: bad wire type for blob present");
+                        present = e.varint() != 0;
+                        break;
+                    default:
+                        e.skip(ewire);
+                        break;
+                    }
+                }
+                Blob blob;
+                blob.oid = oid.value_or(Oid{});
+                if (present)
+                    blob.content = std::move(content);
+                out.push_back(std::move(blob));
+            } else
+                r.skip(wire);
+        }
+    });
+    return out;
+}
+
+// ---- session lifecycle: scoped.open_ro / scoped.close_ro --------------------
+
+RoSession Client::openRo(
+    const Oid & baseSha,
+    const std::string & visibilityMode,
+    const std::vector<std::string> & visibleZoneIds,
+    const std::vector<std::string> & visibleZonePaths)
+{
+    std::string req;
+    // OpenRoReq { base_sha = 1 (bytes), visibility_mode = 2 (string),
+    //             visible_zone_ids = 3 (repeated string), visible_zone_paths = 4 (repeated string) }
+    putLenFieldAlways(req, 1,
+        std::string_view(reinterpret_cast<const char *>(baseSha.data()), baseSha.size()));
+    putLenField(req, 2, visibilityMode);
+    for (const auto & z : visibleZoneIds)
+        putLenFieldAlways(req, 3, z);
+    for (const auto & z : visibleZonePaths)
+        putLenFieldAlways(req, 4, z);
+
+    std::string resp = call("scoped.open_ro", req);
+
+    RoSession out{};
     Reader r(resp);
     while (!r.atEnd()) {
         uint64_t tag = r.varint();
         uint32_t field = static_cast<uint32_t>(tag >> 3);
         uint32_t wire = static_cast<uint32_t>(tag & 0x7);
-        if (field == 1 && wire == WIRE_LEN) { // ReadBlobsResp { blobs = 1 (repeated Blob) }
-            Reader e(r.bytes());
-            std::optional<Oid> oid;
-            std::string content;
-            bool present = false;
-            while (!e.atEnd()) {
-                uint64_t etag = e.varint();
-                uint32_t efield = static_cast<uint32_t>(etag >> 3);
-                uint32_t ewire = static_cast<uint32_t>(etag & 0x7);
-                switch (efield) {
-                case 1: // oid (bytes)
-                    if (ewire != WIRE_LEN)
-                        throw ProtocolError("worldtree: bad wire type for blob oid");
-                    oid = toOid(e.bytes());
-                    break;
-                case 2: // content (bytes)
-                    if (ewire != WIRE_LEN)
-                        throw ProtocolError("worldtree: bad wire type for blob content");
-                    content = std::string(e.bytes());
-                    break;
-                case 3: // present (bool)
-                    if (ewire != WIRE_VARINT)
-                        throw ProtocolError("worldtree: bad wire type for blob present");
-                    present = e.varint() != 0;
-                    break;
-                default:
-                    e.skip(ewire);
-                    break;
-                }
-            }
-            Blob blob;
-            blob.oid = oid.value_or(Oid{});
-            if (present)
-                blob.content = std::move(content);
-            out.push_back(std::move(blob));
-        } else
+        switch (field) {
+        case 1: // ws (uint64)
+            if (wire != WIRE_VARINT)
+                throw ProtocolError("worldtree: bad wire type for open_ro ws");
+            out.ws = r.varint();
+            break;
+        case 2: // manifest (bytes)
+            if (wire != WIRE_LEN)
+                throw ProtocolError("worldtree: bad wire type for open_ro manifest");
+            out.manifest = std::string(r.bytes());
+            break;
+        case 3: // base_pin (uint64)
+            if (wire != WIRE_VARINT)
+                throw ProtocolError("worldtree: bad wire type for open_ro base_pin");
+            out.basePin = r.varint();
+            break;
+        default:
             r.skip(wire);
+            break;
+        }
     }
     return out;
+}
+
+void Client::closeRo(uint64_t ws)
+{
+    std::string req;
+    putVarintField(req, 1, ws); // CloseRoReq { ws = 1 }
+    (void) call("scoped.close_ro", req); // CloseRoResp is empty; idempotent, ownership-gated.
 }
 
 } // namespace nix::worldtree
