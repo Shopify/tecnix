@@ -106,8 +106,7 @@ int main(int argc, char ** argv)
         //     Tecnix call. Each dirty zone yields its synthesized working-tree oid.
         auto zts = client.zoneTreeShas(ws, {});
         for (const auto & e : zts)
-            std::printf("ZTS %s %s\n", e.zone.c_str(),
-                e.treeSha ? toHex(*e.treeSha).c_str() : "absent");
+            std::printf("ZTS %s %s\n", e.zone.c_str(), e.treeSha ? toHex(*e.treeSha).c_str() : "absent");
 
         // 2b. zone_tree_shas with an explicit list mixing a real (dirty) zone and one
         //     that does not exist. This proves the response stays one-to-one with the
@@ -117,8 +116,7 @@ int main(int argc, char ** argv)
             std::vector<std::string> probe = {dirty.front(), "//does/not/exist"};
             auto explicitZts = client.zoneTreeShas(ws, probe);
             for (const auto & e : explicitZts)
-                std::printf("ZTS2 %s %s\n", e.zone.c_str(),
-                    e.treeSha ? toHex(*e.treeSha).c_str() : "absent");
+                std::printf("ZTS2 %s %s\n", e.zone.c_str(), e.treeSha ? toHex(*e.treeSha).c_str() : "absent");
         }
 
         // 3. read_tree at the root, deep — the whole committed skeleton (overlay-free).
@@ -126,8 +124,12 @@ int main(int argc, char ** argv)
         auto tree = client.readTree(ws, "", 64);
         std::vector<Oid> blobOids;
         for (const auto & e : tree) {
-            std::printf("TREE %s mode=%o oid=%s size=%llu\n", e.path.c_str(), e.mode,
-                toHex(e.oid).c_str(), static_cast<unsigned long long>(e.size));
+            std::printf(
+                "TREE %s mode=%o oid=%s size=%llu\n",
+                e.path.c_str(),
+                e.mode,
+                toHex(e.oid).c_str(),
+                static_cast<unsigned long long>(e.size));
             // A regular/executable file (not a tree, not a symlink): mode 0o100xxx.
             if ((e.mode & 0170000) == 0100000)
                 blobOids.push_back(e.oid);
@@ -139,15 +141,13 @@ int main(int argc, char ** argv)
         if (!blobOids.empty()) {
             auto blobs = client.readBlobs(ws, blobOids);
             for (const auto & b : blobs)
-                std::printf("BLOB %s %s\n", toHex(b.oid).c_str(),
-                    b.content ? render(*b.content).c_str() : "absent");
+                std::printf("BLOB %s %s\n", toHex(b.oid).c_str(), b.content ? render(*b.content).c_str() : "absent");
         }
 
         std::printf("SMOKE-DONE\n");
         return 0;
     } catch (const RpcError & e) {
-        std::fprintf(stderr, "worldtree-smoke: daemon error (code %d): %s\n",
-            static_cast<int>(e.code), e.what());
+        std::fprintf(stderr, "worldtree-smoke: daemon error (code %d): %s\n", static_cast<int>(e.code), e.what());
         return 1;
     } catch (const std::exception & e) {
         std::fprintf(stderr, "worldtree-smoke: %s\n", e.what());

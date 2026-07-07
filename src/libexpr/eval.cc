@@ -596,7 +596,8 @@ struct WorldtreeConn
     uint64_t basePin = 0;         // generation the session refcounts (observability)
 
     WorldtreeConn(worldtree::Client && client, uint64_t ws)
-        : ws(ws), client(std::move(client))
+        : ws(ws)
+        , client(std::move(client))
     {
     }
 
@@ -664,8 +665,7 @@ struct WorldtreeConn
     std::optional<Hash> zoneTreeSha(std::string_view worldPath)
     {
         // `zone_tree_shas` expects World paths (`//zone`); normalize to that form.
-        std::string wp =
-            hasPrefix(worldPath, "//") ? std::string(worldPath) : "//" + std::string(worldPath);
+        std::string wp = hasPrefix(worldPath, "//") ? std::string(worldPath) : "//" + std::string(worldPath);
         std::lock_guard<std::mutex> lock(mutex);
         auto resp = client.zoneTreeShas(ws, {wp});
         if (resp.empty() || !resp.front().treeSha)
@@ -731,7 +731,8 @@ struct WorldtreeSourceAccessor : SourceAccessor
     std::map<worldtree::Oid, std::string> blobCache;
 
     WorldtreeSourceAccessor(std::shared_ptr<WorldtreeConn> conn, std::string zoneRel, const Hash & treeSha)
-        : conn(std::move(conn)), zoneRel(std::move(zoneRel))
+        : conn(std::move(conn))
+        , zoneRel(std::move(zoneRel))
     {
         // Defense-in-depth escape guard: the zone root we prefetch from must be a plain
         // ws-relative path. A leading `/` or any `..` component would let a read reach
@@ -826,8 +827,7 @@ struct WorldtreeSourceAccessor : SourceAccessor
         prefetch();
         auto it = nodes.find(key(path));
         if (it == nodes.end() || it->second.isDir)
-            throw Error("worldtree: '%s' is not a readable file in zone '%s'",
-                showPath(path), zoneRel);
+            throw Error("worldtree: '%s' is not a readable file in zone '%s'", showPath(path), zoneRel);
         const auto & oid = it->second.oid;
 
         const std::string * content = nullptr;
@@ -839,8 +839,7 @@ struct WorldtreeSourceAccessor : SourceAccessor
         if (!content) {
             auto fetched = conn->readBlob(oid); // network read, no lock held
             if (!fetched)
-                throw Error("worldtree: content for '%s' is missing from the workspace",
-                    showPath(path));
+                throw Error("worldtree: content for '%s' is missing from the workspace", showPath(path));
             std::lock_guard<std::mutex> lock(blobMutex);
             content = &blobCache.try_emplace(oid, std::move(*fetched)).first->second;
         }
@@ -885,9 +884,7 @@ Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
     if (auto control = worldtreeControlConn()) {
         if (auto sha = control->zoneTreeSha(worldPath))
             return *sha;
-        throw Error(
-            "worldtree: world path '%s' is absent or outside this workspace's visibility scope",
-            worldPath);
+        throw Error("worldtree: world path '%s' is absent or outside this workspace's visibility scope", worldPath);
     }
 
     auto path = normalizeZonePath(worldPath);
@@ -1222,9 +1219,7 @@ StorePath EvalState::getZoneStorePath(std::string_view zonePath)
     if (auto control = worldtreeControlConn()) {
         auto treeSha = control->zoneTreeSha(zonePath);
         if (!treeSha)
-            throw Error(
-                "worldtree: zone '%s' is absent or outside this workspace's visibility scope",
-                zonePath);
+            throw Error("worldtree: zone '%s' is absent or outside this workspace's visibility scope", zonePath);
 
         ref<SourceAccessor> accessor = [&]() -> ref<SourceAccessor> {
             if (isTectonixSourceAvailable()) {
@@ -1232,11 +1227,10 @@ StorePath EvalState::getZoneStorePath(std::string_view zonePath)
                 // the merged working tree (base ⊕ uncommitted edits), so read it as local
                 // files — at full speed, never over the socket (§5.1a). `treeSha` here is the
                 // bound workspace's dirty frontier oid, the correct build key.
-                auto fullPath = std::filesystem::path(settings.tectonixCheckoutPath.get())
-                    / normalizeZonePath(zonePath);
+                auto fullPath =
+                    std::filesystem::path(settings.tectonixCheckoutPath.get()) / normalizeZonePath(zonePath);
                 if (!std::filesystem::exists(fullPath))
-                    throw Error(
-                        "worldtree: zone '%s' is not materialized at '%s'", zonePath, fullPath.string());
+                    throw Error("worldtree: zone '%s' is not materialized at '%s'", zonePath, fullPath.string());
                 return makeFSSourceAccessor(fullPath);
             }
             // Mode B (`tec --sha`): no checkout — a foreign SHA is clean by construction, so
@@ -1248,11 +1242,9 @@ StorePath EvalState::getZoneStorePath(std::string_view zonePath)
             // (its sole owner) drops.
             auto conn = connectWorldtree();
             if (!conn)
-                throw Error(
-                    "worldtree: lost the daemon connection while opening zone '%s'", zonePath);
+                throw Error("worldtree: lost the daemon connection while opening zone '%s'", zonePath);
             auto sha = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(), HashAlgorithm::SHA1);
-            auto worldPath =
-                hasPrefix(zonePath, "//") ? std::string(zonePath) : "//" + std::string(zonePath);
+            auto worldPath = hasPrefix(zonePath, "//") ? std::string(zonePath) : "//" + std::string(zonePath);
             conn->openSession(sha, "scoped", {}, {worldPath});
             return make_ref<WorldtreeSourceAccessor>(conn, normalizeZonePath(zonePath), *treeSha);
         }();
@@ -1393,14 +1385,15 @@ std::shared_ptr<WorldtreeConn> EvalState::worldtreeControlConn() const
     return worldtreeControlConn_;
 }
 
-StorePath EvalState::worldtreeMountAccessor(const Hash & treeSha, std::string_view zonePath, ref<SourceAccessor> accessor)
+StorePath
+EvalState::worldtreeMountAccessor(const Hash & treeSha, std::string_view zonePath, ref<SourceAccessor> accessor)
 {
     std::string name = "zone-" + sanitizeZoneNameForStore(zonePath);
 
     if (!settings.lazyTrees) {
         // Eager: copy the zone content into the store now (content-addressed by content).
-        auto storePath = fetchToStore(
-            fetchSettings, *store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
+        auto storePath =
+            fetchToStore(fetchSettings, *store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
         allowPath(storePath);
         return storePath;
     }
@@ -1424,8 +1417,7 @@ StorePath EvalState::worldtreeMountAccessor(const Hash & treeSha, std::string_vi
     allowPath(storePath);
     cache->emplace(treeSha, storePath);
 
-    debug("worldtree: mounted zone %s (tree %s) at %s",
-          zonePath, treeSha.gitRev(), store->printStorePath(storePath));
+    debug("worldtree: mounted zone %s (tree %s) at %s", zonePath, treeSha.gitRev(), store->printStorePath(storePath));
 
     return storePath;
 }

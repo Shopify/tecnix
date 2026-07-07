@@ -134,7 +134,10 @@ struct Reader
     {
     }
 
-    bool atEnd() const { return p >= end; }
+    bool atEnd() const
+    {
+        return p >= end;
+    }
 
     uint64_t varint()
     {
@@ -446,15 +449,14 @@ std::string Client::call(const std::string & method, const std::string & payload
     if (fr.kind == KIND_RESPONSE)
         return fr.havePayload ? fr.payload : std::string();
     if (fr.kind == KIND_ERROR)
-        throw RpcError(static_cast<ErrorCode>(fr.errorCode),
+        throw RpcError(
+            static_cast<ErrorCode>(fr.errorCode),
             fr.errorMsg.empty() ? "worldtree: daemon returned an error" : fr.errorMsg);
     throw ProtocolError("worldtree: unexpected frame kind in reply to a request");
 }
 
 void Client::callStream(
-    const std::string & method,
-    const std::string & payload,
-    const std::function<void(std::string_view)> & onChunk)
+    const std::string & method, const std::string & payload, const std::function<void(std::string_view)> & onChunk)
 {
     uint64_t id = send(method, payload);
     // A streamed reply is zero or more RESPONSE chunks (in order) terminated by a single
@@ -471,7 +473,8 @@ void Client::callStream(
         if (fr.kind == KIND_STREAM_END)
             return;
         if (fr.kind == KIND_ERROR)
-            throw RpcError(static_cast<ErrorCode>(fr.errorCode),
+            throw RpcError(
+                static_cast<ErrorCode>(fr.errorCode),
                 fr.errorMsg.empty() ? "worldtree: daemon returned an error" : fr.errorMsg);
         throw ProtocolError("worldtree: unexpected frame kind in a streamed reply");
     }
@@ -573,7 +576,7 @@ std::vector<ZoneSha> Client::zoneTreeShas(uint64_t ws, const std::vector<std::st
 std::vector<TreeEntry> Client::readTree(uint64_t ws, const std::string & path, uint32_t depth)
 {
     std::string req;
-    putVarintField(req, 1, ws);     // ReadTreeReq { ws = 1, path = 2 (bytes), depth = 3 }
+    putVarintField(req, 1, ws); // ReadTreeReq { ws = 1, path = 2 (bytes), depth = 3 }
     putLenField(req, 2, path);
     putVarintField(req, 3, depth);
 
@@ -703,8 +706,7 @@ RoSession Client::openRo(
     std::string req;
     // OpenRoReq { base_sha = 1 (bytes), visibility_mode = 2 (string),
     //             visible_zone_ids = 3 (repeated string), visible_zone_paths = 4 (repeated string) }
-    putLenFieldAlways(req, 1,
-        std::string_view(reinterpret_cast<const char *>(baseSha.data()), baseSha.size()));
+    putLenFieldAlways(req, 1, std::string_view(reinterpret_cast<const char *>(baseSha.data()), baseSha.size()));
     putLenField(req, 2, visibilityMode);
     for (const auto & z : visibleZoneIds)
         putLenFieldAlways(req, 3, z);
@@ -746,7 +748,7 @@ RoSession Client::openRo(
 void Client::closeRo(uint64_t ws)
 {
     std::string req;
-    putVarintField(req, 1, ws); // CloseRoReq { ws = 1 }
+    putVarintField(req, 1, ws);          // CloseRoReq { ws = 1 }
     (void) call("scoped.close_ro", req); // CloseRoResp is empty; idempotent, ownership-gated.
 }
 
