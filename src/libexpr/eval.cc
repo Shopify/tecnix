@@ -689,6 +689,97 @@ struct WorldtreeConn
             return std::nullopt;
         return blobs.front().content;
     }
+
+    // ---- Multiplexed-session API (the bounded connection pool) ----
+    //
+    // The single-session methods above address this conn's own `ws` (a bound workspace, or
+    // the one session it opened via `openSession`). The methods below instead carry an
+    // explicit session `ws`, so one physical connection can host many independent per-zone
+    // ephemeral RO sessions at once (the daemon's owned-ephemeral set is per-connection).
+    // Each still serializes on `mutex` like every other verb; cross-session parallelism
+    // comes from the *pool* holding several connections, not from concurrency within one.
+
+    /**
+     * Open a zone-scoped ephemeral RO session hosted on this connection and return its id,
+     * *without* touching `ws`/`ownsSession` (unlike `openSession`, which rebinds this conn
+     * to a single session). The caller owns the returned session and must `closeSessionOn`
+     * it; any left open at connection teardown are released daemon-side on disconnect.
+     */
+    uint64_t openScopedSession(const Hash & baseSha, const std::string & worldPath)
+    {
+        worldtree::Oid oid{};
+        assert(baseSha.hashSize == oid.size());
+        std::memcpy(oid.data(), baseSha.hash, oid.size());
+        std::lock_guard<std::mutex> lock(mutex);
+        return client.openRo(oid, "scoped", {}, {worldPath}).ws;
+    }
+
+    /** Release a hosted session opened on this connection (best-effort; ownership-gated). */
+    void closeSessionOn(uint64_t sessionWs) noexcept
+    {
+        try {
+            std::lock_guard<std::mutex> lock(mutex);
+            client.closeRo(sessionWs);
+        } catch (...) {
+        }
+    }
+
+    /** `read_tree` on a hosted session; entry paths are relative to `rel`. */
+    std::vector<worldtree::TreeEntry> readTreeOn(uint64_t sessionWs, std::string_view rel, uint32_t depth)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return client.readTree(sessionWs, std::string(rel), depth);
+    }
+
+    /** Decoded bytes of one committed blob on a hosted session, or nullopt when absent. */
+    std::optional<std::string> readBlobOn(uint64_t sessionWs, const worldtree::Oid & oid)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto blobs = client.readBlobs(sessionWs, {oid});
+        if (blobs.empty())
+            return std::nullopt;
+        return blobs.front().content;
+    }
+};
+
+/**
+ * A single per-zone ephemeral RO session hosted on a pooled worldtree connection. The
+ * session (`ws`, scoped to one zone's cone) is owned by this handle and released
+ * (`close_ro` on the hosting connection) when the handle drops — i.e. when the zone's
+ * `WorldtreeSourceAccessor`, its sole owner, is torn down. `carrier` is shared with the
+ * other sessions multiplexed over the same connection (the bounded pool), so many zones
+ * read concurrently over few connections instead of one connection per zone.
+ */
+struct WorldtreeZoneSession
+{
+    std::shared_ptr<WorldtreeConn> carrier;
+    uint64_t ws;
+
+    WorldtreeZoneSession(std::shared_ptr<WorldtreeConn> carrier, uint64_t ws)
+        : carrier(std::move(carrier)), ws(ws)
+    {
+    }
+
+    WorldtreeZoneSession(const WorldtreeZoneSession &) = delete;
+    WorldtreeZoneSession & operator=(const WorldtreeZoneSession &) = delete;
+
+    ~WorldtreeZoneSession()
+    {
+        if (carrier)
+            carrier->closeSessionOn(ws);
+    }
+
+    /** Prefetch this zone's committed subtree skeleton; paths are relative to `rel`. */
+    std::vector<worldtree::TreeEntry> readTree(std::string_view rel, uint32_t depth)
+    {
+        return carrier->readTreeOn(ws, rel, depth);
+    }
+
+    /** Decoded bytes of one committed blob in this zone's session, or nullopt when absent. */
+    std::optional<std::string> readBlob(const worldtree::Oid & oid)
+    {
+        return carrier->readBlobOn(ws, oid);
+    }
 };
 
 /**
@@ -700,15 +791,17 @@ struct WorldtreeConn
  * are immutable, so the cache never staleness-checks). Used only when there is no local
  * checkout — the `tec --sha` path, which is clean by construction.
  *
- * Confinement (design §10.1, the load-bearing constraint): `conn` holds an ephemeral RO
+ * Confinement (design §10.1, the load-bearing constraint): `session` is an ephemeral RO
  * session opened `scoped([zone])`, so the daemon — the authority — refuses any path read
  * outside the zone cone. This accessor is *also* rooted at the zone (all reads go through
  * `zoneRel`), and its constructor rejects a `zoneRel` that could escape, as
  * defense-in-depth. The two together guarantee a zone build cannot traverse out of its root.
+ * The session is hosted on a pooled connection shared with other zones' sessions
+ * (`acquireWorldtreeZoneSession`); it is released when this accessor, its sole owner, drops.
  */
 struct WorldtreeSourceAccessor : SourceAccessor
 {
-    std::shared_ptr<WorldtreeConn> conn;
+    std::shared_ptr<WorldtreeZoneSession> session;
     std::string zoneRel; // ws-relative, no leading `//` (e.g. "areas/tools/dev")
 
     struct Node
@@ -730,8 +823,8 @@ struct WorldtreeSourceAccessor : SourceAccessor
     std::mutex blobMutex;
     std::map<worldtree::Oid, std::string> blobCache;
 
-    WorldtreeSourceAccessor(std::shared_ptr<WorldtreeConn> conn, std::string zoneRel, const Hash & treeSha)
-        : conn(std::move(conn)), zoneRel(std::move(zoneRel))
+    WorldtreeSourceAccessor(std::shared_ptr<WorldtreeZoneSession> session, std::string zoneRel, const Hash & treeSha)
+        : session(std::move(session)), zoneRel(std::move(zoneRel))
     {
         // Defense-in-depth escape guard: the zone root we prefetch from must be a plain
         // ws-relative path. A leading `/` or any `..` component would let a read reach
@@ -767,7 +860,7 @@ struct WorldtreeSourceAccessor : SourceAccessor
     void prefetch()
     {
         std::call_once(prefetchFlag, [this]() {
-            auto entries = conn->readTree(zoneRel, WORLDTREE_PREFETCH_DEPTH);
+            auto entries = session->readTree(zoneRel, WORLDTREE_PREFETCH_DEPTH);
             nodes[""] = Node{.mode = 0040000, .isDir = true}; // the zone root itself
             for (auto & e : entries) {
                 bool isDir = (e.mode & 0170000) == 0040000;
@@ -837,7 +930,7 @@ struct WorldtreeSourceAccessor : SourceAccessor
                 content = &c->second;
         }
         if (!content) {
-            auto fetched = conn->readBlob(oid); // network read, no lock held
+            auto fetched = session->readBlob(oid); // network read, no lock held
             if (!fetched)
                 throw Error("worldtree: content for '%s' is missing from the workspace",
                     showPath(path));
@@ -1240,21 +1333,19 @@ StorePath EvalState::getZoneStorePath(std::string_view zonePath)
                 return makeFSSourceAccessor(fullPath);
             }
             // Mode B (`tec --sha`): no checkout — a foreign SHA is clean by construction, so
-            // serve committed content over the socket. Open a fresh connection with its own
-            // ephemeral RO session **scoped to this zone's cone** (design §10.1 confinement),
-            // pinned at the target SHA; the daemon then refuses any read outside the zone
-            // root. A per-zone connection also lets cross-zone reads run concurrently instead
-            // of serializing on the control connection. The session releases when the accessor
-            // (its sole owner) drops.
-            auto conn = connectWorldtree();
-            if (!conn)
-                throw Error(
-                    "worldtree: lost the daemon connection while opening zone '%s'", zonePath);
+            // serve committed content over the socket via an ephemeral RO session **scoped to
+            // this zone's cone** (design §10.1 confinement), pinned at the target SHA; the
+            // daemon then refuses any read outside the zone root. The session is hosted on a
+            // connection drawn from a bounded pool (`tectonix-worldtree-max-connections`), so a
+            // broad evaluation multiplexes many zones over few connections instead of opening
+            // one per zone (which could exceed the daemon's per-listener connection cap and
+            // surface as `worldtree: read(): Connection reset by peer`). The session releases
+            // when the accessor (its sole owner) drops. Fail-loud: an unreachable daemon throws.
             auto sha = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(), HashAlgorithm::SHA1);
             auto worldPath =
                 hasPrefix(zonePath, "//") ? std::string(zonePath) : "//" + std::string(zonePath);
-            conn->openSession(sha, "scoped", {}, {worldPath});
-            return make_ref<WorldtreeSourceAccessor>(conn, normalizeZonePath(zonePath), *treeSha);
+            auto session = acquireWorldtreeZoneSession(sha, worldPath);
+            return make_ref<WorldtreeSourceAccessor>(session, normalizeZonePath(zonePath), *treeSha);
         }();
 
         return worldtreeMountAccessor(*treeSha, zonePath, accessor);
@@ -1370,6 +1461,40 @@ std::shared_ptr<WorldtreeConn> EvalState::connectWorldtree() const
     // caller when one is needed.
     auto ws = settings.tectonixWorldtreeWorkspace.get();
     return std::make_shared<WorldtreeConn>(worldtree::Client::connect(socketPath), ws);
+}
+
+std::shared_ptr<WorldtreeZoneSession>
+EvalState::acquireWorldtreeZoneSession(const Hash & sha, const std::string & worldPath) const
+{
+    // Draw a connection round-robin from a bounded pool and host this zone's scoped session
+    // on it, so a broad evaluation multiplexes many per-zone sessions over at most
+    // `tectonix-worldtree-max-connections` connections rather than one connection per zone.
+    // The old one-connection-per-zone shape could exceed the daemon's per-listener connection
+    // cap on a wide changeset, which the client surfaces as
+    // `worldtree: read(): Connection reset by peer`.
+    std::shared_ptr<WorldtreeConn> carrier;
+    {
+        std::lock_guard<std::mutex> lock(worldtreePoolMutex_);
+        uint64_t cap = std::max<uint64_t>(1, settings.tectonixWorldtreeMaxConnections.get());
+        if (worldtreePool_.size() < cap) {
+            // Grow lazily: open a new connection only while under the cap, so a small
+            // evaluation never pays for connections it will not use. Fail-loud — a fresh
+            // connection throws if the daemon is unreachable (there is no libgit2 fallback),
+            // and returns null only when the socket is unset, which Mode B never is.
+            auto conn = connectWorldtree();
+            if (!conn)
+                throw Error("worldtree: socket is not configured while opening zone '%s'", worldPath);
+            worldtreePool_.push_back(conn);
+            carrier = std::move(conn);
+        } else {
+            carrier = worldtreePool_[worldtreePoolNext_ % worldtreePool_.size()];
+            worldtreePoolNext_++;
+        }
+    }
+    // openScopedSession takes the connection's own lock; done outside the pool lock so
+    // session opens on different connections proceed concurrently.
+    auto sessionWs = carrier->openScopedSession(sha, worldPath);
+    return std::make_shared<WorldtreeZoneSession>(std::move(carrier), sessionWs);
 }
 
 std::shared_ptr<WorldtreeConn> EvalState::worldtreeControlConn() const

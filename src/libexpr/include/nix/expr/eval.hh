@@ -28,8 +28,10 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 #include <set>
 #include <functional>
 
@@ -54,6 +56,9 @@ class EvalState;
 /** A connection to a worldtree daemon, defined in eval.cc (it owns the C++ worldtree
  *  client). Held by pointer here so the worldtree client header stays out of eval.hh. */
 struct WorldtreeConn;
+/** A per-zone ephemeral RO session hosted on a pooled WorldtreeConn, defined in eval.cc.
+ *  Forward-declared for the same reason as WorldtreeConn. */
+struct WorldtreeZoneSession;
 class StorePath;
 struct SingleDerivedPath;
 enum RepairFlag : bool;
@@ -569,6 +574,20 @@ private:
     mutable std::shared_ptr<WorldtreeConn> worldtreeControlConn_;
 
     /**
+     * Bounded pool of worldtree control-socket connections that host the per-zone
+     * ephemeral RO sessions of the socket-served source path (Mode B, `tec --sha`). Each
+     * connection can own many sessions (the daemon's owned-ephemeral set is per-connection),
+     * so a broad evaluation multiplexes its zone sessions over at most
+     * `tectonix-worldtree-max-connections` connections instead of opening one per zone —
+     * keeping the live connection count far below the daemon's per-listener cap. Grown
+     * lazily and only when the socket is set; `worldtreePoolNext_` is the round-robin cursor.
+     * All three are guarded by `worldtreePoolMutex_`.
+     */
+    mutable std::mutex worldtreePoolMutex_;
+    mutable std::vector<std::shared_ptr<WorldtreeConn>> worldtreePool_;
+    mutable size_t worldtreePoolNext_ = 0;
+
+    /**
      * Mount a zone by tree SHA, returning a (potentially virtual) store path.
      * Caches by tree SHA for deduplication across world revisions.
      */
@@ -588,11 +607,22 @@ private:
      * *only* when the socket is unset; with the socket set, a connection failure PROPAGATES
      * (throws `ProtocolError`) — no warning, no null-on-failure, no fallback (fail-loud;
      * see the `worldtreeControlConn()` block comment and the `tectonix-worldtree-socket`
-     * setting doc). Used for the shared control connection and for each zone's content
-     * accessor, so different zones' content reads run on their own connection rather than
-     * serializing on one.
+     * setting doc). Used for the shared control connection and to populate the bounded
+     * per-zone session pool (`acquireWorldtreeZoneSession`).
      */
     std::shared_ptr<WorldtreeConn> connectWorldtree() const;
+
+    /**
+     * Acquire an ephemeral RO session for `worldPath` pinned at `sha` and scoped to that
+     * zone's cone, hosted on a connection drawn round-robin from the bounded worldtree
+     * connection pool (`tectonix-worldtree-max-connections`). The pool grows lazily up to
+     * the cap, then multiplexes further sessions over the existing connections. The returned
+     * handle owns the session and releases it (`close_ro` on the hosting connection) when it
+     * drops. Fail-loud: an unreachable daemon throws (there is no libgit2 fallback). Only
+     * reached when `tectonix-worldtree-socket` is set (Mode B).
+     */
+    std::shared_ptr<WorldtreeZoneSession>
+    acquireWorldtreeZoneSession(const Hash & sha, const std::string & worldPath) const;
 
     /**
      * Devirtualization tail shared by both worldtree source paths (own-workspace mount
