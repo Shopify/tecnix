@@ -576,6 +576,31 @@ struct EvalSettings : Config
           A worldtree daemon hosts many workspaces; this selects which one backs this
           evaluation. Ignored when `tectonix-worldtree-socket` is empty.
         )"};
+
+    Setting<uint64_t> tectonixWorldtreeMaxConnections{
+        this,
+        64,
+        "tectonix-worldtree-max-connections",
+        R"(
+          Maximum number of physical control-socket connections tectonix opens to a
+          worldtree daemon for per-zone source reads (the `tectonix-worldtree-socket`
+          path).
+
+          A `tec --sha` / worldtree-sandbox evaluation serves each clean zone's committed
+          source over its own ephemeral read-only session. A broad evaluation — e.g. the
+          Tartarus planning bundle across a large changeset — touches many zones at once;
+          opening a separate socket connection per zone can exceed the daemon's per-listener
+          connection cap, which the client then sees as
+          `worldtree: read(): Connection reset by peer`. To bound this, zone sessions are
+          multiplexed over a pool of at most this many connections (the daemon's
+          owned-ephemeral session set is per-connection, so one connection can host many
+          sessions); reads that land on the same connection serialize on it.
+
+          Must stay below the daemon's scoped-listener `max_connections` (512). The default
+          (64) comfortably exceeds typical core counts, so per-core read parallelism is
+          preserved while the live connection count stays far under the cap. A value of 0 is
+          treated as 1. Ignored when `tectonix-worldtree-socket` is empty.
+        )"};
 };
 
 /**
