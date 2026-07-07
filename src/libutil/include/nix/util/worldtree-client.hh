@@ -212,9 +212,7 @@ private:
     /// in order, returning once STREAM_END arrives (throwing on an ERROR reply). Used by
     /// the read verbs, which the daemon serves as a chunked stream (design §6.6).
     void callStream(
-        const std::string & method,
-        const std::string & payload,
-        const std::function<void(std::string_view)> & onChunk);
+        const std::string & method, const std::string & payload, const std::function<void(std::string_view)> & onChunk);
 
     void writeAll(const std::string & bytes);
 
