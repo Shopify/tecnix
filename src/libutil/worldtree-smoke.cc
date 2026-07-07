@@ -2,7 +2,9 @@
 /// A standalone exerciser for the worldtree C++ client (`worldtree-client.hh`), used by
 /// the cross-language wire-compatibility smoke. It connects to a running worldtreed,
 /// drives all four Tecnix read verbs against a workspace the harness has already set up,
-/// and prints each result as a parseable line. The harness (a worldtreed Rust example)
+/// and prints each result as a parseable line. It closes with a fail-loud probe: a read of
+/// an unknown workspace must surface the daemon's ERROR as a thrown exception, never a silent
+/// empty success. The harness (a worldtreed Rust example)
 /// owns the fixture and asserts on this output, so this program stays a dumb, faithful
 /// exerciser — its only job is to prove the C++ codec and the daemon's prost encoder
 /// agree on the wire in *both* directions, against real prost (not a golden fixture).
@@ -142,6 +144,22 @@ int main(int argc, char ** argv)
             auto blobs = client.readBlobs(ws, blobOids);
             for (const auto & b : blobs)
                 std::printf("BLOB %s %s\n", toHex(b.oid).c_str(), b.content ? render(*b.content).c_str() : "absent");
+        }
+
+        // 5. fail-loud: a read of an unknown workspace must surface the daemon's ERROR as a
+        //    thrown RpcError, never a silent empty success. Probe with a ws the harness never
+        //    provisioned (the bitwise complement of the real one) and require the throw; a
+        //    returned result would be a wire/decoding bug the harness must catch.
+        try {
+            const uint64_t unknownWs = ~ws;
+            client.readTree(unknownWs, "", 0);
+            std::fprintf(
+                stderr,
+                "worldtree-smoke: read of unknown ws %llu returned instead of throwing\n",
+                static_cast<unsigned long long>(unknownWs));
+            return 1;
+        } catch (const RpcError &) {
+            std::printf("FAILLOUD ok\n");
         }
 
         std::printf("SMOKE-DONE\n");
