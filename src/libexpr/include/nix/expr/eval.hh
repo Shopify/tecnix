@@ -593,6 +593,14 @@ private:
     mutable size_t worldtreePoolNext_ = 0;
 
     /**
+     * Grants the accessor-side connection-pool unit test (`WorldtreePoolTest` in
+     * `libexpr-tests/worldtree-pool.cc`) access to the private `acquireWorldtreeZoneSession`
+     * seam, so it can assert bounded lazy growth, round-robin reuse, and close-on-drop
+     * against a fake worldtree daemon. Test-only; no production coupling.
+     */
+    friend class WorldtreePoolTest;
+
+    /**
      * Mount a zone by tree SHA, returning a (potentially virtual) store path.
      * Caches by tree SHA for deduplication across world revisions.
      */
