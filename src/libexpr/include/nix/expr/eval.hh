@@ -579,9 +579,14 @@ private:
      * connection can own many sessions (the daemon's owned-ephemeral set is per-connection),
      * so a broad evaluation multiplexes its zone sessions over at most
      * `tectonix-worldtree-max-connections` connections instead of opening one per zone —
-     * keeping the live connection count far below the daemon's per-listener cap. Grown
-     * lazily and only when the socket is set; `worldtreePoolNext_` is the round-robin cursor.
-     * All three are guarded by `worldtreePoolMutex_`.
+     * keeping the live connection count far below the daemon's per-listener cap. The pool
+     * is per-`EvalState`, and worldtreed binds one scoped listener per workspace (= per
+     * Aquifer sandbox), each with its own independent per-listener cap; the Tartarus planner
+     * runs a single eval per sandbox, so a listener sees one eval's bounded connection set
+     * rather than the sum across concurrent evals, and the cap is never a host-wide budget
+     * shared with other sandboxes on the same daemon (the real host-global limit is the
+     * daemon's fd rlimit). Grown lazily and only when the socket is set; `worldtreePoolNext_`
+     * is the round-robin cursor. All three are guarded by `worldtreePoolMutex_`.
      */
     mutable std::mutex worldtreePoolMutex_;
     mutable std::vector<std::shared_ptr<WorldtreeConn>> worldtreePool_;
