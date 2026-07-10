@@ -2,7 +2,9 @@
 
 #include "nix/expr/eval.hh"
 #include "nix/expr/eval-settings.hh"
+#include "nix/fetchers/fetch-settings.hh"
 #include "nix/store/globals.hh"
+#include "nix/store/store-open.hh"
 #include "nix/util/file-system.hh"
 #include "nix/util/hash.hh"
 
