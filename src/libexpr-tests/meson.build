@@ -67,10 +67,10 @@ sources = files(
   'search-path.cc',
   'tectonix.cc',
   'trivial.cc',
-  'worldtree-pool.cc',
   'value/context.cc',
   'value/print.cc',
   'value/value.cc',
+  'worldtree-pool.cc',
 )
 
 include_dirs = [ include_directories('.') ]
