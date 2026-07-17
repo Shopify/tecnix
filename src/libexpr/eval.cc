@@ -963,6 +963,14 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
 // Path to the tectonix manifest file within the world repository
 static constexpr std::string_view TECTONIX_MANIFEST_PATH = "/.meta/manifest.json";
 
+[[noreturn]] static void throwHistoricalWorldManifestError(const EvalSettings & settings, std::string_view detail)
+{
+    throw Error(
+        "worldtree: historical World manifest '.meta/manifest.json' for commit '%s' is missing or malformed: %s",
+        settings.tectonixGitSha.get(),
+        detail);
+}
+
 const std::string & EvalState::getManifestContent() const
 {
     // Cached for the lifetime of evaluation. This is intentional: evaluation is
@@ -988,9 +996,14 @@ const std::string & EvalState::getManifestContent() const
         // follows the same workspace visibility as the root checkout and needs no socket.
         if (!settings.tectonixWorldtreeSocket.get().empty()) {
             auto manifestPath = worldtreeRevisionRoot(settings) / "W-000000" / "manifest.json";
-            if (!std::filesystem::is_regular_file(manifestPath))
-                throw Error("worldtree: manifest.json is unavailable at '%s'", manifestPath.string());
-            tectonixManifestContent = readFile(manifestPath);
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(manifestPath, ec))
+                throwHistoricalWorldManifestError(settings, ec ? ec.message() : "file does not exist");
+            try {
+                tectonixManifestContent = readFile(manifestPath);
+            } catch (const Error & e) {
+                throwHistoricalWorldManifestError(settings, e.what());
+            }
             debug("loaded manifest from immutable worldtree view: %s", manifestPath.string());
             return;
         }
@@ -1009,7 +1022,13 @@ const std::string & EvalState::getManifestContent() const
 const nlohmann::json & EvalState::getManifestJson() const
 {
     std::call_once(tectonixManifestJsonFlag, [this]() {
-        tectonixManifestJson = std::make_unique<nlohmann::json>(nlohmann::json::parse(getManifestContent()));
+        try {
+            tectonixManifestJson = std::make_unique<nlohmann::json>(nlohmann::json::parse(getManifestContent()));
+        } catch (const nlohmann::json::parse_error & e) {
+            if (!settings.tectonixWorldtreeSocket.get().empty() && !isTectonixSourceAvailable())
+                throwHistoricalWorldManifestError(settings, e.what());
+            throw;
+        }
     });
     return *tectonixManifestJson;
 }

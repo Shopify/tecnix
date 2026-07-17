@@ -245,6 +245,35 @@ TEST_F(TectonixTest, historical_worldtree_manifest_and_dirty_set_are_filesystem_
     ASSERT_FALSE(dirty.at("//historical/only").dirty);
 }
 
+TEST_F(TectonixTest, historical_worldtree_explains_malformed_manifest)
+{
+    auto ctx = createHistoricalWorldtreeContext("{");
+
+    try {
+        ctx->state->getManifestJson();
+        FAIL() << "expected malformed manifest to fail";
+    } catch (const Error & e) {
+        ASSERT_THAT(e.what(), testing::HasSubstr("historical World manifest '.meta/manifest.json'"));
+        ASSERT_THAT(e.what(), testing::HasSubstr(commitSha));
+        ASSERT_THAT(e.what(), testing::HasSubstr("missing or malformed"));
+    }
+}
+
+TEST_F(TectonixTest, historical_worldtree_explains_missing_manifest)
+{
+    auto mount = repoPath / "worldtree-without-manifest";
+    auto ctx = std::make_unique<TectonixEvalContext>(repoPath, commitSha, false, mount);
+
+    try {
+        ctx->state->getManifestContent();
+        FAIL() << "expected missing manifest to fail";
+    } catch (const Error & e) {
+        ASSERT_THAT(e.what(), testing::HasSubstr("historical World manifest '.meta/manifest.json'"));
+        ASSERT_THAT(e.what(), testing::HasSubstr(commitSha));
+        ASSERT_THAT(e.what(), testing::HasSubstr("missing or malformed"));
+    }
+}
+
 TEST_F(TectonixTest, historical_worldtree_rejects_noncanonical_revision)
 {
     auto mount = repoPath / "worldtree";
