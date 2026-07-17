@@ -1,10 +1,9 @@
 #pragma once
 ///@file
-/// A self-contained client for the worldtree daemon's control socket (worldtree design
-/// §5.1/§5.1a). It speaks the daemon's length-delimited protobuf `Frame` envelope over
-/// `AF_UNIX` and exposes the four **Tecnix read verbs** — `dirty_zones`,
-/// `zone_tree_shas`, `read_tree`, `read_blobs` — that replace Tectonix's git-binary /
-/// libgit2 coupling with O(changes) daemon RPCs.
+/// A self-contained client for the mutable worldtree checkout's control socket. It speaks
+/// the daemon's length-delimited protobuf `Frame` envelope over `AF_UNIX` and exposes the
+/// two O(changes) metadata queries Tecnix needs: `dirty_zones` and `zone_tree_shas`.
+/// Committed source bytes are ordinary reads through the worldtree FUSE projection.
 ///
 /// It deliberately depends only on the C++ standard library and POSIX sockets — **no
 /// Nix or libgit2 headers** — for two reasons. First, it must keep working when the
@@ -17,7 +16,6 @@
 
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -83,27 +81,6 @@ struct ZoneSha
     std::optional<Oid> treeSha;
 };
 
-/// One `read_tree` node of a prefetched subtree skeleton: a path relative to the
-/// requested root, its git `mode` (the object type is mode-derived), its `oid`, and —
-/// for a blob or symlink — its `size` (0 for a directory), all from object headers
-/// with no content fetch.
-struct TreeEntry
-{
-    std::string path;
-    uint32_t mode;
-    Oid oid;
-    uint64_t size;
-};
-
-/// One `read_blobs` result. `content` is `nullopt` when the object was absent (or
-/// present but not a blob — the daemon reports `present=false` rather than failing the
-/// batch).
-struct Blob
-{
-    Oid oid;
-    std::optional<std::string> content;
-};
-
 /// One `dirty_zones` detail entry: a dirty zone's World path plus its changed working-copy
 /// files (staged ∪ unstaged), each **relative to the workspace root** (the daemon's
 /// `StatusEntry.path` form). The daemon computes these while mapping files to zones, so they
@@ -113,19 +90,6 @@ struct ZoneDirty
 {
     std::string zone;
     std::vector<std::string> files;
-};
-
-/// The result of `scoped.open_ro`: an **ephemeral read-only session** pinned at a base
-/// commit (worldtree design §5.1a/§6.1). `ws` *is* the session id — every subsequent read
-/// verb ([`Client::readTree`], [`Client::readBlobs`], [`Client::zoneTreeShas`],
-/// [`Client::dirtyZones`]) addresses it, so no verb grows a `session_id`. `manifest` is the
-/// raw `.meta/manifest.json` bytes at the pinned SHA, delivered in-band (no libgit2, no path
-/// traversal). `basePin` is the generation the session refcounts (observability only).
-struct RoSession
-{
-    uint64_t ws;
-    std::string manifest;
-    uint64_t basePin;
 };
 
 /// A synchronous, one-call-at-a-time client over a single daemon connection. Not
@@ -159,31 +123,6 @@ public:
     /// zone yields its committed oid, a dirty zone the synthesized frontier oid.
     std::vector<ZoneSha> zoneTreeShas(uint64_t ws, const std::vector<std::string> & zones);
 
-    /// `tecnix.read_tree` — the committed subtree skeleton at workspace-relative `path`
-    /// (empty ⇒ the root tree), descending `depth` directory levels below the immediate
-    /// children. Throws [`RpcError`] with `NotFound` for an absent or hidden path.
-    std::vector<TreeEntry> readTree(uint64_t ws, const std::string & path, uint32_t depth);
-
-    /// `tecnix.read_blobs` — the decoded bytes of each blob oid, in request order.
-    std::vector<Blob> readBlobs(uint64_t ws, const std::vector<Oid> & oids);
-
-    /// `scoped.open_ro` — open an **ephemeral read-only session** pinned at `baseSha`
-    /// (20 raw commit-oid bytes), optionally confined to a zone cone. `visibilityMode` is
-    /// `""`/`"full"` for full visibility (the zone lists must then be empty) or `"scoped"`
-    /// with `visibleZoneIds`/`visibleZonePaths` naming the cone. Returns the session `ws`
-    /// + the in-band manifest + the pinned generation. Throws [`RpcError`] with
-    /// `BaseCommitUnreachable` (retryable) if the SHA is not covered by the current
-    /// generation, or `Denied` if the connection may not open sessions.
-    RoSession openRo(
-        const Oid & baseSha,
-        const std::string & visibilityMode,
-        const std::vector<std::string> & visibleZoneIds,
-        const std::vector<std::string> & visibleZonePaths);
-
-    /// `scoped.close_ro` — release a session opened on **this** connection. Idempotent and
-    /// ownership-gated: closing an id this connection never owned is a clean no-op.
-    void closeRo(uint64_t ws);
-
 private:
     explicit Client(int fd);
 
@@ -207,12 +146,6 @@ private:
     /// A **one-shot** call: issue `method`, return the single RESPONSE payload (throwing on
     /// an ERROR reply / transport failure). For verbs the daemon does not stream.
     std::string call(const std::string & method, const std::string & payload);
-
-    /// A **streaming** call: issue `method`, then invoke `onChunk` for each RESPONSE chunk
-    /// in order, returning once STREAM_END arrives (throwing on an ERROR reply). Used by
-    /// the read verbs, which the daemon serves as a chunked stream (design §6.6).
-    void callStream(
-        const std::string & method, const std::string & payload, const std::function<void(std::string_view)> & onChunk);
 
     void writeAll(const std::string & bytes);
 

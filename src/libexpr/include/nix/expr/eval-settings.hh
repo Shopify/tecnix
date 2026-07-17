@@ -551,19 +551,21 @@ struct EvalSettings : Config
         R"(
           Path to a worldtree daemon (`worldtreed`) control socket.
 
-          When set, the tectonix builtins read the working copy from the daemon over
-          its socket instead of walking the git repository and checkout with libgit2:
-          zone tree shas, the dirty-zone set, and zone source content are all served by
-          O(changes) RPCs against the workspace named by `tectonix-worldtree-workspace`.
+          When set, the tectonix builtins read mutable checkout metadata from the daemon
+          instead of walking the git repository with libgit2: working tree shas and the
+          dirty-zone set are O(changes) RPCs against the workspace named by
+          `tectonix-worldtree-workspace`. Source bytes are read from the worldtree FUSE
+          projection: the current checkout path or the immutable historical path beneath
+          `tectonix-worldtree-mount`.
           This replaces the two libgit2 couplings — the per-zone tree-sha walk and the
           O(working-tree) `git status` dirty scan — that dominate evaluation in a large
           checkout.
 
-          Empty (the default) keeps the libgit2 path. When set, the daemon is the sole
-          source of truth (a worldtree sandbox has no git repo to fall back to): an
-          unreachable daemon, or one that refuses a request, is a hard failure — evaluation
-          aborts rather than silently reading stale or wrong content from libgit2. Set this
-          only where a daemon is actually serving the source.
+          Empty (the default) keeps the libgit2 path. When set, a mutable checkout has no
+          git fallback: an unreachable daemon, or one that refuses a control request, is a
+          hard failure. Historical evaluation does not connect to the socket; a missing or
+          invalid immutable FUSE path is likewise a hard failure. Set this only where
+          worldtree is actually serving the source.
         )"};
 
     Setting<uint64_t> tectonixWorldtreeWorkspace{
@@ -577,29 +579,18 @@ struct EvalSettings : Config
           evaluation. Ignored when `tectonix-worldtree-socket` is empty.
         )"};
 
-    Setting<uint64_t> tectonixWorldtreeMaxConnections{
+    Setting<std::string> tectonixWorldtreeMount{
         this,
-        64,
-        "tectonix-worldtree-max-connections",
+        "/mnt/worldtree",
+        "tectonix-worldtree-mount",
         R"(
-          Maximum number of physical control-socket connections tectonix opens to a
-          worldtree daemon for per-zone source reads (the `tectonix-worldtree-socket`
-          path).
+          Root of the worldtree workspace projection inside a sandbox. Historical,
+          immutable zone views live at `tecnix/<commit-sha>/<zone-id>` beneath this
+          directory; the current mutable checkout lives at `root`.
 
-          A `tec --sha` / worldtree-sandbox evaluation serves each clean zone's committed
-          source over its own ephemeral read-only session. A broad evaluation — e.g. the
-          Tartarus planning bundle across a large changeset — touches many zones at once;
-          opening a separate socket connection per zone can exceed the daemon's per-listener
-          connection cap, which the client then sees as
-          `worldtree: read(): Connection reset by peer`. To bound this, zone sessions are
-          multiplexed over a pool of at most this many connections (the daemon's
-          owned-ephemeral session set is per-connection, so one connection can host many
-          sessions); reads that land on the same connection serialize on it.
-
-          Must stay below the daemon's scoped-listener `max_connections` (512). The default
-          (64) comfortably exceeds typical core counts, so per-core read parallelism is
-          preserved while the live connection count stays far under the cap. A value of 0 is
-          treated as 1. Ignored when `tectonix-worldtree-socket` is empty.
+          This setting is consulted only when `tectonix-worldtree-socket` is set. The
+          socket remains the control plane for the mutable root checkout; committed
+          Tecnix source bytes and manifest metadata are read directly from this filesystem.
         )"};
 };
 

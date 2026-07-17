@@ -145,7 +145,10 @@ public:
         std::unique_ptr<EvalState> state;
 
         TectonixEvalContext(
-            const std::filesystem::path & repoPath, const std::string & commitSha, bool withCheckout = false)
+            const std::filesystem::path & repoPath,
+            const std::string & commitSha,
+            bool withCheckout = false,
+            const std::filesystem::path & worldtreeMount = {})
             : store(openStore("dummy://"))
         {
             evalSettings.nixPath = {};
@@ -153,6 +156,11 @@ public:
             evalSettings.tectonixGitSha = commitSha;
             if (withCheckout) {
                 evalSettings.tectonixCheckoutPath = repoPath.string();
+            }
+            if (!worldtreeMount.empty()) {
+                // Deliberately nonexistent: historical mode must never connect to it.
+                evalSettings.tectonixWorldtreeSocket = (repoPath / "unused-worldtree.sock").string();
+                evalSettings.tectonixWorldtreeMount = worldtreeMount.string();
             }
 
             state = std::make_unique<EvalState>(LookupPath{}, store, fetchSettings, evalSettings, nullptr);
@@ -171,6 +179,15 @@ public:
     std::unique_ptr<TectonixEvalContext> createTectonixContext(bool withCheckout = false)
     {
         return std::make_unique<TectonixEvalContext>(repoPath, commitSha, withCheckout);
+    }
+
+    std::unique_ptr<TectonixEvalContext> createHistoricalWorldtreeContext(std::string_view manifest)
+    {
+        auto mount = repoPath / "worldtree";
+        auto manifestDir = mount / "tecnix" / commitSha / "W-000000";
+        std::filesystem::create_directories(manifestDir);
+        std::ofstream(manifestDir / "manifest.json") << manifest;
+        return std::make_unique<TectonixEvalContext>(repoPath, commitSha, false, mount);
     }
 };
 
@@ -209,6 +226,40 @@ TEST_F(TectonixTest, manifest_returns_path_to_metadata_mapping)
     auto coreId = core->value->attrs()->get(ctx->state->symbols.create("id"));
     ASSERT_NE(coreId, nullptr);
     ASSERT_THAT(*coreId->value, IsStringEq("W-000003"));
+}
+
+TEST_F(TectonixTest, historical_worldtree_manifest_and_dirty_set_are_filesystem_only)
+{
+    static constexpr std::string_view historicalManifest = R"({
+        "//historical/only": { "id": "W-123456" }
+    })";
+    auto ctx = createHistoricalWorldtreeContext(historicalManifest);
+
+    ASSERT_EQ(ctx->state->getManifestContent(), historicalManifest);
+    auto & manifest = ctx->state->getManifestJson();
+    ASSERT_EQ(manifest.size(), 1u);
+    ASSERT_EQ(manifest.at("//historical/only").at("id"), "W-123456");
+
+    auto & dirty = ctx->state->getTectonixDirtyZones();
+    ASSERT_EQ(dirty.size(), 1u);
+    ASSERT_FALSE(dirty.at("//historical/only").dirty);
+}
+
+TEST_F(TectonixTest, historical_worldtree_rejects_noncanonical_revision)
+{
+    auto mount = repoPath / "worldtree";
+    auto ctx = std::make_unique<TectonixEvalContext>(repoPath, "../escape", false, mount);
+
+    ASSERT_THROW(ctx->state->getManifestContent(), Error);
+}
+
+TEST_F(TectonixTest, historical_worldtree_rejects_noncanonical_zone_id)
+{
+    auto ctx = createHistoricalWorldtreeContext(R"({
+        "//historical/only": { "id": "../escape" }
+    })");
+
+    ASSERT_THROW(ctx->state->getZoneStorePath("//historical/only"), Error);
 }
 
 // ============================================================================
