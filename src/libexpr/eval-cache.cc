@@ -359,11 +359,12 @@ EvalCache::EvalCache(
 
 Value * EvalCache::getRootValue()
 {
-    if (!value) {
+    auto value(this->value.lock());
+    if (!*value) {
         debug("getting root value");
-        value = allocRootValue(rootLoader());
+        *value = RootValue(rootLoader());
     }
-    return *value;
+    return **value;
 }
 
 ref<AttrCursor> EvalCache::getRoot()
@@ -378,7 +379,7 @@ AttrCursor::AttrCursor(
     , cachedValue(std::move(cachedValue))
 {
     if (value)
-        _value = allocRootValue(value);
+        *_value.lock() = RootValue(value);
 }
 
 AttrKey AttrCursor::getKey()
@@ -394,18 +395,23 @@ AttrKey AttrCursor::getKey()
 
 Value & AttrCursor::getValue()
 {
-    if (!_value) {
+    /* Note: this lock is held while the value is being evaluated,
+       so concurrent calls block until the value is available. Lock
+       ordering is strictly child -> parent, so this cannot
+       deadlock. */
+    auto value(_value.lock());
+    if (!*value) {
         if (parent) {
             auto & vParent = parent->first->getValue();
             root->state.forceAttrs(vParent, noPos, "while searching for an attribute");
             auto attr = vParent.attrs()->get(parent->second);
             if (!attr)
                 throw Error("attribute '%s' is unexpectedly missing", getAttrPathStr());
-            _value = allocRootValue(attr->value);
+            *value = RootValue(attr->value);
         } else
-            _value = allocRootValue(root->getRootValue());
+            *value = RootValue(root->getRootValue());
     }
-    return **_value;
+    return ***value;
 }
 
 void AttrCursor::fetchCachedValue()
@@ -626,9 +632,12 @@ string_t AttrCursor::getStringWithContext()
                             [&](const NixStringContextElem::Path & p) -> const StorePath * { return nullptr; },
                         },
                         c.raw);
-                    if (!path || !root->state.store->isValidPath(*path)) {
-                        valid = false;
-                        break;
+                    if (path) {
+                        root->state.store->addTempRoot(*path);
+                        if (!root->state.store->isValidPath(*path)) {
+                            valid = false;
+                            break;
+                        }
                     }
                 }
                 if (valid) {

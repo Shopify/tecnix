@@ -111,11 +111,6 @@ const StringData & StringData::make(EvalMemory & mem, std::string_view s)
     return res;
 }
 
-RootValue allocRootValue(Value * v)
-{
-    return std::allocate_shared<Value *>(traceable_allocator<Value *>(), v);
-}
-
 // Pretty print types for assertion errors
 std::ostream & operator<<(std::ostream & os, const ValueType t)
 {
@@ -346,12 +341,14 @@ EvalState::EvalState(
     , baseEnv(mem.allocEnv(BASE_ENV_SIZE))
 #endif
     , staticBaseEnv{std::make_shared<StaticEnv>(nullptr, nullptr)}
+    , countCalls(getEnv("NIX_COUNT_CALLS").value_or("0") != "0")
+    , primOpCalls(make_ref<decltype(primOpCalls)::element_type>())
+    , functionCalls(make_ref<decltype(functionCalls)::element_type>())
+    , attrSelects(make_ref<decltype(attrSelects)::element_type>())
     , executor{make_ref<Executor>(settings)}
 {
     corepkgsFS->setPathDisplay("<nix", ">");
     internalFS->setPathDisplay("«nix-internal»", "");
-
-    countCalls = getEnv("NIX_COUNT_CALLS").value_or("0") != "0";
 
     static_assert(sizeof(Env) <= 16, "environment must be <= 16 bytes");
 
@@ -1201,7 +1198,7 @@ Value * EvalState::addPrimOp(PrimOp && primOp)
     v->mkPrimOp(new PrimOp(primOp));
 
     if (primOp.internal)
-        internalPrimOps.emplace(primOp.name, v);
+        internalPrimOps.emplace(primOp.name, RootValue(v));
     else {
         staticBaseEnv->vars.emplace_back(envName, baseEnvDispl);
         baseEnv.values[baseEnvDispl++] = v;
@@ -1375,11 +1372,11 @@ void mapStaticEnvBindings(const SymbolTable & st, const StaticEnv & se, const En
         if (se.isWith && env.values[0]->isFinished()) {
             // add 'with' bindings.
             for (auto & j : *env.values[0]->attrs())
-                vm.insert_or_assign(std::string(st[j.name]), j.value);
+                vm.insert_or_assign(std::string(st[j.name]), RootValue(j.value));
         } else {
             // iterate through staticenv bindings and add them.
             for (auto & i : se.vars)
-                vm.insert_or_assign(std::string(st[i.first]), env.values[i.second]);
+                vm.insert_or_assign(std::string(st[i.first]), RootValue(env.values[i.second]));
         }
     }
 }
@@ -1568,7 +1565,7 @@ void Value::mkPath(const SourcePath & path, EvalMemory & mem)
         forceAttrs(*env->values[0], fromWith->pos, "while evaluating the first subexpression of a with expression");
         if (auto j = env->values[0]->attrs()->get(var.name)) {
             if (countCalls) [[unlikely]]
-                attrSelects[j->pos]++;
+                attrSelects->try_emplace_or_visit(j->pos, 1, [](auto & i) { i.second++; });
             return j->value;
         }
         if (!fromWith->parentWith) [[unlikely]]
@@ -1788,10 +1785,14 @@ void EvalState::evalFile(const SourcePath & path, Value & v, bool mustBeTrivial)
         importResolutionCache->emplace(path, *resolvedPath);
     }
 
-    if (auto v2 = getConcurrent(*fileEvalCache, *resolvedPath)) {
-        forceValue(**v2, noPos);
-        v = **v2;
-        return;
+    {
+        Value * v2 = nullptr;
+        fileEvalCache->cvisit(*resolvedPath, [&](auto & i) { v2 = *i.second; });
+        if (v2) {
+            forceValue(*v2, noPos);
+            v = *v2;
+            return;
+        }
     }
 
     Value * vExpr;
@@ -1799,13 +1800,13 @@ void EvalState::evalFile(const SourcePath & path, Value & v, bool mustBeTrivial)
 
     fileEvalCache->try_emplace_and_cvisit(
         *resolvedPath,
-        nullptr,
+        RootValue(nullptr),
         [&](auto & i) {
             vExpr = allocValue();
             vExpr->mkThunk(&baseEnv, &expr);
-            i.second = vExpr;
+            *i.second = vExpr;
         },
-        [&](auto & i) { vExpr = i.second; });
+        [&](auto & i) { vExpr = *i.second; });
 
     forceValue(*vExpr, noPos);
 
@@ -1987,7 +1988,12 @@ void ExprAttrs::eval(EvalState & state, Env & env, Value & v)
         sort = true;
     }
 
-    bindings.bindings->pos = pos;
+    /* Empty attrsets share the static Bindings::emptyBindings, which we
+       must not write to: apart from being a data race, it causes false
+       sharing on emptyBindings' cache line (which may also hold other hot
+       globals such as Counter::enabled) between all evaluator threads. */
+    if (bindings.bindings != &Bindings::emptyBindings)
+        bindings.bindings->pos = pos;
 
     v.mkAttrs(sort ? bindings.finish() : bindings.alreadySorted());
 }
@@ -2105,7 +2111,7 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
             vAttrs = j->value;
             pos2 = j->pos;
             if (state.countCalls)
-                state.attrSelects[pos2]++;
+                state.attrSelects->try_emplace_or_visit(pos2, 1, [](auto & i) { i.second++; });
         }
 
         state.forceValue(*vAttrs, pos2 ? pos2 : this->pos);
@@ -2321,7 +2327,7 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
 
                 nrPrimOpCalls++;
                 if (countCalls)
-                    primOpCalls[fn->name]++;
+                    primOpCalls->try_emplace_or_visit(fn->name, 1, [](auto & i) { i.second++; });
 
                 try {
                     auto pos = vCur.determinePos(noPos);
@@ -2369,7 +2375,7 @@ void EvalState::callFunction(Value & fun, std::span<Value *> args, Value & vRes,
                 auto fn = primOp->primOp();
                 nrPrimOpCalls++;
                 if (countCalls)
-                    primOpCalls[fn->name]++;
+                    primOpCalls->try_emplace_or_visit(fn->name, 1, [](auto & i) { i.second++; });
 
                 try {
                     // TODO:
@@ -2443,7 +2449,7 @@ void ExprCall::eval(EvalState & state, Env & env, Value & v)
 // prevents tail-call optimisation.
 void EvalState::incrFunctionCall(ExprLambda * fun)
 {
-    functionCalls[fun]++;
+    functionCalls->try_emplace_or_visit(fun, 1, [](auto & i) { i.second++; });
 }
 
 void EvalState::autoCallFunction(const Bindings & args, Value & fun, Value & res)
@@ -3698,11 +3704,16 @@ void EvalState::printStatistics()
 #endif
 
     if (countCalls) {
-        topObj["primops"] = primOpCalls;
+        {
+            auto & obj = topObj["primops"];
+            obj = json::object();
+            primOpCalls->visit_all([&](auto & i) { obj[i.first] = i.second; });
+        }
         {
             auto & list = topObj["functions"];
             list = json::array();
-            for (auto & [fun, count] : functionCalls) {
+            functionCalls->visit_all([&](auto & i) {
+                auto & [fun, count] = i;
                 json obj = json::object();
                 if (fun->name)
                     obj["name"] = (std::string_view) symbols[fun->name];
@@ -3716,12 +3727,12 @@ void EvalState::printStatistics()
                 }
                 obj["count"] = count;
                 list.push_back(obj);
-            }
+            });
         }
         {
-            auto list = topObj["attributes"];
+            auto & list = topObj["attributes"];
             list = json::array();
-            for (auto & i : attrSelects) {
+            attrSelects->visit_all([&](auto & i) {
                 json obj = json::object();
                 if (auto pos = positions[i.first]) {
                     if (auto path = std::get_if<SourcePath>(&pos.origin))
@@ -3731,7 +3742,7 @@ void EvalState::printStatistics()
                 }
                 obj["count"] = i.second;
                 list.push_back(obj);
-            }
+            });
         }
     }
 

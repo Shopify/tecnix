@@ -14,6 +14,8 @@
 #include "nix/store/store-dir-config.hh"
 #include "nix/store/store-reference.hh"
 #include "nix/util/source-path.hh"
+#include "nix/util/async.hh"
+#include "nix/util/fun.hh"
 
 #include <nlohmann/json_fwd.hpp>
 #include <atomic>
@@ -431,6 +433,19 @@ public:
     void queryPathInfo(const StorePath & path, Callback<ref<const ValidPathInfo>> callback) noexcept;
 
     /**
+     * Asynchronously query information about multiple store paths. As
+     * results arrive (possibly in batches from a remote server),
+     * `callback` is invoked one or more times with a vector of
+     * `(path, info)` pairs. A null `info` denotes that the path is
+     * not valid. Every requested path is reported exactly once across
+     * all invocations of `callback`. Unlike `queryPathInfo()`, an
+     * invalid path is not an error.
+     */
+    virtual asio::awaitable<void> queryPathInfos(
+        const std::set<StorePath> & paths,
+        fun<void(std::vector<std::pair<StorePath, std::shared_ptr<const ValidPathInfo>>>)> callback);
+
+    /**
      * Version of queryPathInfo() that only queries the local narinfo cache and not
      * the actual store.
      *
@@ -727,9 +742,18 @@ public:
      * Add a store path as a temporary root of the garbage collector.
      * The root disappears as soon as we exit.
      */
-    virtual void addTempRoot(const StorePath & path)
+    void addTempRoot(const StorePath & path)
     {
-        debug("not creating temporary root, store doesn't support GC");
+        addTempRoots({path});
+    }
+
+    /**
+     * Add multiple store paths as temporary roots of the garbage collector.
+     * The roots disappears as soon as we exit.
+     */
+    virtual void addTempRoots(const StorePathSet & paths)
+    {
+        debug("not creating temporary roots, store doesn't support GC");
     }
 
     /**
@@ -878,8 +902,9 @@ public:
     /**
      * Sort a set of paths topologically under the references
      * relation.  If p refers to q, then p precedes q in this list.
+     * Virtual to allow for more efficient implementations in derived classes.
      */
-    StorePaths topoSortPaths(const StorePathSet & paths);
+    virtual StorePaths topoSortPaths(const StorePathSet & paths);
 
     struct Stats
     {
