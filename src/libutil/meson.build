@@ -186,6 +186,7 @@ sources = [ config_priv_h ] + files(
   'url.cc',
   'users.cc',
   'util.cc',
+  'worldtree-client.cc',
   'xml-writer.cc',
 )
 

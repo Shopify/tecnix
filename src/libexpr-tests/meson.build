@@ -70,6 +70,7 @@ sources = files(
   'value/context.cc',
   'value/print.cc',
   'value/value.cc',
+  'worldtree-pool.cc',
 )
 
 include_dirs = [ include_directories('.') ]

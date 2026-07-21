@@ -543,6 +543,64 @@ struct EvalSettings : Config
           for tectonix builtins. This enables local development workflows where changes
           are visible before committing.
         )"};
+
+    Setting<std::string> tectonixWorldtreeSocket{
+        this,
+        "",
+        "tectonix-worldtree-socket",
+        R"(
+          Path to a worldtree daemon (`worldtreed`) control socket.
+
+          When set, the tectonix builtins read the working copy from the daemon over
+          its socket instead of walking the git repository and checkout with libgit2:
+          zone tree shas, the dirty-zone set, and zone source content are all served by
+          O(changes) RPCs against the workspace named by `tectonix-worldtree-workspace`.
+          This replaces the two libgit2 couplings — the per-zone tree-sha walk and the
+          O(working-tree) `git status` dirty scan — that dominate evaluation in a large
+          checkout.
+
+          Empty (the default) keeps the libgit2 path. When set, the daemon is the sole
+          source of truth (a worldtree sandbox has no git repo to fall back to): an
+          unreachable daemon, or one that refuses a request, is a hard failure — evaluation
+          aborts rather than silently reading stale or wrong content from libgit2. Set this
+          only where a daemon is actually serving the source.
+        )"};
+
+    Setting<uint64_t> tectonixWorldtreeWorkspace{
+        this,
+        0,
+        "tectonix-worldtree-workspace",
+        R"(
+          The worldtree workspace id to read when `tectonix-worldtree-socket` is set.
+
+          A worldtree daemon hosts many workspaces; this selects which one backs this
+          evaluation. Ignored when `tectonix-worldtree-socket` is empty.
+        )"};
+
+    Setting<uint64_t> tectonixWorldtreeMaxConnections{
+        this,
+        64,
+        "tectonix-worldtree-max-connections",
+        R"(
+          Maximum number of physical control-socket connections tectonix opens to a
+          worldtree daemon for per-zone source reads (the `tectonix-worldtree-socket`
+          path).
+
+          A `tec --sha` / worldtree-sandbox evaluation serves each clean zone's committed
+          source over its own ephemeral read-only session. A broad evaluation — e.g. the
+          Tartarus planning bundle across a large changeset — touches many zones at once;
+          opening a separate socket connection per zone can exceed the daemon's per-listener
+          connection cap, which the client then sees as
+          `worldtree: read(): Connection reset by peer`. To bound this, zone sessions are
+          multiplexed over a pool of at most this many connections (the daemon's
+          owned-ephemeral session set is per-connection, so one connection can host many
+          sessions); reads that land on the same connection serialize on it.
+
+          Must stay below the daemon's scoped-listener `max_connections` (512). The default
+          (64) comfortably exceeds typical core counts, so per-core read parallelism is
+          preserved while the live connection count stays far under the cap. A value of 0 is
+          treated as 1. Ignored when `tectonix-worldtree-socket` is empty.
+        )"};
 };
 
 /**
