@@ -16,6 +16,12 @@ using json = nlohmann::json;
 
 static void parallelForceDeep(EvalState & state, Value & v, PosIdx pos)
 {
+    /* Tecnix: tracking contexts are thread-confined, so tracked evaluation
+       must not spawn detached work. Skip the prefetch; the caller forces
+       everything itself, producing identical results and closures. */
+    if (currentTecnixThreadState.trackingContext)
+        return;
+
     state.forceValue(v, pos);
 
     Executor::WorkItems work;

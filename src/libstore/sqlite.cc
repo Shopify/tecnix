@@ -240,6 +240,17 @@ std::string SQLiteStmt::Use::getStr(int col)
     return s;
 }
 
+std::string_view SQLiteStmt::Use::getBlob(int col)
+{
+    auto * data = sqlite3_column_blob(stmt, col);
+    auto len = sqlite3_column_bytes(stmt, col);
+    if (!data && len != 0)
+        SQLiteError::throw_(stmt.db, "reading SQLite blob column");
+    if (!data)
+        return {};
+    return {static_cast<const char *>(data), static_cast<size_t>(len)};
+}
+
 int64_t SQLiteStmt::Use::getInt(int col)
 {
     // FIXME: detect nulls?

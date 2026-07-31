@@ -1,4 +1,5 @@
 #include "nix/cmd/command.hh"
+#include "nix/store/async-path-writer.hh"
 #include "nix/store/store-api.hh"
 #include "nix/store/store-open.hh"
 #include "nix/expr/provenance.hh"
@@ -453,7 +454,10 @@ struct CmdProvenanceVerify : StorePathsCommand
             logger->cout("✅ evaluated '%s#%s'", installable.flakeRef.to_string(true), flake->flakeOutput);
 
             if (path) {
-                if (!trackingStore->instantiatedPaths.contains(*path)) {
+                // Instantiated paths are observed either as store writes or,
+                // for paths the async path writer deduplicated against
+                // already-valid store contents, from the writer itself.
+                if (!trackingStore->instantiatedPaths.contains(*path) && !evalState->asyncPathWriter->wasAdded(*path)) {
                     logger->cout(
                         "❌ " ANSI_RED "evaluation did not re-instantiate path '%s'" ANSI_NORMAL,
                         store.printStorePath(*path));

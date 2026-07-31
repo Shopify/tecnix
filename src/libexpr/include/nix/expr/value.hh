@@ -19,6 +19,7 @@
 #include "nix/expr/value/context.hh"
 #include "nix/util/source-path.hh"
 #include "nix/expr/print-options.hh"
+#include "nix/expr/tecnix/value-hooks.hh"
 #include "nix/util/checked-arithmetic.hh"
 
 #include <boost/unordered/unordered_flat_map_fwd.hpp>
@@ -681,6 +682,8 @@ class alignas(16)
 
     void finish(PackedPointer p0_, PackedPointer p1_)
     {
+        tecnixValueFinishHook(this);
+
         // Note: p1 *must* be updated before p0.
         p1 = p1_;
         p0_ = p0.exchange(p0_, std::memory_order_release);
@@ -926,7 +929,9 @@ protected:
         auto pd = static_cast<PrimaryDiscriminator>(p0_ & discriminatorMask);
         if (pd == pdThunk || pd == pdPending || pd == pdAwaited)
             unreachable();
+        tecnixValueCopyBeforeFinish(this, &v);
         finish(p0_, p1_);
+        tecnixValueCopyAfterFinish(this, &v);
         return *this;
     }
 
@@ -1166,7 +1171,21 @@ static_assert(std::random_access_iterator<ListView::iterator>);
 
 struct Value : public ValueStorage<sizeof(void *)>
 {
+    using Storage = ValueStorage<sizeof(void *)>;
+
     friend std::string showType(const Value & v);
+
+public:
+    Value() = default;
+
+    Value(const Value & v);
+    Value(Value && v) noexcept;
+    Value & operator=(const Value & v);
+    Value & operator=(Value && v) noexcept;
+
+    uint32_t trackedSourceAccessSet() const noexcept;
+    void setTrackedSourceAccessSet(uint32_t accessSet) noexcept;
+    void clearTrackedSourceAccessSet() noexcept;
 
     /**
      * Empty list constant.
@@ -1532,6 +1551,9 @@ public:
         return getStorage<Failed *>();
     }
 };
+
+#include "nix/expr/tecnix/value-methods.hh"
+#include "nix/expr/tecnix/value-layout-tripwire.hh"
 
 typedef std::vector<Value *, traceable_allocator<Value *>> ValueVector;
 typedef boost::unordered_flat_map<

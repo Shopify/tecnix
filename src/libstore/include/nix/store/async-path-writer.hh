@@ -19,6 +19,13 @@ struct AsyncPathWriter
 
     virtual void waitForAllPaths() = 0;
 
+    /**
+     * Whether `addPath` was called for `path` during this writer's lifetime.
+     * Unlike observing store writes, this includes paths whose write was
+     * elided because the store already had them.
+     */
+    virtual bool wasAdded(const StorePath & path) = 0;
+
     static ref<AsyncPathWriter> make(ref<Store> store);
 };
 

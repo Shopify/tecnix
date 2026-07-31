@@ -51,6 +51,13 @@ std::pair<StorePath, Hash> fetchToStore2(
     PathFilter * filter,
     RepairFlag repair)
 {
+    // Always call getFingerprint, even when a filter is present or the
+    // in-memory srcToStore cache below may hit, so source accessors can
+    // record the access: a cache hit absorbs the physical read, and skipping
+    // recording here would silently drop the path from the dependency
+    // closure of any tracked evaluation after the first.
+    auto [subpath, fingerprint] = path.accessor->getFingerprint(path.path);
+
     auto srcToStoreKey = std::make_tuple(path, method.raw, std::string(name));
 
     if (!filter) {
@@ -61,10 +68,9 @@ std::pair<StorePath, Hash> fetchToStore2(
 
     std::optional<fetchers::Cache::Key> cacheKey;
 
-    auto [subpath, fingerprint] = filter ? std::pair<CanonPath, std::optional<std::string>>{path.path, std::nullopt}
-                                         : path.accessor->getFingerprint(path.path);
-
-    if (fingerprint) {
+    // Do not persistently cache filtered paths: the filter predicate is not
+    // part of the cache key.
+    if (fingerprint && !filter) {
         cacheKey = makeSourcePathToHashCacheKey(*fingerprint, method, subpath);
         if (auto res = settings.getCache()->lookup(*cacheKey)) {
             auto hash = Hash::parseSRI(fetchers::getStrAttr(*res, "hash"));
@@ -87,9 +93,11 @@ std::pair<StorePath, Hash> fetchToStore2(
             }
             debug("source path '%s' not in store", path);
         }
+    } else if (filter) {
+        debug("source path '%s' has a filter; skipping persistent source-path cache", path);
     } else {
         static auto barf = getEnv("_NIX_TEST_BARF_ON_UNCACHEABLE").value_or("") == "1";
-        if (barf && !filter && !(path.to_string().starts_with("/") || path.to_string().starts_with("«path:/")))
+        if (barf && !(path.to_string().starts_with("/") || path.to_string().starts_with("«path:/")))
             throw Error("source path '%s' is uncacheable (filter=%d)", path, (bool) filter);
         debug("source path '%s' is uncacheable", path);
     }

@@ -4,6 +4,7 @@
 #include "nix/expr/tests/libexpr.hh"
 #include "nix/expr/eval.hh"
 #include "nix/expr/eval-settings.hh"
+#include "nix/expr/tecnix/source-accessors.hh"
 #include "nix/fetchers/git-utils.hh"
 #include "nix/store/globals.hh"
 #include "nix/util/file-system.hh"
@@ -235,12 +236,12 @@ TEST_F(TectonixTest, historical_worldtree_manifest_and_dirty_set_are_filesystem_
     })";
     auto ctx = createHistoricalWorldtreeContext(historicalManifest);
 
-    ASSERT_EQ(ctx->state->getManifestContent(), historicalManifest);
-    auto & manifest = ctx->state->getManifestJson();
+    ASSERT_EQ(getManifestContent(*ctx->state), historicalManifest);
+    auto & manifest = getManifestJson(*ctx->state);
     ASSERT_EQ(manifest.size(), 1u);
     ASSERT_EQ(manifest.at("//historical/only").at("id"), "W-123456");
 
-    auto & dirty = ctx->state->getTectonixDirtyZones();
+    auto & dirty = getTectonixDirtyZones(*ctx->state);
     ASSERT_EQ(dirty.size(), 1u);
     ASSERT_FALSE(dirty.at("//historical/only").dirty);
 }
@@ -250,7 +251,7 @@ TEST_F(TectonixTest, historical_worldtree_explains_malformed_manifest)
     auto ctx = createHistoricalWorldtreeContext("{");
 
     try {
-        ctx->state->getManifestJson();
+        getManifestJson(*ctx->state);
         FAIL() << "expected malformed manifest to fail";
     } catch (const Error & e) {
         ASSERT_THAT(e.what(), testing::HasSubstr("historical World manifest '.meta/manifest.json'"));
@@ -265,7 +266,7 @@ TEST_F(TectonixTest, historical_worldtree_explains_missing_manifest)
     auto ctx = std::make_unique<TectonixEvalContext>(repoPath, commitSha, false, mount);
 
     try {
-        ctx->state->getManifestContent();
+        getManifestContent(*ctx->state);
         FAIL() << "expected missing manifest to fail";
     } catch (const Error & e) {
         ASSERT_THAT(e.what(), testing::HasSubstr("historical World manifest '.meta/manifest.json'"));
@@ -279,7 +280,7 @@ TEST_F(TectonixTest, historical_worldtree_rejects_noncanonical_revision)
     auto mount = repoPath / "worldtree";
     auto ctx = std::make_unique<TectonixEvalContext>(repoPath, "../escape", false, mount);
 
-    ASSERT_THROW(ctx->state->getManifestContent(), Error);
+    ASSERT_THROW(getManifestContent(*ctx->state), Error);
 }
 
 TEST_F(TectonixTest, historical_worldtree_rejects_noncanonical_zone_id)
@@ -288,7 +289,7 @@ TEST_F(TectonixTest, historical_worldtree_rejects_noncanonical_zone_id)
         "//historical/only": { "id": "../escape" }
     })");
 
-    ASSERT_THROW(ctx->state->getZoneStorePath("//historical/only"), Error);
+    ASSERT_THROW(getLegacyTectonixZoneStorePath(*ctx->state, "//historical/only"), Error);
 }
 
 // ============================================================================
@@ -505,15 +506,15 @@ TEST_F(TectonixTest, dirtyZones_empty_without_checkout)
 TEST_F(TectonixTest, getWorldRepo_returns_repo)
 {
     auto ctx = createTectonixContext();
-    auto repo = ctx->state->getWorldRepo();
+    auto repo = getWorldRepo(*ctx->state);
     ASSERT_NE(&*repo, nullptr);
 }
 
 TEST_F(TectonixTest, getWorldRepo_caches_instance)
 {
     auto ctx = createTectonixContext();
-    auto repo1 = ctx->state->getWorldRepo();
-    auto repo2 = ctx->state->getWorldRepo();
+    auto repo1 = getWorldRepo(*ctx->state);
+    auto repo2 = getWorldRepo(*ctx->state);
     // Should return same instance
     ASSERT_EQ(&*repo1, &*repo2);
 }
@@ -525,7 +526,7 @@ TEST_F(TectonixTest, getWorldRepo_caches_instance)
 TEST_F(TectonixTest, getWorldTreeSha_returns_hash)
 {
     auto ctx = createTectonixContext();
-    auto hash = ctx->state->getWorldTreeSha("//areas/tools/dev");
+    auto hash = getWorldTreeSha(*ctx->state, "//areas/tools/dev");
     // SHA1 hash is 40 hex chars
     ASSERT_EQ(hash.gitRev().size(), 40u);
 }
@@ -533,8 +534,8 @@ TEST_F(TectonixTest, getWorldTreeSha_returns_hash)
 TEST_F(TectonixTest, getWorldTreeSha_caches_results)
 {
     auto ctx = createTectonixContext();
-    auto hash1 = ctx->state->getWorldTreeSha("//areas/tools/dev");
-    auto hash2 = ctx->state->getWorldTreeSha("//areas/tools/dev");
+    auto hash1 = getWorldTreeSha(*ctx->state, "//areas/tools/dev");
+    auto hash2 = getWorldTreeSha(*ctx->state, "//areas/tools/dev");
     ASSERT_EQ(hash1, hash2);
 }
 
@@ -542,7 +543,7 @@ TEST_F(TectonixTest, getWorldTreeSha_root_returns_commit_tree)
 {
     auto ctx = createTectonixContext();
     // Root path should work
-    auto hash = ctx->state->getWorldTreeSha("//");
+    auto hash = getWorldTreeSha(*ctx->state, "//");
     ASSERT_EQ(hash.gitRev().size(), 40u);
 }
 
@@ -553,7 +554,7 @@ TEST_F(TectonixTest, getWorldTreeSha_root_returns_commit_tree)
 TEST_F(TectonixTest, getManifestJson_parses_correctly)
 {
     auto ctx = createTectonixContext();
-    auto & json = ctx->state->getManifestJson();
+    auto & json = getManifestJson(*ctx->state);
 
     ASSERT_TRUE(json.contains("//areas/tools/dev"));
     ASSERT_EQ(json["//areas/tools/dev"]["id"], "W-000001");
@@ -562,8 +563,8 @@ TEST_F(TectonixTest, getManifestJson_parses_correctly)
 TEST_F(TectonixTest, getManifestJson_caches_result)
 {
     auto ctx = createTectonixContext();
-    auto & json1 = ctx->state->getManifestJson();
-    auto & json2 = ctx->state->getManifestJson();
+    auto & json1 = getManifestJson(*ctx->state);
+    auto & json2 = getManifestJson(*ctx->state);
     // Should return same instance
     ASSERT_EQ(&json1, &json2);
 }
@@ -575,13 +576,13 @@ TEST_F(TectonixTest, getManifestJson_caches_result)
 TEST_F(TectonixTest, isTectonixSourceAvailable_false_without_checkout)
 {
     auto ctx = createTectonixContext(false);
-    ASSERT_FALSE(ctx->state->isTectonixSourceAvailable());
+    ASSERT_FALSE(isTectonixSourceAvailable(*ctx->state));
 }
 
 TEST_F(TectonixTest, isTectonixSourceAvailable_true_with_checkout)
 {
     auto ctx = createTectonixContext(true);
-    ASSERT_TRUE(ctx->state->isTectonixSourceAvailable());
+    ASSERT_TRUE(isTectonixSourceAvailable(*ctx->state));
 }
 
 // ============================================================================
@@ -599,7 +600,7 @@ TEST_F(TectonixTest, missing_git_dir_throws)
 
     EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
-    ASSERT_THROW(evalState.getWorldRepo(), Error);
+    ASSERT_THROW(getWorldRepo(evalState), Error);
 }
 
 TEST_F(TectonixTest, missing_git_sha_throws)
@@ -613,7 +614,7 @@ TEST_F(TectonixTest, missing_git_sha_throws)
 
     EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
-    ASSERT_THROW(evalState.getWorldGitAccessor(), Error);
+    ASSERT_THROW(getWorldGitAccessor(evalState), Error);
 }
 
 TEST_F(TectonixTest, missing_git_sha_tree_sha_throws)
@@ -627,7 +628,7 @@ TEST_F(TectonixTest, missing_git_sha_tree_sha_throws)
 
     EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
-    ASSERT_THROW(evalState.getWorldTreeSha("//areas/tools/dev"), Error);
+    ASSERT_THROW(getWorldTreeSha(evalState, "//areas/tools/dev"), Error);
 }
 
 TEST_F(TectonixTest, invalid_sha_throws)
@@ -641,7 +642,7 @@ TEST_F(TectonixTest, invalid_sha_throws)
 
     EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
-    ASSERT_THROW(evalState.getWorldGitAccessor(), Error);
+    ASSERT_THROW(getWorldGitAccessor(evalState), Error);
 }
 
 // ============================================================================
@@ -657,7 +658,7 @@ TEST_F(TectonixTest, concurrent_manifest_access)
 
     // Multiple threads calling getManifestJson
     for (size_t i = 0; i < 8; i++) {
-        threads.emplace_back([&, i]() { results[i] = &ctx->state->getManifestJson(); });
+        threads.emplace_back([&, i]() { results[i] = &getManifestJson(*ctx->state); });
     }
 
     for (auto & t : threads) {
@@ -679,7 +680,7 @@ TEST_F(TectonixTest, concurrent_tree_sha_computation)
 
     // Multiple threads computing tree SHAs for same path
     for (size_t i = 0; i < 8; i++) {
-        threads.emplace_back([&, i]() { results[i] = ctx->state->getWorldTreeSha("//areas/tools/dev").gitRev(); });
+        threads.emplace_back([&, i]() { results[i] = getWorldTreeSha(*ctx->state, "//areas/tools/dev").gitRev(); });
     }
 
     for (auto & t : threads) {
@@ -701,7 +702,7 @@ TEST_F(TectonixTest, concurrent_world_repo_access)
 
     // Multiple threads calling getWorldRepo
     for (size_t i = 0; i < 8; i++) {
-        threads.emplace_back([&, i]() { results[i] = &*ctx->state->getWorldRepo(); });
+        threads.emplace_back([&, i]() { results[i] = &*getWorldRepo(*ctx->state); });
     }
 
     for (auto & t : threads) {
@@ -727,7 +728,7 @@ TEST_F(TectonixTest, concurrent_different_tree_shas)
     for (const auto & path : zonePaths) {
         for (int i = 0; i < 3; i++) {
             threads.emplace_back([&, path]() {
-                auto hash = ctx->state->getWorldTreeSha(path);
+                auto hash = getWorldTreeSha(*ctx->state, path);
                 auto hashStr = hash.gitRev();
                 std::lock_guard<std::mutex> lock(resultsMutex);
                 auto it = results.find(path);
@@ -820,7 +821,7 @@ TEST_F(TectonixTest, zone_path_traversal_throws)
     auto ctx = createTectonixContext();
 
     // Path traversal attempt should fail
-    ASSERT_THROW(ctx->state->getWorldTreeSha("//areas/../.git"), Error);
+    ASSERT_THROW(getWorldTreeSha(*ctx->state, "//areas/../.git"), Error);
 }
 
 TEST_F(TectonixTest, nonexistent_git_dir_throws)
@@ -834,7 +835,7 @@ TEST_F(TectonixTest, nonexistent_git_dir_throws)
 
     EvalState evalState(LookupPath{}, openStore("dummy://"), fetchSettings, evalSettings, nullptr);
 
-    ASSERT_THROW(evalState.getWorldRepo(), Error);
+    ASSERT_THROW(getWorldRepo(evalState), Error);
 }
 
 TEST_F(TectonixTest, treeSha_for_nonexistent_subpath_throws)
@@ -842,7 +843,7 @@ TEST_F(TectonixTest, treeSha_for_nonexistent_subpath_throws)
     auto ctx = createTectonixContext();
 
     // Path that doesn't exist in the tree
-    ASSERT_THROW(ctx->state->getWorldTreeSha("//areas/tools/dev/nonexistent/deep/path"), Error);
+    ASSERT_THROW(getWorldTreeSha(*ctx->state, "//areas/tools/dev/nonexistent/deep/path"), Error);
 }
 
 TEST_F(TectonixTest, manifest_missing_id_field_throws)

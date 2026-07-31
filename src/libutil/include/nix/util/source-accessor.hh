@@ -143,6 +143,31 @@ struct SourceAccessor : std::enable_shared_from_this<SourceAccessor>
 
     virtual void dumpPath(const CanonPath & path, Sink & sink, PathFilter & filter = defaultPathFilter);
 
+    /**
+     * Whether this source path is backed by an accessor that records source
+     * accesses for evaluator dependency tracking. This must be side-effect-free:
+     * callers use it only to choose a safe evaluator cache domain.
+     */
+    virtual bool tracksEvalAccesses(const CanonPath &)
+    {
+        return false;
+    }
+
+    /**
+     * Replay an evaluator source access for cached work that did not call
+     * readFile/readDirectory/readLink on this accessor again. Accessors that
+     * return true from tracksEvalAccesses() should map the path the same way
+     * their read operations do and record it in the active tracking context.
+     */
+    virtual void recordEvalAccess(const CanonPath &) {}
+
+    /**
+     * Depth counter for dumpPath calls. Used by tracking infrastructure
+     * to suppress individual file tracking during NAR serialization
+     * (store copy), since the directory-level fingerprint is sufficient.
+     */
+    static thread_local int dumpPathDepth;
+
     Hash
     hashPath(const CanonPath & path, PathFilter & filter = defaultPathFilter, HashAlgorithm ha = HashAlgorithm::SHA256);
 

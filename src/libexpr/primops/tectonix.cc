@@ -1,6 +1,7 @@
 #include "nix/expr/primops.hh"
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval-settings.hh"
+#include "nix/expr/tecnix/source-accessors.hh"
 #include "nix/fetchers/git-utils.hh"
 #include "nix/store/store-api.hh"
 #include "nix/fetchers/fetch-to-store.hh"
@@ -13,7 +14,7 @@ namespace nix {
 // Helper to get cached manifest JSON (avoids repeated parsing)
 static const nlohmann::json & getManifest(EvalState & state)
 {
-    return state.getManifestJson();
+    return getManifestJson(state);
 }
 
 // Helper to validate that a zone path exists in the manifest
@@ -32,6 +33,9 @@ static void validateZonePath(EvalState & state, const PosIdx pos, std::string_vi
 // ============================================================================
 static void prim_worldManifest(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(".meta/manifest.json");
+
     auto json = getManifest(state);
 
     auto attrs = state.buildBindings(json.size());
@@ -67,6 +71,9 @@ static RegisterPrimOp primop_worldManifest({
 // ============================================================================
 static void prim_worldManifestInverted(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(".meta/manifest.json");
+
     auto json = getManifest(state);
 
     // Track seen IDs to detect duplicates
@@ -100,6 +107,8 @@ static RegisterPrimOp primop_worldManifestInverted({
     .impl = prim_worldManifestInverted,
 });
 
+static std::string normalizeTrackedRepoPath(std::string_view path);
+
 // ============================================================================
 // builtins.unsafeTectonixInternalTreeSha worldPath
 // Returns the git tree SHA for a world path
@@ -109,7 +118,10 @@ static void prim_unsafeTectonixInternalTreeSha(EvalState & state, const PosIdx p
     auto worldPath = state.forceStringNoCtx(
         *args[0], pos, "while evaluating the 'worldPath' argument to builtins.unsafeTectonixInternalTreeSha");
 
-    auto sha = state.getWorldTreeSha(worldPath);
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(normalizeTrackedRepoPath(worldPath));
+
+    auto sha = getWorldTreeSha(state, worldPath);
     v.mkString(sha.gitRev(), state.mem);
 }
 
@@ -137,7 +149,7 @@ static void prim_unsafeTectonixInternalTree(EvalState & state, const PosIdx pos,
     auto treeSha = state.forceStringNoCtx(
         *args[0], pos, "while evaluating the 'treeSha' argument to builtins.unsafeTectonixInternalTree");
 
-    auto repo = state.getWorldRepo();
+    auto repo = getWorldRepo(state);
     auto hash = Hash::parseNonSRIUnprefixed(treeSha, HashAlgorithm::SHA1);
 
     if (!repo->hasObject(hash))
@@ -178,14 +190,26 @@ static RegisterPrimOp primop_unsafeTectonixInternalTree({
 // With lazy-trees enabled, returns a virtual store path that is only
 // materialized when used as a derivation input.
 // ============================================================================
+static std::string normalizeTrackedRepoPath(std::string_view path)
+{
+    std::string result(path);
+    if (hasPrefix(result, "//"))
+        result = result.substr(2);
+    else if (hasPrefix(result, "/"))
+        result = result.substr(1);
+    return result;
+}
+
 static void prim_unsafeTectonixInternalZoneSrc(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto zonePath = state.forceStringNoCtx(
         *args[0], pos, "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalZoneSrc");
 
     validateZonePath(state, pos, zonePath);
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(normalizeTrackedRepoPath(zonePath));
 
-    auto storePath = state.getZoneStorePath(zonePath);
+    auto storePath = getLegacyTectonixZoneStorePath(state, zonePath);
     state.allowAndSetStorePathString(storePath, v);
 }
 
@@ -219,8 +243,10 @@ static void prim_unsafeTectonixInternalZonePath(EvalState & state, const PosIdx 
         *args[0], pos, "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalZonePath");
 
     validateZonePath(state, pos, zonePath);
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(normalizeTrackedRepoPath(zonePath));
 
-    auto storePath = state.getZoneStorePath(zonePath);
+    auto storePath = getLegacyTectonixZoneStorePath(state, zonePath);
     state.allowPath(storePath);
     v.mkPath(state.storePath(storePath), state.mem);
 }
@@ -249,10 +275,23 @@ static RegisterPrimOp primop_unsafeTectonixInternalZonePath({
 // builtins.unsafeTectonixInternalSparseCheckoutRoots
 // Returns list of zone IDs in sparse checkout
 // ============================================================================
+static void throwIfTrackedLegacyCheckoutStateBuiltin(EvalState & state, const PosIdx pos, std::string_view builtinName)
+{
+    if (currentTecnixThreadState.trackingContext)
+        state
+            .error<EvalError>(
+                "legacy compatibility builtin builtins.%s exposes checkout-local state and cannot be used during Tecnix dependency tracking",
+                builtinName)
+            .atPos(pos)
+            .debugThrow();
+}
+
 static void
 prim_unsafeTectonixInternalSparseCheckoutRoots(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto & roots = state.getTectonixSparseCheckoutRoots();
+    throwIfTrackedLegacyCheckoutStateBuiltin(state, pos, "unsafeTectonixInternalSparseCheckoutRoots");
+
+    auto & roots = getTectonixSparseCheckoutRoots(state);
 
     auto list = state.buildList(roots.size());
     size_t i = 0;
@@ -284,7 +323,9 @@ static RegisterPrimOp primop_unsafeTectonixInternalSparseCheckoutRoots({
 // ============================================================================
 static void prim_unsafeTectonixInternalDirtyZones(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto & dirtyZones = state.getTectonixDirtyZones();
+    throwIfTrackedLegacyCheckoutStateBuiltin(state, pos, "unsafeTectonixInternalDirtyZones");
+
+    auto & dirtyZones = getTectonixDirtyZones(state);
 
     auto attrs = state.buildBindings(dirtyZones.size());
     for (const auto & [zonePath, info] : dirtyZones) {
@@ -317,14 +358,16 @@ static RegisterPrimOp primop_unsafeTectonixInternalDirtyZones({
 // ============================================================================
 static void prim_unsafeTectonixInternalZoneIsDirty(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    throwIfTrackedLegacyCheckoutStateBuiltin(state, pos, "unsafeTectonixInternalZoneIsDirty");
+
     auto zonePath = state.forceStringNoCtx(
         *args[0], pos, "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZoneIsDirty");
 
     validateZonePath(state, pos, zonePath);
 
     bool isDirty = false;
-    if (state.isTectonixSourceAvailable()) {
-        auto & dirtyZones = state.getTectonixDirtyZones();
+    if (isTectonixSourceAvailable(state)) {
+        auto & dirtyZones = getTectonixDirtyZones(state);
         auto it = dirtyZones.find(std::string(zonePath));
         isDirty = it != dirtyZones.end() && it->second.dirty;
     }
@@ -351,6 +394,8 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneIsDirty({
 // ============================================================================
 static void prim_unsafeTectonixInternalZoneRoot(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    throwIfTrackedLegacyCheckoutStateBuiltin(state, pos, "unsafeTectonixInternalZoneRoot");
+
     auto zonePath = state.forceStringNoCtx(
         *args[0], pos, "while evaluating the 'zonePath' argument to builtins.__unsafeTectonixInternalZoneRoot");
 
@@ -396,7 +441,7 @@ static RegisterPrimOp primop_unsafeTectonixInternalZoneRoot({
 // ============================================================================
 static void prim_unsafeTectonixInternalGitSha(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
-    auto & sha = state.requireTectonixGitSha();
+    auto & sha = requireTectonixGitSha(state);
     v.mkString(sha, state.mem);
 }
 

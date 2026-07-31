@@ -9,6 +9,7 @@ sources += files(
   'fetchMercurial.cc',
   'fetchTree.cc',
   'fromTOML.cc',
+  'tecnix.cc',
   'tectonix.cc',
 )
 
