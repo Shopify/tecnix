@@ -101,10 +101,15 @@ static LfsApiInfo getLfsApi(const ParsedURL & url)
 
         return {href, authIt->get<std::string>()};
     } else {
+        // git credential attributes take the path decoded and without a leading slash
+        auto credentialPath = url.renderPath(false);
+        if (credentialPath.starts_with("/"))
+            credentialPath.erase(0, 1);
+
         std::ostringstream inputCredDescr;
         inputCredDescr << "protocol=" << url.scheme << "\n";
         inputCredDescr << "host=" << url.authority->host << "\n";
-        inputCredDescr << "path=" << url.renderPath(true) << "\n";
+        inputCredDescr << "path=" << credentialPath << "\n";
 
         auto [status, output] =
             runProgram({.program = "git", .args = {"credential", "fill"}, .input = std::move(inputCredDescr).str()});
@@ -114,7 +119,7 @@ static LfsApiInfo getLfsApi(const ParsedURL & url)
                 "git-credential-fill: no output (cmd: 'git credential fill' for protocol=%s, host=%s, path=%s)",
                 url.scheme,
                 url.authority->host,
-                url.renderPath(true));
+                credentialPath);
 
         std::string username;
         std::string password;
@@ -135,7 +140,7 @@ static LfsApiInfo getLfsApi(const ParsedURL & url)
                 "git-credential-fill: no credentials returned (cmd: 'git credential fill' for protocol=%s, host=%s, path=%s)",
                 url.scheme,
                 url.authority->host,
-                url.renderPath(true));
+                credentialPath);
 
         return {
             url.to_string(),
