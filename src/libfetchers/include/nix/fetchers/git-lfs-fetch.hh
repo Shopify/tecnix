@@ -30,7 +30,31 @@ struct Fetch
     std::string attrPathPrefix;
 
     Fetch(git_repository * repo, git_oid rev, std::string attrPathPrefix = "");
-    bool shouldFetch(const CanonPath & path) const;
+
+    /**
+     * Whether `content` is shaped like a git-lfs pointer file.
+     *
+     * This is a cheap *necessary* condition for smudging, used to avoid the
+     * expensive attribute lookup in `shouldFetch()` for the overwhelming
+     * majority of blobs. It deliberately accepts malformed pointers, so that
+     * `fetch()` can still warn about them.
+     */
+    static bool isPointerCandidate(std::string_view content);
+
+    /**
+     * Whether the `filter` attribute of `path` is `lfs`.
+     *
+     * Expensive: libgit2 redoes its attribute setup and rematches every
+     * `.gitattributes` rule of every parent directory on each call, so this
+     * costs O(number of rules) per path. Prefer `shouldFetch()`, which only
+     * gets here for blobs that could actually be a pointer.
+     */
+    bool hasLfsFilterAttribute(const CanonPath & path) const;
+
+    /**
+     * Whether the blob at `path` holding `content` must be smudged.
+     */
+    bool shouldFetch(const CanonPath & path, std::string_view content) const;
     void fetch(
         const std::string & content,
         const CanonPath & pointerFilePath,

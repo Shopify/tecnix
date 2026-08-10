@@ -270,7 +270,25 @@ Fetch::Fetch(git_repository * repo, git_oid rev, std::string attrPathPrefix)
     this->url = nix::fixGitURL(remoteUrl).canonicalise();
 }
 
-bool Fetch::shouldFetch(const CanonPath & path) const
+bool Fetch::isPointerCandidate(std::string_view content)
+{
+    // The spec requires `version` to be the first line of a pointer file, so
+    // any blob that does not start with it cannot be one. Note that we do not
+    // also reject blobs that are too large to be a pointer (see `fetch()`):
+    // those are exactly the ones worth warning about, and there are few enough
+    // of them that the attribute lookup does not matter.
+    return content.starts_with("version ");
+}
+
+bool Fetch::shouldFetch(const CanonPath & path, std::string_view content) const
+{
+    /* Consulting git attributes is expensive (see `hasLfsFilterAttribute()`)
+       and this runs for every blob of a source tree, so reject the blobs that
+       cannot be a pointer without asking git about them. */
+    return isPointerCandidate(content) && hasLfsFilterAttribute(path);
+}
+
+bool Fetch::hasLfsFilterAttribute(const CanonPath & path) const
 {
     const char * attr = nullptr;
     git_attr_options opts = GIT_ATTR_OPTIONS_INIT;

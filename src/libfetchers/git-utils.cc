@@ -905,27 +905,24 @@ struct GitSourceAccessor : SourceAccessor
 
         const auto blob = getBlob(*state, path, symlink);
 
-        if (state->lfsFetch) {
-            if (state->lfsFetch->shouldFetch(path)) {
-                StringSink s;
-                try {
-                    // FIXME: do we need to hold the state lock while
-                    // doing this?
-                    auto contents =
-                        std::string((const char *) git_blob_rawcontent(blob.get()), git_blob_rawsize(blob.get()));
-                    state->lfsFetch->fetch(contents, path, s, [&s](uint64_t size) { s.s.reserve(size); });
-                } catch (Error & e) {
-                    e.addTrace({}, "while smudging git-lfs file '%s'", path);
-                    throw;
-                }
-                sizeCallback(s.s.size());
-                StringSource source{s.s};
-                source.drainInto(sink);
-                return;
+        auto view = std::string_view((const char *) git_blob_rawcontent(blob.get()), git_blob_rawsize(blob.get()));
+
+        if (state->lfsFetch && state->lfsFetch->shouldFetch(path, view)) {
+            StringSink s;
+            try {
+                // FIXME: do we need to hold the state lock while
+                // doing this?
+                state->lfsFetch->fetch(std::string(view), path, s, [&s](uint64_t size) { s.s.reserve(size); });
+            } catch (Error & e) {
+                e.addTrace({}, "while smudging git-lfs file '%s'", path);
+                throw;
             }
+            sizeCallback(s.s.size());
+            StringSource source{s.s};
+            source.drainInto(sink);
+            return;
         }
 
-        auto view = std::string_view((const char *) git_blob_rawcontent(blob.get()), git_blob_rawsize(blob.get()));
         sizeCallback(view.size());
         StringSource source{view};
         source.drainInto(sink);

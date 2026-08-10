@@ -407,4 +407,97 @@ TEST(GitUtils, isLegalRefName)
     ASSERT_FALSE(isLegalRefName(""));
 }
 
+// ============================================================================
+// git-lfs smudging
+// ============================================================================
+
+static const char * lfsPointer =
+    "version https://git-lfs.github.com/spec/v1\n"
+    "oid sha256:f5e02aa71e67f41d79023a128ca35bad86cf7b6656967bfe0884b3a3c4325eaf\n"
+    "size 10000000\n";
+
+class GitLfsTest : public GitUtilsTest
+{
+protected:
+    git_repository * rawRepo = nullptr;
+    git_oid commitOid;
+
+    /**
+     * Commit `files` (path -> contents) as the initial commit and record
+     * its oid in `commitOid`.
+     */
+    void commitFiles(const std::map<std::string, std::string> & files)
+    {
+        ASSERT_EQ(git_repository_open(&rawRepo, tmpDir.string().c_str()), 0);
+
+        git_treebuilder * builder = nullptr;
+        ASSERT_EQ(git_treebuilder_new(&builder, rawRepo, nullptr), 0);
+
+        for (auto & [name, contents] : files) {
+            git_oid blobOid;
+            ASSERT_EQ(git_blob_create_from_buffer(&blobOid, rawRepo, contents.data(), contents.size()), 0);
+            ASSERT_EQ(git_treebuilder_insert(nullptr, builder, name.c_str(), &blobOid, GIT_FILEMODE_BLOB), 0);
+        }
+
+        git_oid treeOid;
+        ASSERT_EQ(git_treebuilder_write(&treeOid, builder), 0);
+        git_treebuilder_free(builder);
+
+        git_tree * tree = nullptr;
+        ASSERT_EQ(git_tree_lookup(&tree, rawRepo, &treeOid), 0);
+
+        git_signature * sig = nullptr;
+        ASSERT_EQ(git_signature_now(&sig, "nix", "nix@example.com"), 0);
+        ASSERT_EQ(git_commit_create_v(&commitOid, rawRepo, "HEAD", sig, sig, nullptr, "initial commit", tree, 0), 0);
+        git_signature_free(sig);
+        git_tree_free(tree);
+    }
+
+    void TearDown() override
+    {
+        if (rawRepo)
+            git_repository_free(rawRepo);
+        GitUtilsTest::TearDown();
+    }
+};
+
+TEST_F(GitLfsTest, pointer_candidate_only_accepts_pointer_shaped_content)
+{
+    ASSERT_TRUE(lfs::Fetch::isPointerCandidate(lfsPointer));
+    // Malformed pointers are still candidates: only the attribute lookup can
+    // tell us whether to warn about them.
+    ASSERT_TRUE(lfs::Fetch::isPointerCandidate("version https://git-lfs.github.com/spec/v9\n"));
+
+    ASSERT_FALSE(lfs::Fetch::isPointerCandidate(""));
+    ASSERT_FALSE(lfs::Fetch::isPointerCandidate("hello world"));
+    ASSERT_FALSE(lfs::Fetch::isPointerCandidate("versionless"));
+    ASSERT_FALSE(lfs::Fetch::isPointerCandidate(std::string_view("\0\1\2binary", 9)));
+}
+
+/**
+ * Looking up git attributes is O(number of `.gitattributes` rules) per path,
+ * so it must not happen for blobs that cannot be a pointer in the first place.
+ */
+TEST_F(GitLfsTest, should_fetch_skips_the_attribute_lookup_for_non_pointer_content)
+{
+    commitFiles({
+        {".gitattributes", "enrolled filter=lfs -text\n"},
+        {"enrolled", "this is not a pointer"},
+        {"plain", lfsPointer},
+    });
+
+    lfs::Fetch fetch(rawRepo, commitOid);
+
+    // The attribute really is set, ...
+    ASSERT_TRUE(fetch.hasLfsFilterAttribute(CanonPath("enrolled")));
+    ASSERT_FALSE(fetch.hasLfsFilterAttribute(CanonPath("plain")));
+
+    // ... but content that cannot be a pointer is rejected without consulting it.
+    ASSERT_FALSE(fetch.shouldFetch(CanonPath("enrolled"), "this is not a pointer"));
+    ASSERT_TRUE(fetch.shouldFetch(CanonPath("enrolled"), lfsPointer));
+
+    // Pointer-shaped content that is not enrolled is still not smudged.
+    ASSERT_FALSE(fetch.shouldFetch(CanonPath("plain"), lfsPointer));
+}
+
 } // namespace nix
