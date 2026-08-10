@@ -406,9 +406,7 @@ static void terminateHandler()
         }
     }
 
-    // Call the original terminate handler.
-    std::set_terminate(nullptr);
-    std::terminate();
+    onTerminate();
 }
 
 void mainWrapped(int argc, char ** argv)
@@ -423,6 +421,9 @@ void mainWrapped(int argc, char ** argv)
         return;
     }
 #endif
+
+    /* This must be called before Sentry since both initialize OpenSSL. */
+    initLibUtil();
 
     bool sentryEnabled = false;
 

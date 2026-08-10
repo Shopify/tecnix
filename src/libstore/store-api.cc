@@ -426,72 +426,6 @@ StorePathSet Store::queryDerivationOutputs(const StorePath & path)
     return outputPaths;
 }
 
-void Store::querySubstitutablePathInfos(const StorePathCAMap & paths, SubstitutablePathInfos & infos)
-{
-    if (!settings.getWorkerSettings().useSubstitutes)
-        return;
-
-    for (auto & path : paths) {
-        std::optional<Error> lastStoresException = std::nullopt;
-        for (auto & sub : getDefaultSubstituters()) {
-            if (lastStoresException.has_value()) {
-                logError(lastStoresException->info());
-                lastStoresException.reset();
-            }
-
-            auto subPath(path.first);
-
-            // Recompute store path so that we can use a different store root.
-            if (path.second) {
-                subPath = makeFixedOutputPathFromCA(
-                    path.first.name(), ContentAddressWithReferences::withoutRefs(*path.second));
-                if (sub->storeDir == storeDir)
-                    assert(subPath == path.first);
-                if (subPath != path.first)
-                    debug(
-                        "replaced path '%s' with '%s' for substituter '%s'",
-                        printStorePath(path.first),
-                        sub->printStorePath(subPath),
-                        sub->config.getHumanReadableURI());
-            } else if (sub->storeDir != storeDir)
-                continue;
-
-            debug(
-                "checking substituter '%s' for path '%s'",
-                sub->config.getHumanReadableURI(),
-                sub->printStorePath(subPath));
-            try {
-                auto info = sub->queryPathInfo(subPath);
-
-                if (sub->storeDir != storeDir && !(info->isContentAddressed(*sub) && info->references.empty()))
-                    continue;
-
-                auto narInfo = std::dynamic_pointer_cast<const NarInfo>(std::shared_ptr<const ValidPathInfo>(info));
-                infos.insert_or_assign(
-                    path.first,
-                    SubstitutablePathInfo{
-                        .deriver = info->deriver,
-                        .references = info->references,
-                        .downloadSize = narInfo ? narInfo->fileSize : 0,
-                        .narSize = info->narSize,
-                    });
-
-                break; /* We are done. */
-            } catch (InvalidPath &) {
-            } catch (SubstituterDisabled &) {
-            } catch (Error & e) {
-                lastStoresException = std::make_optional(std::move(e));
-            }
-        }
-        if (lastStoresException.has_value()) {
-            if (!settings.getWorkerSettings().tryFallback) {
-                throw *lastStoresException;
-            } else
-                logError(lastStoresException->info());
-        }
-    }
-}
-
 StorePathSet Store::querySubstitutablePaths(const StorePathSet & paths)
 {
     if (!settings.getWorkerSettings().useSubstitutes)
@@ -677,6 +611,25 @@ void Store::queryPathInfo(const StorePath & storePath, Callback<ref<const ValidP
                 callbackPtr->rethrow();
             }
         }});
+}
+
+asio::awaitable<void> Store::queryPathInfos(
+    const std::set<StorePath> & paths,
+    fun<void(std::vector<std::pair<StorePath, std::shared_ptr<const ValidPathInfo>>>)> callback)
+{
+    /* Default implementation: query each path individually, reporting
+       each result as it arrives. */
+    co_await forEachAsync(paths, [&](const StorePath & path) -> asio::awaitable<void> {
+        std::shared_ptr<const ValidPathInfo> info;
+        try {
+            auto i = co_await callbackToAwaitable<ref<const ValidPathInfo>>(
+                [&](Callback<ref<const ValidPathInfo>> cb) { queryPathInfo(path, std::move(cb)); });
+            info = i.get_ptr();
+        } catch (InvalidPath &) {
+        }
+        std::vector<std::pair<StorePath, std::shared_ptr<const ValidPathInfo>>> result{{path, info}};
+        callback(std::move(result));
+    });
 }
 
 void Store::queryRealisation(
@@ -1040,8 +993,7 @@ std::map<StorePath, StorePath> copyPaths(
     CheckSigsFlag checkSigs,
     SubstituteFlag substitute)
 {
-    for (auto & path : storePaths)
-        dstStore.addTempRoot(path);
+    dstStore.addTempRoots(storePaths);
 
     auto valid = dstStore.queryValidPaths(storePaths, substitute);
 
@@ -1049,6 +1001,10 @@ std::map<StorePath, StorePath> copyPaths(
     for (auto & path : storePaths)
         if (!valid.count(path))
             missing.insert(path);
+
+    /* Don't start an activity if there's no work to do. */
+    if (missing.empty())
+        return {};
 
     Activity act(*logger, lvlInfo, actCopyPaths, fmt("copying %d paths", missing.size()));
 

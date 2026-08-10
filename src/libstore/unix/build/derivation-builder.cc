@@ -339,9 +339,22 @@ protected:
     }
 
     /**
-     * Open the slave side of the pseudoterminal and use it as stderr.
+     * Open the slave side of the pseudoterminal.
      */
-    void openSlave();
+    AutoCloseFD openSlaveNoDup();
+
+    /**
+     * Open the slave side of the pseudoterminal and use it as stderr.
+     * FIXME: This is called in the child. It should really be called in the parent (except for the dup to stderr),
+     * since if the child fails before opening the slave, the parent will hang forever reading from the master. However,
+     * opening the slave in the parent causes random failures on macOS. See c536e00c9deeac58bc4b3299dbc702604c32adbe.
+     */
+    void openSlave()
+    {
+        auto builderOut = openSlaveNoDup();
+        if (dup2(builderOut.get(), STDERR_FILENO) == -1)
+            throw SysError("cannot pipe standard error into log file");
+    }
 
     /**
      * Called by prepareBuild() to start the child process for the
@@ -513,8 +526,7 @@ static void handleDiffHook(
                 .gid = gid,
                 .chdir = "/"});
         if (!statusOk(diffRes.first))
-            throw ExecError(
-                diffRes.first, "diff-hook program %s %2%", PathFmt(diffHook), statusToString(diffRes.first));
+            throw ExecError(diffRes.first, "diff-hook program %s %s", PathFmt(diffHook), statusToString(diffRes.first));
 
         if (diffRes.second != "")
             printError(chomp(diffRes.second));
@@ -1030,7 +1042,7 @@ void DerivationBuilderImpl::prepareSandbox()
         throw Error("feature 'uid-range' is not supported on this platform");
 }
 
-void DerivationBuilderImpl::openSlave()
+AutoCloseFD DerivationBuilderImpl::openSlaveNoDup()
 {
     std::string slaveName = getPtsName(builderOut.get());
 
@@ -1048,8 +1060,7 @@ void DerivationBuilderImpl::openSlave()
     if (tcsetattr(builderOut.get(), TCSANOW, &term))
         throw SysError("putting pseudoterminal into raw mode");
 
-    if (dup2(builderOut.get(), STDERR_FILENO) == -1)
-        throw SysError("cannot pipe standard error into log file");
+    return builderOut;
 }
 
 #if NIX_WITH_AWS_AUTH
@@ -1100,12 +1111,12 @@ void DerivationBuilderImpl::processSandboxSetupMessages()
             try {
                 return readLine(builderOut.get());
             } catch (Error & e) {
-                auto status = pid.wait();
+                auto status = pid != -1 ? pid.wait() : 0;
                 e.addTrace(
                     {},
                     "while waiting for the build environment for '%s' to initialize (%s, previous messages: %s)",
                     store.printStorePath(drvPath),
-                    statusToString(status),
+                    status ? statusToString(status) : "no status",
                     concatStringsSep("\n", msgs));
                 throw;
             }
