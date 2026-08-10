@@ -34,6 +34,7 @@
 #include <git2/revparse.h>
 #include <git2/status.h>
 #include <git2/submodule.h>
+#include <git2/sys/errors.h>
 #include <git2/sys/odb_backend.h>
 #include <git2/sys/repository.h>
 #include <git2/sys/mempack.h>
@@ -262,6 +263,59 @@ static void initRepoAtomically(std::filesystem::path & path, GitRepo::Options op
     }
     // we successfully moved the repository, so the temporary directory no longer exists.
     delTmpDir.cancel();
+}
+
+/**
+ * Whether the contents of a `.gitattributes` file can assign `export-ignore`.
+ * Every rule and every macro definition that sets, unsets or unspecifies the
+ * attribute has to spell its name out, so a substring search is a sound (if
+ * conservative: it also fires on comments) test.
+ */
+static bool mentionsExportIgnore(std::string_view contents)
+{
+    return contents.find("export-ignore") != std::string_view::npos;
+}
+
+/**
+ * The attribute files outside the repository's tree that libgit2 consults:
+ * `$GIT_DIR/info/attributes` and the global `core.attributesfile` (which
+ * defaults to the XDG location). `GIT_ATTR_CHECK_NO_SYSTEM` only excludes the
+ * system-wide file, so these two can still assign attributes.
+ */
+static std::vector<std::filesystem::path> externalAttrFiles(git_repository * repo)
+{
+    std::vector<std::filesystem::path> result;
+
+    auto toPath = [](const git_buf & buf) { return std::filesystem::path(std::string(buf.ptr, buf.size)); };
+
+    {
+        git_buf info = GIT_BUF_INIT;
+        if (!git_repository_item_path(&info, repo, GIT_REPOSITORY_ITEM_INFO) && info.size)
+            result.push_back(toPath(info) / "attributes");
+        git_buf_dispose(&info);
+    }
+
+    GitConfig config;
+    if (!git_repository_config_snapshot(Setter(config), repo)) {
+        git_buf configured = GIT_BUF_INIT;
+        if (!git_config_get_path(&configured, config.get(), "core.attributesfile")) {
+            if (configured.size)
+                result.push_back(toPath(configured));
+        } else {
+            /* Unset: libgit2 falls back to `<xdg config dir>/attributes`. */
+            git_buf searchPath = GIT_BUF_INIT;
+            if (!git_libgit2_opts(GIT_OPT_GET_SEARCH_PATH, GIT_CONFIG_LEVEL_XDG, &searchPath) && searchPath.size)
+                for (auto & dir : tokenizeString<std::vector<std::string>>(
+                         std::string(searchPath.ptr, searchPath.size), std::string(1, GIT_PATH_LIST_SEPARATOR)))
+                    result.push_back(std::filesystem::path(dir) / "attributes");
+            git_buf_dispose(&searchPath);
+        }
+        git_buf_dispose(&configured);
+    }
+
+    git_error_clear();
+
+    return result;
 }
 
 struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
@@ -653,23 +707,27 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         return toHash(*git_object_id(tree.get()));
     }
 
-    std::vector<Hash> getGitAttributesAlongPath(const Hash & commitSha, const std::string & path) override
+    /**
+     * Call `fn` with the `.gitattributes` entry of the root tree and of each
+     * directory along `path`, outermost first, stopping at the first missing
+     * directory component. `fn` returns false to stop the walk early.
+     */
+    void forEachGitAttributesAlongPath(
+        const Hash & commitSha, const std::string & path, std::function<bool(const git_tree_entry *)> fn)
     {
-        std::vector<Hash> result;
         auto oid = hashToOID(getCommitTree(commitSha));
 
-        typedef std::unique_ptr<git_tree, Deleter<git_tree_free>> Tree;
         Tree tree;
         if (git_tree_lookup(Setter(tree), *this, &oid))
             throw Error("looking up tree: %s", git_error_last()->message);
 
         auto checkAttrs = [&] {
             auto e = git_tree_entry_byname(tree.get(), ".gitattributes");
-            if (e && git_tree_entry_type(e) == GIT_OBJECT_BLOB)
-                result.push_back(toHash(*git_tree_entry_id(e)));
+            return e && git_tree_entry_type(e) == GIT_OBJECT_BLOB ? fn(e) : true;
         };
 
-        checkAttrs();
+        if (!checkAttrs())
+            return;
 
         for (auto & component : tokenizeString<std::vector<std::string>>(path, "/")) {
             auto e = git_tree_entry_byname(tree.get(), component.c_str());
@@ -679,9 +737,62 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
             if (git_tree_lookup(Setter(next), *this, git_tree_entry_id(e)))
                 break;
             tree = std::move(next);
-            checkAttrs();
+            if (!checkAttrs())
+                return;
         }
+    }
 
+    std::vector<Hash> getGitAttributesAlongPath(const Hash & commitSha, const std::string & path) override
+    {
+        std::vector<Hash> result;
+        forEachGitAttributesAlongPath(commitSha, path, [&](const git_tree_entry * e) {
+            result.push_back(toHash(*git_tree_entry_id(e)));
+            return true;
+        });
+        return result;
+    }
+
+    /**
+     * Memoised result of scanning the attribute files outside the repository's
+     * tree; see `externalAttrFiles`.
+     */
+    std::once_flag externalAttrFilesScanned;
+    bool externalAttrFilesMayExportIgnore_ = false;
+
+    bool externalAttrFilesMayExportIgnore()
+    {
+        std::call_once(externalAttrFilesScanned, [&]() {
+            for (auto & file : externalAttrFiles(*this)) {
+                try {
+                    if (nix::pathExists(file) && mentionsExportIgnore(nix::readFile(file))) {
+                        externalAttrFilesMayExportIgnore_ = true;
+                        return;
+                    }
+                } catch (SysError &) {
+                    // Unreadable: assume the worst rather than silently
+                    // dropping rules libgit2 might still see.
+                    externalAttrFilesMayExportIgnore_ = true;
+                    return;
+                }
+            }
+        });
+        return externalAttrFilesMayExportIgnore_;
+    }
+
+    bool mayExportIgnore(const Hash & commitSha, const std::string & path) override
+    {
+        if (externalAttrFilesMayExportIgnore())
+            return true;
+
+        bool result = false;
+        forEachGitAttributesAlongPath(commitSha, path, [&](const git_tree_entry * e) {
+            Blob blob;
+            if (git_tree_entry_to_object((git_object **) (git_blob **) Setter(blob), *this, e))
+                throw GitError("reading a '.gitattributes' file");
+            result = mentionsExportIgnore(
+                std::string_view((const char *) git_blob_rawcontent(blob.get()), git_blob_rawsize(blob.get())));
+            return !result;
+        });
         return result;
     }
 
@@ -1171,6 +1282,12 @@ struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
         ref<GitRepoImpl> repo;
         std::optional<Hash> rev;
         GitAccessorOptions options;
+
+        /**
+         * Per directory, whether any `.gitattributes` applying to its entries
+         * mentions `export-ignore`. See `mayExportIgnore`.
+         */
+        boost::unordered_flat_map<CanonPath, bool> mayExportIgnoreCache;
     };
 
     Sync<State> state_;
@@ -1212,8 +1329,57 @@ struct GitExportIgnoreSourceAccessor : CachingFilteringSourceAccessor
         }
     }
 
+    /**
+     * Whether `dir` can contain export-ignored entries at all.
+     *
+     * Resolving an attribute costs O(number of rules in all applicable
+     * `.gitattributes`) per path, which dominates ingestion of a large
+     * repository even when nothing uses `export-ignore`. Deciding it once per
+     * directory instead turns that into O(directories).
+     *
+     * The answer for the accessor's root covers everything above it (the
+     * `.gitattributes` files along `attrPathPrefix` and the attribute files
+     * outside the tree); every directory below adds its own `.gitattributes`
+     * to its parent's answer.
+     *
+     * Only available when reading from a commit: with a working directory
+     * libgit2 resolves attributes against the index, which we cannot see
+     * through `next`.
+     */
+    bool mayExportIgnore(State & state, const CanonPath & dir)
+    {
+        if (!state.rev)
+            return true;
+
+        if (auto i = state.mayExportIgnoreCache.find(dir); i != state.mayExportIgnoreCache.end())
+            return i->second;
+
+        bool result;
+        if (auto parent = dir.parent())
+            result = mayExportIgnore(state, *parent) || attrFileMentionsExportIgnore(dir);
+        else
+            result = state.repo->mayExportIgnore(*state.rev, state.options.attrPathPrefix);
+
+        state.mayExportIgnoreCache.emplace(dir, result);
+        return result;
+    }
+
+    /** Whether `dir`'s own `.gitattributes`, if any, mentions `export-ignore`. */
+    bool attrFileMentionsExportIgnore(const CanonPath & dir)
+    {
+        auto attrFile = dir / ".gitattributes";
+        auto st = next->maybeLstat(attrFile);
+        return st && st->type == tRegular && mentionsExportIgnore(next->readFile(attrFile));
+    }
+
     bool isExportIgnored(const CanonPath & path)
     {
+        {
+            auto state(state_.lock());
+            if (!mayExportIgnore(*state, path.parent().value_or(CanonPath::root)))
+                return false;
+        }
+
         const char * exportIgnoreEntry = nullptr;
 
         // GIT_ATTR_CHECK_INDEX_ONLY:

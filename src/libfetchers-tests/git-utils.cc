@@ -26,6 +26,78 @@ class GitUtilsTest : public ::testing::Test
 protected:
     std::filesystem::path tmpDir;
 
+    /** Set by `commitFiles`. */
+    git_repository * rawRepo = nullptr;
+    git_oid commitOid;
+
+    /**
+     * Write `files` (repo-relative path -> contents; paths may name
+     * subdirectories) as the initial commit and record its oid in
+     * `commitOid`.
+     */
+    void commitFiles(const std::map<std::string, std::string> & files)
+    {
+        ASSERT_EQ(git_repository_open(&rawRepo, tmpDir.string().c_str()), 0);
+
+        auto treeOid = buildTree(files);
+
+        git_tree * tree = nullptr;
+        ASSERT_EQ(git_tree_lookup(&tree, rawRepo, &treeOid), 0);
+
+        git_signature * sig = nullptr;
+        ASSERT_EQ(git_signature_now(&sig, "nix", "nix@example.com"), 0);
+        ASSERT_EQ(git_commit_create_v(&commitOid, rawRepo, "HEAD", sig, sig, nullptr, "initial commit", tree, 0), 0);
+        git_signature_free(sig);
+        git_tree_free(tree);
+    }
+
+    /** The hash of the commit created by `commitFiles`. */
+    Hash commitHash() const
+    {
+        return toHash(commitOid);
+    }
+
+    static Hash toHash(const git_oid & oid)
+    {
+        char sha[GIT_OID_SHA1_HEXSIZE + 1];
+        git_oid_tostr(sha, sizeof(sha), &oid);
+        return Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
+    }
+
+private:
+    git_oid buildTree(const std::map<std::string, std::string> & files)
+    {
+        std::map<std::string, std::string> blobs;
+        std::map<std::string, std::map<std::string, std::string>> subdirs;
+
+        for (auto & [path, contents] : files) {
+            auto slash = path.find('/');
+            if (slash == std::string::npos)
+                blobs.emplace(path, contents);
+            else
+                subdirs[path.substr(0, slash)].emplace(path.substr(slash + 1), contents);
+        }
+
+        git_treebuilder * builder = nullptr;
+        EXPECT_EQ(git_treebuilder_new(&builder, rawRepo, nullptr), 0);
+
+        for (auto & [name, contents] : blobs) {
+            git_oid blobOid;
+            EXPECT_EQ(git_blob_create_from_buffer(&blobOid, rawRepo, contents.data(), contents.size()), 0);
+            EXPECT_EQ(git_treebuilder_insert(nullptr, builder, name.c_str(), &blobOid, GIT_FILEMODE_BLOB), 0);
+        }
+
+        for (auto & [name, entries] : subdirs) {
+            auto subtreeOid = buildTree(entries);
+            EXPECT_EQ(git_treebuilder_insert(nullptr, builder, name.c_str(), &subtreeOid, GIT_FILEMODE_TREE), 0);
+        }
+
+        git_oid treeOid;
+        EXPECT_EQ(git_treebuilder_write(&treeOid, builder), 0);
+        git_treebuilder_free(builder);
+        return treeOid;
+    }
+
 public:
     void SetUp() override
     {
@@ -42,6 +114,9 @@ public:
 
     void TearDown() override
     {
+        if (rawRepo)
+            git_repository_free(rawRepo);
+
         // Destroy the AutoDelete, triggering removal
         // not AutoDelete::reset(), which would cancel the deletion.
         delTmpDir.reset();
@@ -417,49 +492,7 @@ static const char * lfsPointer =
     "size 10000000\n";
 
 class GitLfsTest : public GitUtilsTest
-{
-protected:
-    git_repository * rawRepo = nullptr;
-    git_oid commitOid;
-
-    /**
-     * Commit `files` (path -> contents) as the initial commit and record
-     * its oid in `commitOid`.
-     */
-    void commitFiles(const std::map<std::string, std::string> & files)
-    {
-        ASSERT_EQ(git_repository_open(&rawRepo, tmpDir.string().c_str()), 0);
-
-        git_treebuilder * builder = nullptr;
-        ASSERT_EQ(git_treebuilder_new(&builder, rawRepo, nullptr), 0);
-
-        for (auto & [name, contents] : files) {
-            git_oid blobOid;
-            ASSERT_EQ(git_blob_create_from_buffer(&blobOid, rawRepo, contents.data(), contents.size()), 0);
-            ASSERT_EQ(git_treebuilder_insert(nullptr, builder, name.c_str(), &blobOid, GIT_FILEMODE_BLOB), 0);
-        }
-
-        git_oid treeOid;
-        ASSERT_EQ(git_treebuilder_write(&treeOid, builder), 0);
-        git_treebuilder_free(builder);
-
-        git_tree * tree = nullptr;
-        ASSERT_EQ(git_tree_lookup(&tree, rawRepo, &treeOid), 0);
-
-        git_signature * sig = nullptr;
-        ASSERT_EQ(git_signature_now(&sig, "nix", "nix@example.com"), 0);
-        ASSERT_EQ(git_commit_create_v(&commitOid, rawRepo, "HEAD", sig, sig, nullptr, "initial commit", tree, 0), 0);
-        git_signature_free(sig);
-        git_tree_free(tree);
-    }
-
-    void TearDown() override
-    {
-        if (rawRepo)
-            git_repository_free(rawRepo);
-        GitUtilsTest::TearDown();
-    }
-};
+{};
 
 TEST_F(GitLfsTest, pointer_candidate_only_accepts_pointer_shaped_content)
 {
@@ -498,6 +531,96 @@ TEST_F(GitLfsTest, should_fetch_skips_the_attribute_lookup_for_non_pointer_conte
 
     // Pointer-shaped content that is not enrolled is still not smudged.
     ASSERT_FALSE(fetch.shouldFetch(CanonPath("plain"), lfsPointer));
+}
+
+// ============================================================================
+// export-ignore
+// ============================================================================
+
+class GitExportIgnoreTest : public GitUtilsTest
+{};
+
+/**
+ * Looking up a git attribute costs O(rules in all applicable `.gitattributes`)
+ * per path, so there has to be a cheap way to rule out `export-ignore` for a
+ * whole directory at once.
+ */
+TEST_F(GitExportIgnoreTest, may_export_ignore_reports_where_the_attribute_can_apply)
+{
+    commitFiles({
+        {".gitattributes", "*.png filter=lfs diff=lfs merge=lfs -text\n"},
+        {"a/.gitattributes", "# nothing to see here\n"},
+        {"a/file", "content"},
+        {"a/b/.gitattributes", "generated/ export-ignore\n"},
+        {"a/b/file", "content"},
+        {"c/.gitattributes", "[attr]internal export-ignore\n"},
+        {"c/file", "content"},
+    });
+
+    auto repo = openRepo();
+    auto commit = commitHash();
+
+    ASSERT_FALSE(repo->mayExportIgnore(commit, ""));
+    ASSERT_FALSE(repo->mayExportIgnore(commit, "a"));
+    // A rule in a subdirectory only applies below that subdirectory.
+    ASSERT_TRUE(repo->mayExportIgnore(commit, "a/b"));
+    // A macro definition counts too: it can assign `export-ignore` indirectly.
+    ASSERT_TRUE(repo->mayExportIgnore(commit, "c"));
+    ASSERT_FALSE(repo->mayExportIgnore(commit, "does/not/exist"));
+}
+
+TEST_F(GitExportIgnoreTest, may_export_ignore_sees_rules_in_the_root)
+{
+    commitFiles({
+        {".gitattributes", "dropped export-ignore\n"},
+        {"a/file", "content"},
+    });
+
+    auto repo = openRepo();
+
+    ASSERT_TRUE(repo->mayExportIgnore(commitHash(), ""));
+    ASSERT_TRUE(repo->mayExportIgnore(commitHash(), "a"));
+}
+
+TEST_F(GitExportIgnoreTest, a_rule_in_a_subdirectory_is_honoured)
+{
+    commitFiles({
+        {".gitattributes", "*.png filter=lfs -text\n"},
+        {"kept", "content"},
+        {"sub/.gitattributes", "dropped export-ignore\n"},
+        {"sub/dropped", "content"},
+        {"sub/kept", "content"},
+    });
+
+    auto repo = openRepo();
+    auto accessor = repo->getAccessor(commitHash(), {.exportIgnore = true}, "");
+
+    ASSERT_TRUE(accessor->pathExists(CanonPath("kept")));
+    ASSERT_TRUE(accessor->pathExists(CanonPath("sub/kept")));
+    ASSERT_FALSE(accessor->pathExists(CanonPath("sub/dropped")));
+}
+
+/**
+ * Zone accessors are rooted at a subtree, so the `.gitattributes` files that
+ * apply to them live above the accessor's root.
+ */
+TEST_F(GitExportIgnoreTest, a_rule_above_the_attr_path_prefix_is_honoured)
+{
+    commitFiles({
+        {".gitattributes", "dropped export-ignore\n"},
+        {"zone/dropped", "content"},
+        {"zone/kept", "content"},
+    });
+
+    auto repo = openRepo();
+    auto commit = commitHash();
+    auto zoneTree = repo->getSubtreeSha(repo->getCommitTree(commit), "zone");
+
+    auto accessor =
+        repo->getAccessor(zoneTree, {.exportIgnore = true, .attrCommitRev = commit, .attrPathPrefix = "zone"}, "");
+
+    ASSERT_TRUE(accessor->pathExists(CanonPath("kept")));
+    ASSERT_FALSE(accessor->pathExists(CanonPath("dropped")));
 }
 
 } // namespace nix

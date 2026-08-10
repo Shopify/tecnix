@@ -132,6 +132,23 @@ struct GitRepo
     /** Blob OIDs of .gitattributes at each directory from root to `path`. */
     virtual std::vector<Hash> getGitAttributesAlongPath(const Hash & commitSha, const std::string & path) = 0;
 
+    /**
+     * Whether any Git attribute source that applies to the entries of the
+     * repo-relative directory `path` mentions `export-ignore`: the
+     * `.gitattributes` files from the root tree down to `path` as of
+     * `commitSha`, plus `$GIT_DIR/info/attributes` and the global
+     * `core.attributesfile` (`GIT_ATTR_CHECK_NO_SYSTEM` only excludes the
+     * system-wide file).
+     *
+     * The test is deliberately conservative — it just looks for the literal
+     * attribute name, which every rule and macro that assigns it has to spell
+     * out — but a `false` result guarantees that no entry of `path` can be
+     * export-ignored. Since resolving an attribute costs O(number of rules in
+     * all applicable `.gitattributes`) per path, this lets callers skip the
+     * lookup for whole directories at a time.
+     */
+    virtual bool mayExportIgnore(const Hash & commitSha, const std::string & path) = 0;
+
     virtual ref<SourceAccessor>
     getAccessor(const Hash & rev, const GitAccessorOptions & options, std::string displayPrefix) = 0;
 
