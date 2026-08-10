@@ -5,7 +5,7 @@ on:
   merge_group:
   push:
     branches:
-      - tecnix-gcs
+      - main
   workflow_dispatch:
     inputs:
       catfood:
@@ -232,7 +232,7 @@ jobs:
     timeout-minutes: 60
     if: >-
       github.event_name == 'push' &&
-      github.ref_name == 'tecnix-gcs'
+      github.ref_name == 'main'
     steps:
     - uses: actions/checkout@v7
       with:
