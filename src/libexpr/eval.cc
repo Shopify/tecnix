@@ -8,6 +8,7 @@
 #include "nix/util/exit.hh"
 #include "nix/util/types.hh"
 #include "nix/util/util.hh"
+#include "nix/util/worldtree-client.hh"
 #include "nix/util/environment-variables.hh"
 #include "nix/store/store-api.hh"
 #include "nix/store/derivations.hh"
@@ -34,6 +35,7 @@
 #include "parser-tab.hh"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
@@ -43,6 +45,7 @@
 #include <optional>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/xattr.h>
 #include <fstream>
 #include <functional>
 #include <ranges>
@@ -534,8 +537,156 @@ static std::string sanitizeZoneNameForStore(std::string_view zonePath)
     return result;
 }
 
+// ============================================================================
+// Worldtree daemon integration (design §5.1 / §5.1a)
+//
+// When `tectonix-worldtree-socket` is set, mutable-checkout metadata moves off the
+// libgit2 repo+checkout walk and onto O(changes) RPCs against the bound workspace:
+//   * getTectonixDirtyZones() -> `dirty_zones`     — the tracked-dirty set;
+//   * getWorldTreeSha()       -> `zone_tree_shas`  — the working-tree subtree oid
+//       (the committed oid when clean, the synthesized frontier oid when dirty;
+//       the zone's build-cache key);
+//   * getZoneStorePath() reads source bytes from FUSE in both regimes: `root` for the
+//     mutable workspace and `tecnix/<sha>/<zone-id>` for immutable history.
+// Fail-loud contract: when the socket is SET, the daemon is the sole source of truth — a
+// worldtree sandbox has no git repo to fall back to. A daemon that is unreachable, or that
+// refuses/errors a request, is a hard failure (the error propagates), never a silent
+// downgrade. libgit2 / the checkout walk are reached ONLY when the socket is UNSET (plain
+// local, non-worldtree eval). Historical reads create no daemon connection.
+/** Reinterpret a 20-byte worldtree object id as a Nix SHA-1 Hash. */
+static Hash oidToHash(const worldtree::Oid & oid)
+{
+    Hash h(HashAlgorithm::SHA1);
+    assert(h.hashSize == oid.size());
+    std::memcpy(h.hash, oid.data(), oid.size());
+    return h;
+}
+
+/**
+ * The scoped socket is only the mutable root-checkout control plane. Historical
+ * committed source is ordinary filesystem input beneath
+ * /mnt/worldtree/tecnix/<sha>/<zone-id>.
+ */
+struct WorldtreeConn
+{
+    uint64_t ws;
+    std::mutex mutex;
+    worldtree::Client client;
+
+    WorldtreeConn(worldtree::Client && client, uint64_t ws)
+        : ws(ws)
+        , client(std::move(client))
+    {
+    }
+
+    /** The dirty set with each zone's changed files (for full ZoneDirtyInfo). */
+    std::vector<worldtree::ZoneDirty> dirtyZoneEntries()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return client.dirtyZoneEntries(ws);
+    }
+
+    /** One zone's working-tree subtree oid, or nullopt when absent or out of scope. */
+    std::optional<Hash> zoneTreeSha(std::string_view worldPath)
+    {
+        std::string wp = hasPrefix(worldPath, "//") ? std::string(worldPath) : "//" + std::string(worldPath);
+        std::lock_guard<std::mutex> lock(mutex);
+        auto resp = client.zoneTreeShas(ws, {wp});
+        if (resp.empty() || !resp.front().treeSha)
+            return std::nullopt;
+        return oidToHash(*resp.front().treeSha);
+    }
+};
+
+static constexpr std::string_view WORLDTREE_TREE_OID_XATTR = "user.worldtree.tree-oid";
+
+static std::filesystem::path worldtreeRevisionRoot(const EvalSettings & settings)
+{
+    auto revision = Hash::parseNonSRIUnprefixed(settings.tectonixGitSha.get(), HashAlgorithm::SHA1);
+    return std::filesystem::path(settings.tectonixWorldtreeMount.get()) / "tecnix" / revision.gitRev();
+}
+
+static std::string requireWorldtreeZoneId(const std::string & id)
+{
+    auto isLowerHex = [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); };
+    if (id.size() != 8 || !id.starts_with("W-") || !std::ranges::all_of(std::string_view(id).substr(2), isLowerHex))
+        throw Error("worldtree: invalid zone id '%s' in manifest", id);
+    return id;
+}
+
+/** Find the manifest zone containing worldPath and return (zone id, path within zone). */
+static std::pair<std::string, std::string>
+worldtreeZoneLocation(const nlohmann::json & manifest, std::string_view worldPath)
+{
+    auto clean = normalizeZonePath(worldPath);
+    while (!clean.empty() && clean.front() == '/')
+        clean.erase(clean.begin());
+    while (!clean.empty() && clean.back() == '/')
+        clean.pop_back();
+    for (auto & component : tokenizeString<std::vector<std::string>>(clean, "/"))
+        if (component.empty() || component == "." || component == "..")
+            throw Error("invalid world path '%s'", worldPath);
+
+    const nlohmann::json * best = nullptr;
+    std::string bestPath;
+    for (auto & [candidateWorldPath, value] : manifest.items()) {
+        auto candidate = normalizeZonePath(candidateWorldPath);
+        bool contains =
+            clean == candidate
+            || (clean.size() > candidate.size() && hasPrefix(clean, candidate) && clean[candidate.size()] == '/');
+        if (contains && candidate.size() > bestPath.size()) {
+            best = &value;
+            bestPath = std::move(candidate);
+        }
+    }
+    if (!best || !best->is_object() || !best->contains("id") || !best->at("id").is_string())
+        throw Error("worldtree: path '%s' is not contained by a visible World zone", worldPath);
+
+    auto id = requireWorldtreeZoneId(best->at("id").get<std::string>());
+    auto relative = clean.size() == bestPath.size() ? std::string() : clean.substr(bestPath.size() + 1);
+    return {std::move(id), std::move(relative)};
+}
+
+static Hash readWorldtreeTreeOid(const std::filesystem::path & path)
+{
+    std::array<char, 40> value{};
+#ifdef __APPLE__
+    auto size = ::getxattr(path.c_str(), WORLDTREE_TREE_OID_XATTR.data(), value.data(), value.size(), 0, 0);
+#else
+    auto size = ::getxattr(path.c_str(), WORLDTREE_TREE_OID_XATTR.data(), value.data(), value.size());
+#endif
+    if (size < 0)
+        throw Error("worldtree: cannot read tree identity for '%s': %s", path.string(), std::strerror(errno));
+    if (size != static_cast<ssize_t>(value.size()))
+        throw Error("worldtree: invalid tree identity on '%s'", path.string());
+    return Hash::parseNonSRIUnprefixed(std::string(value.data(), value.size()), HashAlgorithm::SHA1);
+}
+
 Hash EvalState::getWorldTreeSha(std::string_view worldPath) const
 {
+    // The mutable root checkout needs its synthesized working-tree oid from the control
+    // plane. A historical evaluation is already pinned by its FUSE path and reads the
+    // exact committed tree oid from that directory's synthetic xattr instead.
+    if (isTectonixSourceAvailable()) {
+        auto control = worldtreeControlConn();
+        if (!control)
+            goto local_git;
+        if (auto sha = control->zoneTreeSha(worldPath))
+            return *sha;
+        throw Error("worldtree: world path '%s' is absent or outside this workspace's visibility scope", worldPath);
+    }
+    if (!settings.tectonixWorldtreeSocket.get().empty()) {
+        auto revision = worldtreeRevisionRoot(settings);
+        if (normalizeZonePath(worldPath).empty())
+            return readWorldtreeTreeOid(revision);
+        auto [zoneId, relative] = worldtreeZoneLocation(getManifestJson(), worldPath);
+        auto path = revision / zoneId;
+        if (!relative.empty())
+            path /= relative;
+        return readWorldtreeTreeOid(path);
+    }
+
+local_git:
     auto path = normalizeZonePath(worldPath);
 
     // Check cache first
@@ -641,6 +792,51 @@ const std::set<std::string> & EvalState::getTectonixSparseCheckoutRoots() const
 const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDirtyZones() const
 {
     std::call_once(tectonixDirtyZonesFlag, [this]() {
+        // A historical FUSE view is immutable by construction. Preserve the usual full
+        // manifest-shaped result (every visible zone present and clean) without opening a
+        // control connection or manufacturing an ephemeral daemon workspace.
+        if (!isTectonixSourceAvailable() && !settings.tectonixWorldtreeSocket.get().empty()) {
+            for (auto & [zonePath, value] : getManifestJson().items())
+                if (value.is_object() && value.contains("id") && value.at("id").is_string())
+                    tectonixDirtyZones[zonePath] = {};
+            return;
+        }
+
+        // Worldtree mode: the daemon is authoritative for the tracked-dirty set (design
+        // §5.1), derived from the materialization frontier in O(changes) — no O(working-tree)
+        // `git status` scan. Reconstruct a *full* ZoneDirtyInfo so every consumer (notably
+        // the `__unsafeTectonixInternalDirtyZones` primop) sees every manifest zone with an
+        // accurate flag, matching the libgit2 path's shape:
+        //   (1) init every manifest zone clean — the immutable FUSE view supplies it in
+        //       historical mode and the checkout supplies it in mutable mode (see
+        //       getManifestContent); either way it enumerates the full visible zone set;
+        //   (2) overlay the daemon's per-zone dirty files for the bound mutable workspace.
+        if (auto control = worldtreeControlConn()) {
+            const nlohmann::json * manifest;
+            try {
+                manifest = &getManifestJson();
+            } catch (nlohmann::json::parse_error & e) {
+                warn("failed to parse manifest for dirty zone detection: %s", e.what());
+                return;
+            } catch (Error &) {
+                // Manifest unavailable (e.g. daemon refused) — fail loud rather than report a
+                // misleading empty/partial dirty set.
+                throw;
+            }
+            for (auto & [zonePath, value] : manifest->items())
+                if (value.is_object() && value.contains("id") && value.at("id").is_string())
+                    tectonixDirtyZones[zonePath] = {};
+            for (auto & entry : control->dirtyZoneEntries()) {
+                // A dirty zone the daemon names but the manifest omits still surfaces (a zone
+                // added in this workspace) — insert-or-update keeps the two sources unioned.
+                auto & info = tectonixDirtyZones[entry.zone];
+                info.dirty = true;
+                for (auto & f : entry.files)
+                    info.dirtyFiles.insert(f);
+            }
+            return;
+        }
+
         if (!isTectonixSourceAvailable())
             return;
 
@@ -763,6 +959,14 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
 // Path to the tectonix manifest file within the world repository
 static constexpr std::string_view TECTONIX_MANIFEST_PATH = "/.meta/manifest.json";
 
+[[noreturn]] static void throwHistoricalWorldManifestError(const EvalSettings & settings, std::string_view detail)
+{
+    throw Error(
+        "worldtree: historical World manifest '.meta/manifest.json' for commit '%s' is missing or malformed: %s",
+        settings.tectonixGitSha.get(),
+        detail);
+}
+
 const std::string & EvalState::getManifestContent() const
 {
     // Cached for the lifetime of evaluation. This is intentional: evaluation is
@@ -771,7 +975,9 @@ const std::string & EvalState::getManifestContent() const
     std::call_once(tectonixManifestFlag, [this]() {
         auto fullPath = CanonPath(TECTONIX_MANIFEST_PATH);
 
-        // In source-available mode, check checkout first
+        // Mode A (`tec <cmd>`, materialized checkout): the working tree is the source of
+        // truth and may carry uncommitted manifest edits (a zone added/removed in this
+        // sandbox), so read the local file — never a stale committed copy.
         if (isTectonixSourceAvailable()) {
             auto manifestPath = std::filesystem::path(settings.tectonixCheckoutPath.get()) / ".meta" / "manifest.json";
             if (std::filesystem::exists(manifestPath)) {
@@ -781,7 +987,24 @@ const std::string & EvalState::getManifestContent() const
             }
         }
 
-        // Fall back to git
+        // Mode B (`tec --ref`, no checkout): manifest metadata is an ordinary immutable
+        // file in the FUSE projection. W-000000 is the reserved manifest pseudo-zone; it
+        // follows the same workspace visibility as the root checkout and needs no socket.
+        if (!settings.tectonixWorldtreeSocket.get().empty()) {
+            auto manifestPath = worldtreeRevisionRoot(settings) / "W-000000" / "manifest.json";
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(manifestPath, ec))
+                throwHistoricalWorldManifestError(settings, ec ? ec.message() : "file does not exist");
+            try {
+                tectonixManifestContent = readFile(manifestPath);
+            } catch (const Error & e) {
+                throwHistoricalWorldManifestError(settings, e.what());
+            }
+            debug("loaded manifest from immutable worldtree view: %s", manifestPath.string());
+            return;
+        }
+
+        // Socket unset (plain local eval): read the committed manifest via libgit2.
         auto accessor = getWorldGitAccessor();
         if (!accessor->pathExists(fullPath))
             throw Error("manifest.json does not exist at %s in world", TECTONIX_MANIFEST_PATH);
@@ -795,13 +1018,49 @@ const std::string & EvalState::getManifestContent() const
 const nlohmann::json & EvalState::getManifestJson() const
 {
     std::call_once(tectonixManifestJsonFlag, [this]() {
-        tectonixManifestJson = std::make_unique<nlohmann::json>(nlohmann::json::parse(getManifestContent()));
+        try {
+            tectonixManifestJson = std::make_unique<nlohmann::json>(nlohmann::json::parse(getManifestContent()));
+        } catch (const nlohmann::json::parse_error & e) {
+            if (!settings.tectonixWorldtreeSocket.get().empty() && !isTectonixSourceAvailable())
+                throwHistoricalWorldManifestError(settings, e.what());
+            throw;
+        }
     });
     return *tectonixManifestJson;
 }
 
 StorePath EvalState::getZoneStorePath(std::string_view zonePath)
 {
+    // A worldtree sandbox has two source regimes but only one filesystem accessor:
+    // the mutable root checkout path for ordinary evaluation, or the immutable
+    // commit/zone path for --ref. Only the former needs control RPCs for its dirty
+    // frontier identity.
+    if (!settings.tectonixWorldtreeSocket.get().empty()) {
+        if (isTectonixSourceAvailable()) {
+            auto control = worldtreeControlConn();
+            if (!control)
+                throw Error("worldtree: mutable checkout has no control connection");
+            auto treeSha = control->zoneTreeSha(zonePath);
+            if (!treeSha)
+                throw Error("worldtree: zone '%s' is absent or outside this workspace's visibility scope", zonePath);
+            auto fullPath = std::filesystem::path(settings.tectonixCheckoutPath.get()) / normalizeZonePath(zonePath);
+            if (!std::filesystem::is_directory(fullPath))
+                throw Error("worldtree: zone '%s' is not materialized at '%s'", zonePath, fullPath.string());
+            return worldtreeMountAccessor(*treeSha, zonePath, makeFSSourceAccessor(fullPath));
+        }
+
+        auto manifestIt = getManifestJson().find(std::string(zonePath));
+        if (manifestIt == getManifestJson().end() || !manifestIt->is_object() || !manifestIt->contains("id")
+            || !manifestIt->at("id").is_string())
+            throw Error("worldtree: zone '%s' is absent from the visible manifest", zonePath);
+        auto zoneId = requireWorldtreeZoneId(manifestIt->at("id").get<std::string>());
+        auto fullPath = worldtreeRevisionRoot(settings) / zoneId;
+        if (!std::filesystem::is_directory(fullPath))
+            throw Error("worldtree: immutable zone '%s' is unavailable at '%s'", zonePath, fullPath.string());
+        auto treeSha = readWorldtreeTreeOid(fullPath);
+        return worldtreeMountAccessor(treeSha, zonePath, makeFSSourceAccessor(fullPath));
+    }
+
     // Check dirty status using original zonePath (with // prefix) since
     // tectonixDirtyZones keys come directly from manifest with // prefix
     const ZoneDirtyInfo * dirtyInfo = nullptr;
@@ -894,6 +1153,69 @@ StorePath EvalState::mountZoneByTreeSha(const Hash & treeSha, std::string_view z
     cache->emplace(treeSha, storePath);
 
     debug("mounted zone %s (tree %s) at %s", zonePath, treeSha.gitRev(), store->printStorePath(storePath));
+
+    return storePath;
+}
+
+std::shared_ptr<WorldtreeConn> EvalState::connectWorldtree() const
+{
+    auto socketPath = settings.tectonixWorldtreeSocket.get();
+    // The socket being unset is the *only* non-worldtree signal — plain local eval, where
+    // libgit2 is the source. Returning nullptr here routes callers to that path.
+    if (socketPath.empty())
+        return nullptr;
+    // Fail-loud (the load-bearing invariant): with the socket SET there is no git repo to
+    // fall back to, so an unreachable daemon is a hard error — let `Client::connect`'s
+    // `ProtocolError` propagate rather than silently degrading to libgit2 (which would read
+    // the wrong content, or none).
+    auto ws = settings.tectonixWorldtreeWorkspace.get();
+    return std::make_shared<WorldtreeConn>(worldtree::Client::connect(socketPath), ws);
+}
+
+std::shared_ptr<WorldtreeConn> EvalState::worldtreeControlConn() const
+{
+    // Historical --ref evaluations are filesystem-only. Returning null here is not a
+    // libgit2 fallback: their callers branch on worldtree mode before consulting this
+    // control seam.
+    if (!isTectonixSourceAvailable())
+        return nullptr;
+    std::call_once(worldtreeControlConnFlag, [this]() { worldtreeControlConn_ = connectWorldtree(); });
+    return worldtreeControlConn_;
+}
+
+StorePath
+EvalState::worldtreeMountAccessor(const Hash & treeSha, std::string_view zonePath, ref<SourceAccessor> accessor)
+{
+    std::string name = "zone-" + sanitizeZoneNameForStore(zonePath);
+
+    if (!settings.lazyTrees) {
+        // Eager: copy the zone content into the store now (content-addressed by content).
+        auto storePath =
+            fetchToStore(fetchSettings, *store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
+        allowPath(storePath);
+        return storePath;
+    }
+
+    // Lazy-trees: mount at a virtual store path, deduplicated by the daemon's working-tree
+    // oid so a zone evaluated twice in one EvalState mounts once (same shape as
+    // mountZoneByTreeSha — the two share tectonixZoneCache_'s tree-oid keyspace).
+    {
+        auto cache = tectonixZoneCache_.readLock();
+        if (auto it = cache->find(treeSha); it != cache->end())
+            return it->second;
+    }
+
+    auto storePath = StorePath::random(name);
+
+    auto cache = tectonixZoneCache_.lock();
+    if (auto it = cache->find(treeSha); it != cache->end())
+        return it->second;
+
+    storeFS->mount(CanonPath(store->printStorePath(storePath)), accessor);
+    allowPath(storePath);
+    cache->emplace(treeSha, storePath);
+
+    debug("worldtree: mounted zone %s (tree %s) at %s", zonePath, treeSha.gitRev(), store->printStorePath(storePath));
 
     return storePath;
 }

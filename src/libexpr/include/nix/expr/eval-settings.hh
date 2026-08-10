@@ -543,6 +543,55 @@ struct EvalSettings : Config
           for tectonix builtins. This enables local development workflows where changes
           are visible before committing.
         )"};
+
+    Setting<std::string> tectonixWorldtreeSocket{
+        this,
+        "",
+        "tectonix-worldtree-socket",
+        R"(
+          Path to a worldtree daemon (`worldtreed`) control socket.
+
+          When set, the tectonix builtins read mutable checkout metadata from the daemon
+          instead of walking the git repository with libgit2: working tree shas and the
+          dirty-zone set are O(changes) RPCs against the workspace named by
+          `tectonix-worldtree-workspace`. Source bytes are read from the worldtree FUSE
+          projection: the current checkout path or the immutable historical path beneath
+          `tectonix-worldtree-mount`.
+          This replaces the two libgit2 couplings — the per-zone tree-sha walk and the
+          O(working-tree) `git status` dirty scan — that dominate evaluation in a large
+          checkout.
+
+          Empty (the default) keeps the libgit2 path. When set, a mutable checkout has no
+          git fallback: an unreachable daemon, or one that refuses a control request, is a
+          hard failure. Historical evaluation does not connect to the socket; a missing or
+          invalid immutable FUSE path is likewise a hard failure. Set this only where
+          worldtree is actually serving the source.
+        )"};
+
+    Setting<uint64_t> tectonixWorldtreeWorkspace{
+        this,
+        0,
+        "tectonix-worldtree-workspace",
+        R"(
+          The worldtree workspace id to read when `tectonix-worldtree-socket` is set.
+
+          A worldtree daemon hosts many workspaces; this selects which one backs this
+          evaluation. Ignored when `tectonix-worldtree-socket` is empty.
+        )"};
+
+    Setting<std::string> tectonixWorldtreeMount{
+        this,
+        "/mnt/worldtree",
+        "tectonix-worldtree-mount",
+        R"(
+          Root of the worldtree workspace projection inside a sandbox. Historical,
+          immutable zone views live at `tecnix/<commit-sha>/<zone-id>` beneath this
+          directory; the current mutable checkout lives at `root`.
+
+          This setting is consulted only when `tectonix-worldtree-socket` is set. The
+          socket remains the control plane for the mutable root checkout; committed
+          Tecnix source bytes and manifest metadata are read directly from this filesystem.
+        )"};
 };
 
 /**

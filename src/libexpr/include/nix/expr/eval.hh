@@ -29,8 +29,10 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 #include <set>
 #include <functional>
 
@@ -52,6 +54,9 @@ struct Input;
 } // namespace fetchers
 struct EvalSettings;
 class EvalState;
+/** A connection to a worldtree daemon, defined in eval.cc (it owns the C++ worldtree
+ *  client). Held by pointer here so the worldtree client header stays out of eval.hh. */
+struct WorldtreeConn;
 class StorePath;
 struct SingleDerivedPath;
 enum RepairFlag : bool;
@@ -544,10 +549,46 @@ private:
     mutable SharedSync<std::map<std::string, StorePath>> tectonixCheckoutZoneCache_;
 
     /**
+     * Lazily-connected worldtree daemon control connection (zone tree shas + the dirty
+     * set), or null when the socket is unset or the evaluation targets an immutable
+     * historical FUSE view rather than the mutable root checkout.
+     * With the socket set an unreachable daemon THROWS rather than yielding null — there
+     * is no null-on-unreachable and no libgit2 fallback (fail-loud; see the
+     * `tectonix-worldtree-socket` setting doc). Connected at most once; thread-safe via
+     * once_flag.
+     */
+    mutable std::once_flag worldtreeControlConnFlag;
+    mutable std::shared_ptr<WorldtreeConn> worldtreeControlConn_;
+
+    /**
      * Mount a zone by tree SHA, returning a (potentially virtual) store path.
      * Caches by tree SHA for deduplication across world revisions.
      */
     StorePath mountZoneByTreeSha(const Hash & treeSha, std::string_view zonePath);
+
+    /**
+     * The mutable root-checkout control connection. Historical evaluations use the
+     * immutable FUSE projection and deliberately return null here without falling back
+     * to libgit2. A configured socket that is needed for a mutable checkout still fails
+     * loud when unreachable.
+     */
+    std::shared_ptr<WorldtreeConn> worldtreeControlConn() const;
+
+    /**
+     * Open a fresh connection to the configured worldtree socket + workspace for the
+     * mutable root checkout. Returns null when the socket is unset; a configured socket
+     * failure propagates.
+     */
+    std::shared_ptr<WorldtreeConn> connectWorldtree() const;
+
+    /**
+     * Devirtualization tail shared by both worldtree source paths (own-workspace root
+     * and immutable historical FUSE view): copy `accessor` to the store (eager) or mount
+     * it at a virtual store path (lazy-trees), deduplicating by the zone's `treeSha`
+     * (the daemon's working-tree oid — committed when clean, synthesized when dirty).
+     * The caller picks `accessor`; this owns the store-path identity and cache.
+     */
+    StorePath worldtreeMountAccessor(const Hash & treeSha, std::string_view zonePath, ref<SourceAccessor> accessor);
 
     /**
      * Get zone store path from checkout (for dirty zones).
