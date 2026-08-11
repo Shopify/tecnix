@@ -747,44 +747,18 @@ local_git:
     return currentSha;
 }
 
+// DEPRECATED: derived compatibility shim. The sparse-checkout-roots file is
+// gone; this now returns the zone IDs corresponding to getTectonixDirtyZones()
+// keys. Remove once consumers migrate to __unsafeTectonixInternalDirtyZones.
 const std::set<std::string> & EvalState::getTectonixSparseCheckoutRoots() const
 {
     std::call_once(tectonixSparseCheckoutRootsFlag, [this]() {
-        if (isTectonixSourceAvailable()) {
-            auto checkoutPath = settings.tectonixCheckoutPath.get();
-
-            // Read .git to find the actual git directory
-            // It can be either a directory or a file containing "gitdir: <path>"
-            auto dotGitPath = std::filesystem::path(checkoutPath) / ".git";
-            std::filesystem::path gitDir;
-
-            if (std::filesystem::is_directory(dotGitPath)) {
-                gitDir = dotGitPath;
-            } else if (std::filesystem::is_regular_file(dotGitPath)) {
-                auto gitdirContent = readFile(dotGitPath.string());
-                // Parse "gitdir: <path>\n"
-                if (hasPrefix(gitdirContent, "gitdir: ")) {
-                    auto path = trim(gitdirContent.substr(8));
-                    gitDir = std::filesystem::path(path);
-                    // Handle relative paths
-                    if (gitDir.is_relative())
-                        gitDir = std::filesystem::path(checkoutPath) / gitDir;
-                }
-            }
-
-            if (!gitDir.empty()) {
-                // Read sparse-checkout-roots
-                auto sparseRootsPath = gitDir / "info" / "sparse-checkout-roots";
-                if (std::filesystem::exists(sparseRootsPath)) {
-                    auto content = readFile(sparseRootsPath.string());
-                    for (auto & line : tokenizeString<std::vector<std::string>>(content, "\n")) {
-                        auto trimmed = trim(line);
-                        if (!trimmed.empty())
-                            tectonixSparseCheckoutRoots.insert(std::string(trimmed));
-                    }
-                }
-            }
-        }
+        auto & dirtyZones = getTectonixDirtyZones();
+        if (dirtyZones.empty())
+            return;
+        auto & manifest = getManifestJson();
+        for (auto & [zonePath, _] : dirtyZones)
+            tectonixSparseCheckoutRoots.insert(manifest.at(zonePath).at("id").get<std::string>());
     });
     return tectonixSparseCheckoutRoots;
 }
@@ -840,11 +814,6 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
         if (!isTectonixSourceAvailable())
             return;
 
-        // Get sparse checkout roots (zone IDs)
-        auto & sparseRoots = getTectonixSparseCheckoutRoots();
-        if (sparseRoots.empty())
-            return;
-
         // Get manifest (uses cached parsed JSON)
         const nlohmann::json * manifest;
         try {
@@ -857,21 +826,13 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & EvalState::getTectonixDi
             return;
         }
 
-        // Build map of zone ID -> zone path for sparse roots only
-        std::map<std::string, std::string> zoneIdToPath;
+        // Initialize every manifest zone as not dirty; git status below flips matches.
         for (auto & [path, value] : manifest->items()) {
             if (!value.contains("id") || !value.at("id").is_string()) {
                 warn("zone '%s' in manifest has missing or non-string 'id' field", path);
                 continue;
             }
-            auto & id = value.at("id").get_ref<const std::string &>();
-            if (sparseRoots.count(id))
-                zoneIdToPath[id] = path;
-        }
-
-        // Initialize all sparse-checked-out zones as not dirty
-        for (auto & [zoneId, zonePath] : zoneIdToPath) {
-            tectonixDirtyZones[zonePath] = {};
+            tectonixDirtyZones[path] = {};
         }
 
         // Create git command environment with environment variables

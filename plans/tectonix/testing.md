@@ -195,26 +195,28 @@ protected:
 | Invalid JSON | `getManifestJson` throws parse error |
 | Caching | Multiple calls return same instance |
 
-### 3.6 `getTectonixSparseCheckoutRoots` Tests
+### 3.6 `getTectonixSparseCheckoutRoots` Tests (deprecated shim)
+
+Now derived from `getTectonixDirtyZones()`; returns the zone IDs corresponding
+to dirtyZones' keys. Phase out as consumers migrate.
 
 | Test Case | Behavior |
 |-----------|----------|
-| File exists with zone IDs | Returns set of IDs |
-| File missing | Returns empty set |
-| Worktree `.git` file | Correctly follows gitdir reference |
-| Empty file | Returns empty set |
-| File with blank lines | Ignores blank lines |
+| Checkout configured | Returns IDs for every manifest zone |
+| No checkout configured | Returns empty set |
+| Manifest entry missing `id` | Warns and omits that entry |
+| Manifest unparseable | Warns and returns empty set |
 
 ### 3.7 `getTectonixDirtyZones` Tests
 
 | Test Case | Behavior |
 |-----------|----------|
-| No dirty files | All zones marked clean |
+| No dirty files | All manifest zones marked clean |
 | Modified file in zone | Zone marked dirty |
 | New untracked file | Zone marked dirty |
 | Deleted file | Zone marked dirty |
 | Renamed file | Both source and dest zones marked dirty |
-| File outside sparse checkout | Ignored |
+| File outside any manifest zone | Ignored |
 | Git status fails | Warning logged, zones treated as clean |
 
 ### 3.8 `getZoneStorePath` Tests
@@ -408,13 +410,18 @@ TEST_F(TectonixTest, zone_outPath_has_context)
 }
 ```
 
-### 4.7 `__unsafeTectonixInternalSparseCheckoutRoots`
+### 4.7 `__unsafeTectonixInternalSparseCheckoutRoots` (deprecated shim)
+
+Derived from `__unsafeTectonixInternalDirtyZones`; returns the zone IDs of
+every manifest zone in source-available mode. Kept only for back-compat.
 
 ```cpp
 TEST_F(TectonixTest, sparseCheckoutRoots_returns_list)
 {
     auto v = eval("builtins.__unsafeTectonixInternalSparseCheckoutRoots");
-    ASSERT_THAT(v, IsList());
+    // Fixture has 3 manifest zones; with a checkout configured the shim
+    // returns all 3 IDs.
+    ASSERT_THAT(v, IsListOfSize(3));
 }
 
 TEST_F(TectonixTest, sparseCheckoutRoots_empty_without_checkout)

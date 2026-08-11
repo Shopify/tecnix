@@ -266,10 +266,8 @@ static RegisterPrimOp primop_unsafeTectonixInternalSparseCheckoutRoots({
     .name = "__unsafeTectonixInternalSparseCheckoutRoots",
     .args = {},
     .doc = R"(
-      Get the list of zone IDs that are in the sparse checkout.
-
-      Returns an empty list if not in source-available mode or if no
-      sparse-checkout-roots file exists.
+      DEPRECATED: use `__unsafeTectonixInternalDirtyZones` directly. Returns
+      the zone IDs corresponding to its keys.
 
       Example: `builtins.unsafeTectonixInternalSparseCheckoutRoots` returns `["W-000000" "W-1337af" ...]`.
 
@@ -297,12 +295,13 @@ static RegisterPrimOp primop_unsafeTectonixInternalDirtyZones({
     .name = "__unsafeTectonixInternalDirtyZones",
     .args = {},
     .doc = R"(
-      Get the dirty status of zones in the sparse checkout.
+      Get the dirty status of zones in the configured checkout.
 
       Returns an attrset mapping zone paths to booleans indicating whether
       the zone has uncommitted changes.
 
-      Only includes zones that are in the sparse checkout.
+      Includes every zone in the manifest in source-available mode;
+      otherwise returns an empty attrset.
 
       Example: `builtins.unsafeTectonixInternalDirtyZones."//areas/tools/dev"` returns `true` or `false`.
 

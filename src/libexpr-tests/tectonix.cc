@@ -464,10 +464,12 @@ TEST_F(TectonixTest, zoneIsDirty_returns_false)
 
 TEST_F(TectonixTest, sparseCheckoutRoots_returns_list)
 {
-    auto ctx = createTectonixContext();
+    auto ctx = createTectonixContext(true); // with checkout
     auto v = ctx->eval("builtins.unsafeTectonixInternalSparseCheckoutRoots");
 
-    ASSERT_THAT(v, IsList());
+    // Fixture has 3 manifest zones; with a checkout configured, the
+    // deprecated shim returns the IDs of every dirtyZones key (full manifest).
+    ASSERT_THAT(v, IsListOfSize(3));
 }
 
 TEST_F(TectonixTest, sparseCheckoutRoots_empty_without_checkout)
@@ -487,7 +489,11 @@ TEST_F(TectonixTest, dirtyZones_returns_attrset)
     auto ctx = createTectonixContext(true); // with checkout
     auto v = ctx->eval("builtins.unsafeTectonixInternalDirtyZones");
 
-    ASSERT_THAT(v, IsAttrs());
+    // All 3 manifest zones present, all initially clean.
+    ASSERT_THAT(v, IsAttrsOfSize(3));
+    ASSERT_THAT(ctx->eval(R"(builtins.unsafeTectonixInternalDirtyZones."//areas/tools/dev")"), IsFalse());
+    ASSERT_THAT(ctx->eval(R"(builtins.unsafeTectonixInternalDirtyZones."//areas/tools/tec")"), IsFalse());
+    ASSERT_THAT(ctx->eval(R"(builtins.unsafeTectonixInternalDirtyZones."//areas/platform/core")"), IsFalse());
 }
 
 TEST_F(TectonixTest, dirtyZones_empty_without_checkout)
