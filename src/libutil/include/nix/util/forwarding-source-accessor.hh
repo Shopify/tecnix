@@ -43,6 +43,27 @@ struct ForwardingSourceAccessor : SourceAccessor
         return next->showPath(path);
     }
 
+    bool tracksEvalAccesses(const CanonPath & path) override
+    {
+        return next->tracksEvalAccesses(path);
+    }
+
+    /**
+     * A forwarding accessor presents `next`'s content verbatim, so its path
+     * fingerprints (and any access recording done by computing them) forward
+     * too. Accessors that change the presented content must not derive from
+     * this class.
+     */
+    std::pair<CanonPath, std::optional<std::string>> getFingerprint(const CanonPath & path) override
+    {
+        return next->getFingerprint(path);
+    }
+
+    void recordEvalAccess(const CanonPath & path) override
+    {
+        next->recordEvalAccess(path);
+    }
+
     std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override
     {
         return next->getPhysicalPath(path);

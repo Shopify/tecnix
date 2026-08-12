@@ -50,6 +50,12 @@ struct GitAccessorOptions
     std::string makeFingerprint(const Hash & rev) const;
 };
 
+struct GitPathInfo
+{
+    Hash oid;
+    uint32_t mode;
+};
+
 struct GitRepo
 {
     virtual ~GitRepo() {}
@@ -125,6 +131,9 @@ struct GitRepo
 
     /** Get the SHA of a subtree entry within a tree object */
     virtual Hash getSubtreeSha(const Hash & treeSha, const std::string & entryName) = 0;
+
+    /** Get the SHA and git file mode of any entry by full relative path within a tree. */
+    virtual std::optional<GitPathInfo> getPathInfo(const Hash & treeSha, const std::string & relPath) = 0;
 
     /** Get the root tree SHA from a commit SHA */
     virtual Hash getCommitTree(const Hash & commitSha) = 0;

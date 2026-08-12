@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <string_view>
 
 #include "nix/util/error.hh"
 
@@ -140,6 +141,7 @@ struct SQLiteStmt
         bool next();
 
         std::string getStr(int col);
+        std::string_view getBlob(int col);
         int64_t getInt(int col);
         bool isNull(int col);
     };

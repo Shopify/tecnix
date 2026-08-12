@@ -7,6 +7,7 @@
 #include "nix/util/types.hh"
 #include "nix/expr/value.hh"
 #include "nix/expr/root-value.hh"
+#include "nix/expr/tecnix/source-deps.hh"
 #include "nix/expr/nixexpr.hh"
 #include "nix/expr/symbol-table.hh"
 #include "nix/util/configuration.hh"
@@ -17,6 +18,7 @@
 #include "nix/expr/search-path.hh"
 #include "nix/expr/repl-exit-status.hh"
 #include "nix/util/ref.hh"
+#include "nix/util/finally.hh"
 #include "nix/expr/counter.hh"
 
 // For `NIX_USE_BOEHMGC`, and if that's set, `GC_THREADS`
@@ -28,13 +30,17 @@
 
 #include <nlohmann/json_fwd.hpp>
 
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <vector>
 #include <set>
+#include <span>
 #include <functional>
+#include <vector>
 
 namespace nix {
 
@@ -54,8 +60,9 @@ struct Input;
 } // namespace fetchers
 struct EvalSettings;
 class EvalState;
-/** A connection to a worldtree daemon, defined in eval.cc (it owns the C++ worldtree
- *  client). Held by pointer here so the worldtree client header stays out of eval.hh. */
+/** A connection to a worldtree daemon, defined with the Tecnix source accessors
+ *  (it owns the C++ worldtree client). Held by pointer here so the worldtree
+ *  client header stays out of eval.hh. */
 struct WorldtreeConn;
 class StorePath;
 struct SingleDerivedPath;
@@ -236,9 +243,10 @@ struct StaticEvalSymbols
 {
     Symbol with, outPath, drvPath, type, meta, name, value, system, overrides, outputs, outputName, ignoreNulls, file,
         line, column, functor, toString, right, wrong, structuredAttrs, json, allowedReferences, allowedRequisites,
-        disallowedReferences, disallowedRequisites, maxSize, maxClosureSize, builder, args, contentAddressed, impure,
-        outputHash, outputHashAlgo, outputHashMode, recurseForDerivations, description, self, epsilon, startSet,
-        operator_, key, path, prefix, outputSpecified, __meta;
+        disallowedReferences, disallowedRequisites, maxSize, maxClosureSize, builder, args, gitDir, resolver, rev,
+        checkoutPath, targets, contentAddressed, impure, outputHash, outputHashAlgo, outputHashMode,
+        recurseForDerivations, description, self, epsilon, startSet, operator_, key, path, prefix, outputSpecified,
+        __meta;
 
     Expr::AstSymbols exprSymbols;
 
@@ -276,6 +284,11 @@ struct StaticEvalSymbols
             .maxClosureSize = alloc.create("maxClosureSize"),
             .builder = alloc.create("builder"),
             .args = alloc.create("args"),
+            .gitDir = alloc.create("gitDir"),
+            .resolver = alloc.create("resolver"),
+            .rev = alloc.create("rev"),
+            .checkoutPath = alloc.create("checkoutPath"),
+            .targets = alloc.create("targets"),
             .contentAddressed = alloc.create("__contentAddressed"),
             .impure = alloc.create("__impure"),
             .outputHash = alloc.create("outputHash"),
@@ -472,13 +485,15 @@ public:
      */
     std::map<const Hash, ref<eval_cache::EvalCache>> evalCaches;
 
-private:
+    struct ZoneDirtyInfo
+    {
+        bool dirty = false;
+        boost::unordered_flat_set<std::string> dirtyFiles;
+    };
 
-    /**
-     * A cache that maps paths to "resolved" paths for importing Nix
-     * expressions, i.e. `/foo` to `/foo/default.nix`.
-     */
-    const ref<boost::concurrent_flat_map<SourcePath, SourcePath>> importResolutionCache;
+    struct TecnixEvalData;
+
+private:
 
     /**
      * A cache from resolved paths to values.
@@ -501,108 +516,9 @@ private:
      */
     const ref<RegexCache> regexCache;
 
-    /** Lazy-initialized git repository for world builtins (thread-safe via once_flag) */
-    mutable std::once_flag worldRepoFlag;
-    mutable std::optional<ref<GitRepo>> worldRepo;
-
-    /** Lazy-initialized source accessor for world git content (thread-safe via once_flag) */
-    mutable std::once_flag worldGitAccessorFlag;
-    mutable std::optional<ref<SourceAccessor>> worldGitAccessor;
-
-    /** Cache: world path → tree SHA (lazy computed, cached at each path level) */
-    const ref<boost::concurrent_flat_map<std::string, Hash>> worldTreeShaCache;
-
-    /** Lazy-initialized set of zone IDs in sparse checkout (thread-safe via once_flag) */
-    mutable std::once_flag tectonixSparseCheckoutRootsFlag;
-    mutable std::set<std::string> tectonixSparseCheckoutRoots;
-
-    /** Per-zone dirty status: whether the zone is dirty, and if so, which
-     *  repo-relative file paths are dirty (from git status). */
-    struct ZoneDirtyInfo
-    {
-        bool dirty = false;
-        boost::unordered_flat_set<std::string> dirtyFiles; // repo-relative paths
-    };
-
-    /** Lazy-initialized map of zone path → dirty info (thread-safe via once_flag) */
-    mutable std::once_flag tectonixDirtyZonesFlag;
-    mutable std::map<std::string, ZoneDirtyInfo> tectonixDirtyZones;
-
-    /** Cached manifest content (thread-safe via once_flag) */
-    mutable std::once_flag tectonixManifestFlag;
-    mutable std::string tectonixManifestContent;
-
-    /** Cached parsed manifest JSON (thread-safe via once_flag) */
-    mutable std::once_flag tectonixManifestJsonFlag;
-    mutable std::unique_ptr<nlohmann::json> tectonixManifestJson;
-
-    /**
-     * Cache tree SHA → virtual store path for lazy zone mounts.
-     * Thread-safe for eval-cores > 1.
-     */
-    mutable SharedSync<std::map<Hash, StorePath>> tectonixZoneCache_;
-
-    /**
-     * Cache zone path → virtual store path for lazy checkout zone mounts.
-     * Thread-safe for eval-cores > 1.
-     */
-    mutable SharedSync<std::map<std::string, StorePath>> tectonixCheckoutZoneCache_;
-
-    /**
-     * Lazily-connected worldtree daemon control connection (zone tree shas + the dirty
-     * set), or null when the socket is unset or the evaluation targets an immutable
-     * historical FUSE view rather than the mutable root checkout.
-     * With the socket set an unreachable daemon THROWS rather than yielding null — there
-     * is no null-on-unreachable and no libgit2 fallback (fail-loud; see the
-     * `tectonix-worldtree-socket` setting doc). Connected at most once; thread-safe via
-     * once_flag.
-     */
-    mutable std::once_flag worldtreeControlConnFlag;
-    mutable std::shared_ptr<WorldtreeConn> worldtreeControlConn_;
-
-    /**
-     * Mount a zone by tree SHA, returning a (potentially virtual) store path.
-     * Caches by tree SHA for deduplication across world revisions.
-     */
-    StorePath mountZoneByTreeSha(const Hash & treeSha, std::string_view zonePath);
-
-    /**
-     * The mutable root-checkout control connection. Historical evaluations use the
-     * immutable FUSE projection and deliberately return null here without falling back
-     * to libgit2. A configured socket that is needed for a mutable checkout still fails
-     * loud when unreachable.
-     */
-    std::shared_ptr<WorldtreeConn> worldtreeControlConn() const;
-
-    /**
-     * Open a fresh connection to the configured worldtree socket + workspace for the
-     * mutable root checkout. Returns null when the socket is unset; a configured socket
-     * failure propagates.
-     */
-    std::shared_ptr<WorldtreeConn> connectWorldtree() const;
-
-    /**
-     * Devirtualization tail shared by both worldtree source paths (own-workspace root
-     * and immutable historical FUSE view): copy `accessor` to the store (eager) or mount
-     * it at a virtual store path (lazy-trees), deduplicating by the zone's `treeSha`
-     * (the daemon's working-tree oid — committed when clean, synthesized when dirty).
-     * The caller picks `accessor`; this owns the store-path identity and cache.
-     */
-    StorePath worldtreeMountAccessor(const Hash & treeSha, std::string_view zonePath, ref<SourceAccessor> accessor);
-
-    /**
-     * Get zone store path from checkout (for dirty zones).
-     * With lazy-trees enabled, mounts lazily and caches by zone path.
-     */
-    StorePath
-    getZoneFromCheckout(std::string_view zonePath, const boost::unordered_flat_set<std::string> * dirtyFiles = nullptr);
+    const std::unique_ptr<TecnixEvalData> tecnixData;
 
 public:
-
-    /**
-     * Return the configured tectonix git SHA, or throw if unset.
-     */
-    const std::string & requireTectonixGitSha() const;
 
     /**
      * @param lookupPath     Only used during construction.
@@ -633,48 +549,8 @@ public:
         return lookupPath;
     }
 
-    /** Get the world git repository, initializing lazily */
-    ref<GitRepo> getWorldRepo() const;
-
-    /**
-     * Get accessor for world git content at worldSha.
-     *
-     * exportIgnore policy for tectonix accessors:
-     * - World accessor (getWorldGitAccessor): exportIgnore=false
-     *   Used for path validation and tree SHA computation; needs to see all files
-     * - Zone accessors (mountZoneByTreeSha, getZoneStorePath): exportIgnore=true
-     *   Used for actual zone content; honors .gitattributes for filtered output
-     * - Raw tree accessor (__unsafeTectonixInternalTree): exportIgnore=false
-     *   Low-level access by SHA; provides unfiltered content
-     */
-    ref<SourceAccessor> getWorldGitAccessor() const;
-
-    /** Get tree SHA for a world path, with lazy caching */
-    Hash getWorldTreeSha(std::string_view worldPath) const;
-
-    /** Check if we're in source-available mode */
-    bool isTectonixSourceAvailable() const;
-
-    /** Get set of zone IDs in sparse checkout (source-available mode only) */
-    const std::set<std::string> & getTectonixSparseCheckoutRoots() const;
-
-    /** Get map of zone path → dirty status (only for sparse-checked-out zones) */
-    const std::map<std::string, ZoneDirtyInfo> & getTectonixDirtyZones() const;
-
-    /** Get cached manifest content (thread-safe, lazy-loaded) */
-    const std::string & getManifestContent() const;
-
-    /** Get cached parsed manifest JSON (thread-safe, lazy-loaded) */
-    const nlohmann::json & getManifestJson() const;
-
-    /**
-     * Get a zone's store path, handling dirty detection and lazy mounting.
-     *
-     * For clean zones with lazy-trees enabled: mounts accessor lazily
-     * For dirty zones: currently eager-copies from checkout (extension point)
-     * For lazy-trees disabled: eager-copies from git
-     */
-    StorePath getZoneStorePath(std::string_view zonePath);
+    TecnixEvalData & tecnixEvalData();
+    const TecnixEvalData & tecnixEvalData() const;
 
     /**
      * Return a `SourcePath` that refers to `path` in the root
@@ -737,6 +613,12 @@ public:
      */
     Expr * parseExprFromFile(const SourcePath & path);
     Expr * parseExprFromFile(const SourcePath & path, const std::shared_ptr<StaticEnv> & staticEnv);
+
+    /**
+     * Parse a normal imported file through the shared parsed-file cache.
+     * Only suitable for imports using the evaluator's static base environment.
+     */
+    Expr * parseExprFromFileCached(const SourcePath & path);
 
     /**
      * Parse a Nix expression from the specified string.
@@ -806,7 +688,13 @@ public:
      */
     inline void forceValue(Value & v, const PosIdx pos)
     {
-        v.force(*this, pos);
+        auto * trackingCtx = currentTecnixThreadState.trackingContext;
+        if (!trackingCtx) {
+            v.force(*this, pos);
+            return;
+        }
+
+        forceValueTracked(*this, v, pos, *trackingCtx);
     }
 
     void tryFixupBlackHolePos(Value & v, PosIdx pos);
@@ -1287,10 +1175,19 @@ public:
 
     /**
      * Create a work item that propagates the current evaluation context.
+     *
+     * Tecnix tracked evaluation must not spawn work: work items capture only
+     * owned state, but a tracking context is a non-owning pointer into
+     * another thread's stack, and contexts are thread-confined by design (the
+     * only cross-thread dependency channel is the published label on a
+     * finished value). Detached prefetch sites skip spawning under tracking;
+     * anything else fails loudly here instead of dangling.
      */
     template<typename T>
     auto makeWork(T && t)
     {
+        if (currentTecnixThreadState.trackingContext)
+            throw Error("Tecnix tracked evaluation must not spawn parallel evaluation work");
         return [this, t{std::move(t)}, evalContext(evalContext)]() {
             this->evalContext = evalContext;
             t();
@@ -1377,4 +1274,5 @@ struct PushProvenance
 
 } // namespace nix
 
+#include "nix/expr/tecnix/force-value.hh"
 #include "nix/expr/eval-inline.hh"

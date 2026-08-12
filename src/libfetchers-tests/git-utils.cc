@@ -251,6 +251,7 @@ TEST_F(GitUtilsTest, getSubtreeSha_missing_entry_throws)
     auto treeHash = Hash::parseNonSRIUnprefixed(sha, HashAlgorithm::SHA1);
 
     ASSERT_THROW(repo->getSubtreeSha(treeHash, "nonexistent"), Error);
+    ASSERT_THROW(repo->getSubtreeSha(treeHash, "existing"), Error);
 }
 
 // ============================================================================

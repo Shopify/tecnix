@@ -27,6 +27,7 @@ struct AsyncPathWriterImpl : AsyncPathWriter
     {
         std::vector<Item> items;
         std::unordered_map<StorePath, std::shared_future<void>> futures;
+        StorePathSet addedPaths;
         bool quit = false;
     };
 
@@ -89,6 +90,7 @@ struct AsyncPathWriterImpl : AsyncPathWriter
 
         auto state(state_.lock());
         std::promise<void> promise;
+        state->addedPaths.insert(storePath);
         state->futures.insert_or_assign(storePath, promise.get_future());
         state->items.push_back(
             Item{
@@ -116,6 +118,11 @@ struct AsyncPathWriterImpl : AsyncPathWriter
             i->second;
         });
         future.get();
+    }
+
+    bool wasAdded(const StorePath & path) override
+    {
+        return state_.lock()->addedPaths.contains(path);
     }
 
     void waitForAllPaths() override
@@ -155,9 +162,20 @@ struct AsyncPathWriterImpl : AsyncPathWriter
         store->addMultipleToStore(std::move(sources), act, repair);
 #endif
 
+        StorePathSet pathsToCheck;
         for (auto & item : items) {
-            StringSource source(item.contents);
             store->addTempRoot(item.storePath);
+            if (item.repair == NoRepair)
+                pathsToCheck.insert(item.storePath);
+        }
+
+        auto validPaths = pathsToCheck.empty() ? StorePathSet{} : store->queryValidPaths(pathsToCheck, NoSubstitute);
+
+        for (auto & item : items) {
+            if (item.repair == NoRepair && validPaths.count(item.storePath))
+                continue;
+
+            StringSource source(item.contents);
             auto storePath = store->addToStoreFromDump(
                 source,
                 item.storePath.name(),
@@ -168,6 +186,8 @@ struct AsyncPathWriterImpl : AsyncPathWriter
                 item.repair,
                 item.provenance);
             assert(storePath == item.storePath);
+            if (item.repair == NoRepair)
+                validPaths.insert(item.storePath);
         }
     }
 };

@@ -65,6 +65,8 @@ sources = files(
   'nix_api_value_internal.cc',
   'primops.cc',
   'search-path.cc',
+  'tecnix-dependency-tracking.cc',
+  'tecnix-worldtree.cc',
   'tectonix.cc',
   'trivial.cc',
   'value/context.cc',
@@ -105,6 +107,7 @@ if get_option('benchmarks')
     'dynamic-attrs-bench.cc',
     'get-drvs-bench.cc',
     'regex-cache-bench.cc',
+    'tecnix-eval-bench.cc',
   )
 
   benchmark_exe = executable(

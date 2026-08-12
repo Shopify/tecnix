@@ -290,7 +290,10 @@ static void prim_parallel(EvalState & state, const PosIdx pos, Value ** args, Va
 {
     state.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.parallel");
 
-    if (state.executor->enabled) {
+    /* Tecnix: tracking contexts are thread-confined, so tracked evaluation
+       must not spawn detached work; under tracking this primop degrades to
+       sequential evaluation. */
+    if (state.executor->enabled && !currentTecnixThreadState.trackingContext) {
         Executor::WorkItems work;
         for (auto value : args[0]->listView())
             if (!value->isFinished())

@@ -60,6 +60,12 @@ TEST_F(PrimOpTest, abort)
     ASSERT_THROW(eval("abort \"abort\""), Abort);
 }
 
+TEST_F(PrimOpTest, breakForcesThunkBeforeReturning)
+{
+    auto v = eval("builtins.break (1 + 2)");
+    ASSERT_THAT(v, IsIntEq(3));
+}
+
 TEST_F(PrimOpTest, ceil)
 {
     auto v = eval("builtins.ceil 1.9");

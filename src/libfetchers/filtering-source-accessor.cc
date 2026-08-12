@@ -62,6 +62,17 @@ std::pair<CanonPath, std::optional<std::string>> FilteringSourceAccessor::getFin
     return next->getFingerprint(prefix / path);
 }
 
+bool FilteringSourceAccessor::tracksEvalAccesses(const CanonPath & path)
+{
+    return isAllowed(path) && next->tracksEvalAccesses(prefix / path);
+}
+
+void FilteringSourceAccessor::recordEvalAccess(const CanonPath & path)
+{
+    checkAccess(path);
+    next->recordEvalAccess(prefix / path);
+}
+
 std::shared_ptr<const Provenance> FilteringSourceAccessor::getProvenance(const CanonPath & path)
 {
     if (provenance)

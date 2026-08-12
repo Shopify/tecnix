@@ -11,6 +11,7 @@
 #include "nix/util/posix-source-accessor.hh"
 #include "nix/util/source-path.hh"
 #include "nix/util/file-system.hh"
+#include "nix/util/finally.hh"
 #include "nix/util/signals.hh"
 
 namespace nix {
@@ -39,8 +40,13 @@ static constexpr size_t narMaxDepth = 64;
 
 PathFilter defaultPathFilter = [](const std::string &) { return true; };
 
+thread_local int SourceAccessor::dumpPathDepth = 0;
+
 void SourceAccessor::dumpPath(const CanonPath & path, Sink & sink, PathFilter & filter)
 {
+    dumpPathDepth++;
+    Finally restoreDumpPathDepth([&]() { dumpPathDepth--; });
+
     auto dumpContents = [&](const CanonPath & path) {
         sink << "contents";
         std::optional<uint64_t> size;

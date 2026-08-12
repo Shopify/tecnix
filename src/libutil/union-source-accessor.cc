@@ -79,6 +79,24 @@ struct UnionSourceAccessor : SourceAccessor
         return std::nullopt;
     }
 
+    bool tracksEvalAccesses(const CanonPath & path) override
+    {
+        for (auto & accessor : accessors)
+            if (accessor->tracksEvalAccesses(path))
+                return true;
+        return false;
+    }
+
+    void recordEvalAccess(const CanonPath & path) override
+    {
+        for (auto & accessor : accessors) {
+            if (accessor->tracksEvalAccesses(path)) {
+                accessor->recordEvalAccess(path);
+                return;
+            }
+        }
+    }
+
     std::pair<CanonPath, std::optional<std::string>> getFingerprint(const CanonPath & path) override
     {
         if (fingerprint)

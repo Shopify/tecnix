@@ -980,7 +980,9 @@ static RegisterPrimOp primop_break(
              state.runDebugRepl(&error);
          }
 
-         // Return the value we were passed.
+         // Return the value we were passed. Since `Value::operator=` cannot
+         // copy thunks, force first; this also waits if another parallel worker
+         // is already forcing the same argument.
          state.forceValue(*args[0], pos);
          v = *args[0];
      }});
@@ -2045,6 +2047,9 @@ static void prim_pathExists(EvalState & state, const PosIdx pos, Value ** args, 
         auto symlinkResolution = mustBeDir ? SymlinkResolution::Full : SymlinkResolution::Ancestors;
         auto path = state.realisePath(pos, arg, symlinkResolution);
 
+        if (currentTecnixThreadState.trackingContext && path.accessor->tracksEvalAccesses(path.path))
+            path.accessor->recordEvalAccess(path.path);
+
         auto st = path.maybeLstat();
         auto exists = st && (!mustBeDir || st->type == SourceAccessor::tDirectory);
         v.mkBool(exists);
@@ -2458,6 +2463,9 @@ static const Value & fileTypeToString(EvalState & state, SourceAccessor::Type ty
 static void prim_readFileType(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto path = state.realisePath(pos, *args[0], std::nullopt);
+    if (currentTecnixThreadState.trackingContext && path.accessor->tracksEvalAccesses(path.path))
+        path.accessor->recordEvalAccess(path.path);
+
     /* Retrieve the directory entry type and stringize it. */
     v = fileTypeToString(state, path.lstat().type);
 }
@@ -2885,6 +2893,15 @@ static RegisterPrimOp primop_toFile({
 
 bool EvalState::callPathFilter(Value * filterFun, const SourcePath & path, PosIdx pos)
 {
+    /* Tecnix: path filters run arbitrary Nix code from inside dumpPath, where
+       source-access tracking is suppressed (the dumped tree is covered by its
+       directory-level fingerprint). The filter's own source reads are real
+       dependencies — e.g. a readFile of an ignore list — and a first read
+       here would otherwise be cached unlabeled, under-tracking every later
+       consumer. Lift the suppression for the duration of the call. */
+    auto savedDumpPathDepth = std::exchange(SourceAccessor::dumpPathDepth, 0);
+    Finally restoreDumpPathDepth([&]() { SourceAccessor::dumpPathDepth = savedDumpPathDepth; });
+
     auto st = path.lstat();
 
     /* Call the filter function.  The first argument is the path, the

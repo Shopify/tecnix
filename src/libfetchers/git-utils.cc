@@ -625,22 +625,43 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         return true;
     }
 
-    Hash getSubtreeSha(const Hash & treeSha, const std::string & entryName) override
+    std::optional<GitPathInfo> getPathInfo(const Hash & treeSha, const std::string & relPath) override
     {
-        git_tree * tree = nullptr;
-        auto oid = hashToOID(treeSha);
+        if (relPath.empty())
+            return GitPathInfo{.oid = treeSha, .mode = 0040000};
 
-        if (git_tree_lookup(&tree, *this, &oid))
+        auto oid = hashToOID(treeSha);
+        Tree tree;
+        if (git_tree_lookup(Setter(tree), *this, &oid))
             throw Error("looking up tree %s: %s", treeSha.gitRev(), git_error_last()->message);
 
-        Finally freeTree([&]() { git_tree_free(tree); });
+        git_tree_entry * entry = nullptr;
+        if (git_tree_entry_bypath(&entry, tree.get(), relPath.c_str()) != 0)
+            return std::nullopt;
+        Finally freeEntry([&]() { git_tree_entry_free(entry); });
+        return GitPathInfo{
+            .oid = toHash(*git_tree_entry_id(entry)),
+            .mode = static_cast<uint32_t>(git_tree_entry_filemode(entry)),
+        };
+    }
 
-        auto entry = git_tree_entry_byname(tree, entryName.c_str());
-        if (!entry)
+    Hash getSubtreeSha(const Hash & treeSha, const std::string & entryName) override
+    {
+        if (entryName.empty())
+            return treeSha;
+
+        auto oid = hashToOID(treeSha);
+        Tree tree;
+        if (git_tree_lookup(Setter(tree), *this, &oid))
+            throw Error("looking up tree %s: %s", treeSha.gitRev(), git_error_last()->message);
+
+        git_tree_entry * entry = nullptr;
+        if (git_tree_entry_bypath(&entry, tree.get(), entryName.c_str()) != 0)
             throw Error("entry '%s' not found in tree %s", entryName, treeSha.gitRev());
+        Finally freeEntry([&]() { git_tree_entry_free(entry); });
 
         if (git_tree_entry_type(entry) != GIT_OBJECT_TREE)
-            throw Error("'%s' in tree %s is not a directory", entryName, treeSha.gitRev());
+            throw Error("entry '%s' in tree %s is not a directory", entryName, treeSha.gitRev());
 
         return toHash(*git_tree_entry_id(entry));
     }

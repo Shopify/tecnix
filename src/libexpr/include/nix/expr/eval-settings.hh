@@ -505,6 +505,29 @@ struct EvalSettings : Config
           Note that enabling the debugger (`--debugger`) disables multi-threaded evaluation.
         )"};
 
+    Setting<bool> tecnixEvalCache{
+        this,
+        true,
+        "tecnix-eval-cache",
+        R"(
+          Whether to use the Tecnix evaluation cache for target-dependency and
+          target-name discovery.
+
+          Disabling this forces Tecnix dependency discovery to re-evaluate
+          instead of reusing results whose recorded source fingerprints still
+          match.
+        )"};
+
+    Setting<bool> tecnixParallelDependencies{
+        this,
+        true,
+        "tecnix-parallel-dependencies",
+        R"(
+          Whether Tecnix target dependency evaluation may evaluate independent
+          target misses/cache validations in parallel when parallel evaluation is
+          enabled.
+        )"};
+
     Setting<std::string> tectonixGitDir{
         this,
         "~/world/git",

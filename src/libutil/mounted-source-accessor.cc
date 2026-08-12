@@ -79,6 +79,18 @@ struct MountedSourceAccessorImpl : MountedSourceAccessor
         return accessor->getPhysicalPath(subpath);
     }
 
+    bool tracksEvalAccesses(const CanonPath & path) override
+    {
+        auto [accessor, subpath] = resolve(path);
+        return accessor->tracksEvalAccesses(subpath);
+    }
+
+    void recordEvalAccess(const CanonPath & path) override
+    {
+        auto [accessor, subpath] = resolve(path);
+        accessor->recordEvalAccess(subpath);
+    }
+
     void mount(CanonPath mountPoint, ref<SourceAccessor> accessor) override
     {
         mounts.emplace(std::move(mountPoint), std::move(accessor));
