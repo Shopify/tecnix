@@ -129,7 +129,7 @@ static std::string
 resolveRev(EvalState & state, const PosIdx pos, const Bindings & attrs, const std::string & checkoutPath)
 {
     // Check for explicit rev attr
-    auto revAttr = attrs.get(state.s.rev);
+    auto revAttr = attrs.get(state.symbols.create("rev"));
     if (revAttr) {
         auto sha = state.forceStringNoCtx(*revAttr->value, pos, "while evaluating the 'rev' argument");
         if (!sha.empty())
@@ -181,19 +181,19 @@ static const Bindings & forceTecnixBuiltinAttrs(EvalState & state, const PosIdx 
 
 static void parseTecnixRepoArgs(EvalState & state, const PosIdx pos, const Bindings & attrs, TecnixArgs & result)
 {
-    auto gitDirAttr = attrs.get(state.s.gitDir);
+    auto gitDirAttr = attrs.get(state.symbols.create("gitDir"));
     if (!gitDirAttr)
         state.error<EvalError>("'gitDir' attribute required").atPos(pos).debugThrow();
     result.gitDir =
         std::string(state.forceStringNoCtx(*gitDirAttr->value, pos, "while evaluating the 'gitDir' argument"));
 
-    auto resolverAttr = attrs.get(state.s.resolver);
+    auto resolverAttr = attrs.get(state.symbols.create("resolver"));
     if (!resolverAttr)
         state.error<EvalError>("'resolver' attribute required").atPos(pos).debugThrow();
     result.resolver =
         std::string(state.forceStringNoCtx(*resolverAttr->value, pos, "while evaluating the 'resolver' argument"));
 
-    auto checkoutPathAttr = attrs.get(state.s.checkoutPath);
+    auto checkoutPathAttr = attrs.get(state.symbols.create("checkoutPath"));
     if (checkoutPathAttr)
         result.checkoutPath = std::string(
             state.forceStringNoCtx(*checkoutPathAttr->value, pos, "while evaluating the 'checkoutPath' argument"));
@@ -273,7 +273,7 @@ parseTecnixResolverArgsValue(EvalState & state, const PosIdx pos, const Bindings
 
 static std::vector<std::string> parseTecnixTargets(EvalState & state, const PosIdx pos, const Bindings & attrs)
 {
-    auto targetsAttr = attrs.get(state.s.targets);
+    auto targetsAttr = attrs.get(state.symbols.create("targets"));
     if (!targetsAttr)
         state.error<EvalError>("'targets' attribute required").atPos(pos).debugThrow();
 
