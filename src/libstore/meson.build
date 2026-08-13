@@ -395,6 +395,7 @@ endif
 
 # GCS (Google Cloud Storage) support
 sources += files(
+  'gcs-binary-cache-store.cc',
   'gcs-creds.cc',
   'gcs-url.cc',
 )
