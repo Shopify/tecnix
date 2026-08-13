@@ -243,10 +243,9 @@ struct StaticEvalSymbols
 {
     Symbol with, outPath, drvPath, type, meta, name, value, system, overrides, outputs, outputName, ignoreNulls, file,
         line, column, functor, toString, right, wrong, structuredAttrs, json, allowedReferences, allowedRequisites,
-        disallowedReferences, disallowedRequisites, maxSize, maxClosureSize, builder, args, gitDir, resolver, rev,
-        checkoutPath, targets, contentAddressed, impure, outputHash, outputHashAlgo, outputHashMode,
-        recurseForDerivations, description, self, epsilon, startSet, operator_, key, path, prefix, outputSpecified,
-        __meta;
+        disallowedReferences, disallowedRequisites, maxSize, maxClosureSize, builder, args, contentAddressed, impure,
+        outputHash, outputHashAlgo, outputHashMode, recurseForDerivations, description, self, epsilon, startSet,
+        operator_, key, path, prefix, outputSpecified, __meta;
 
     Expr::AstSymbols exprSymbols;
 
@@ -284,11 +283,6 @@ struct StaticEvalSymbols
             .maxClosureSize = alloc.create("maxClosureSize"),
             .builder = alloc.create("builder"),
             .args = alloc.create("args"),
-            .gitDir = alloc.create("gitDir"),
-            .resolver = alloc.create("resolver"),
-            .rev = alloc.create("rev"),
-            .checkoutPath = alloc.create("checkoutPath"),
-            .targets = alloc.create("targets"),
             .contentAddressed = alloc.create("__contentAddressed"),
             .impure = alloc.create("__impure"),
             .outputHash = alloc.create("outputHash"),
