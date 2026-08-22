@@ -614,7 +614,13 @@ static void prim_tecnixTargets(EvalState & state, const PosIdx pos, Value ** arg
 
     auto & resolveFn = getResolveFunction(state, pos, tArgs);
 
-    std::vector<Value *> values(tArgs.targets.size());
+    /* These cells are the only reference to each target's result until the
+       output bindings are built, so they must live in GC-scanned storage: a
+       plain std::vector's heap buffer is invisible to the conservative
+       collector, which would recycle the cells mid-evaluation (observed as
+       the ValueStorage::finish pdThunk panic, or as silently corrupted
+       results). */
+    ValueVector values(tArgs.targets.size());
     for (size_t i = 0; i < tArgs.targets.size(); i++)
         values[i] = state.allocValue();
 
@@ -669,6 +675,14 @@ struct TargetDependencyResult
     Value * targetValue = nullptr;
     bool cacheNeedsUpsert = false;
 };
+
+/**
+ * `targetValue` may be the only reference to a worker-evaluated target value
+ * until the coordinator assembles the output records, so the results buffer
+ * must be GC-scanned (see the ValueVector comment in prim_tecnixTargets).
+ */
+using TargetDependencyResults =
+    std::vector<std::optional<TargetDependencyResult>, traceable_allocator<std::optional<TargetDependencyResult>>>;
 
 struct PreparedTrackedResolveFunction
 {
@@ -735,9 +749,7 @@ static TargetDependencyResult evalTargetDependencies(
 }
 
 static void finalizeSourceAccessSetDependencies(
-    EvalState & state,
-    std::vector<std::optional<TargetDependencyResult>> & results,
-    DependencyFingerprintCache & fingerprintCache)
+    EvalState & state, TargetDependencyResults & results, DependencyFingerprintCache & fingerprintCache)
 {
     if (!trackedSourceAccessSetGraph(state)->isEnabled())
         return;
@@ -765,7 +777,7 @@ static void printTecnixAccessSetStats(EvalState & state, std::string_view opName
         sourceAccessSetStats.accessSetItems);
 }
 
-static std::vector<std::optional<TargetDependencyResult>> evaluateTecnixTargetDependencies(
+static TargetDependencyResults evaluateTecnixTargetDependencies(
     EvalState & state,
     const PosIdx pos,
     const TecnixArgs & args,
@@ -779,7 +791,7 @@ static std::vector<std::optional<TargetDependencyResult>> evaluateTecnixTargetDe
         useCache ? "enabled" : "disabled",
         state.executor->evalCores);
 
-    std::vector<std::optional<TargetDependencyResult>> results(args.targets.size());
+    TargetDependencyResults results(args.targets.size());
     std::vector<size_t> misses;
     size_t cacheHits = 0;
 
