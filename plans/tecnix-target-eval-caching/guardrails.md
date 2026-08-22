@@ -40,6 +40,13 @@ Use this as a review checklist for source-dependency tracking and target-eval ca
 - **Repo-root source access remains unrepresentable unless the closure format grows an explicit representation.**
   - Until then, repo-root access must fail closed.
 
+## Value lifetime and GC
+
+- **Every live `Value *` must be reachable by the conservative collector for its whole lifetime.**
+  - Boehm GC scans thread stacks, GC-heap objects, and explicitly traceable allocations — not ordinary malloc'd buffers. A plain `std::vector<Value *>` (or any heap container holding `Value *`, directly or inside a struct) is invisible to it.
+  - Builtin orchestration that pre-allocates result cells, or holds worker-produced values until a coordinator consumes them, must keep those pointers in GC-visible storage: `ValueVector`, a `traceable_allocator` container, `RootValue`, or a live stack frame.
+  - A collected-and-recycled cell surfaces as the `ValueStorage::finish` pdThunk panic at best, and as silently wrong target values at worst (the fatal failure mode). `tests/functional/tecnix/gc.sh` holds this guardrail under forced GC pressure.
+
 ## Cache validity
 
 - **A persistent cache hit requires one complete stored closure candidate to match current fingerprints.**
