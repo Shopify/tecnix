@@ -8,6 +8,7 @@
 #include "nix/expr/tecnix/eval-cache.hh"
 
 #include "nix/expr/eval-inline.hh"
+#include "nix/expr/eval-settings.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
 #include "nix/store/globals.hh"
 #include "nix/store/sqlite.hh"
@@ -30,6 +31,16 @@
 #include <vector>
 
 namespace nix {
+
+bool useTecnixEvalCache(const EvalState & state)
+{
+    // Unknown or abbreviated version stamps cannot identify one evaluator.
+    static const bool knownRevision =
+        tecnixVersion.size() == 40 && std::all_of(tecnixVersion.begin(), tecnixVersion.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        });
+    return state.settings.pureEval && state.settings.tecnixEvalCache && knownRevision;
+}
 
 static std::atomic<uint64_t> nextDependencyFingerprintCacheGeneration{1};
 
@@ -56,13 +67,14 @@ static DependencyFingerprintThreadLocalCache & getDependencyFingerprintThreadCac
 // validation (a miss), and deleting the database is always safe.
 static const char * tecnixEvalCacheSchema = R"sql(
 create table if not exists DependencyShards (
+    tecnixRevision text not null,
     gitDir       text not null,
     resolver     text not null,
     argsKey text not null,
     shard        integer not null,
     dependencies blob not null,
     timestamp    integer not null,
-    primary key (gitDir, resolver, argsKey, shard)
+    primary key (tecnixRevision, gitDir, resolver, argsKey, shard)
 );
 
 )sql";
@@ -86,8 +98,8 @@ struct TecnixEvalCache
     {
         auto state(_state.lock());
 
-        // v2: target candidates carry the evaluated drvPath as their payload.
-        auto dbPath = getCacheDir() / "tecnix-eval-cache-v2.sqlite";
+        // v3: revision-scoped rows isolate results from different evaluator builds.
+        auto dbPath = getCacheDir() / "tecnix-eval-cache-v3.sqlite";
         createDirs(dbPath.parent_path());
 
         state->db = SQLite(dbPath, {.useWAL = settings.useSQLiteWAL});
@@ -96,14 +108,16 @@ struct TecnixEvalCache
 
         state->upsertShard.create(
             state->db,
-            "insert or replace into DependencyShards(gitDir, resolver, argsKey, shard, dependencies, timestamp) "
-            "values (?, ?, ?, ?, ?, ?)");
+            "insert or replace into DependencyShards(tecnixRevision, gitDir, resolver, argsKey, shard, dependencies, timestamp) "
+            "values (?, ?, ?, ?, ?, ?, ?)");
         state->lookupShard.create(
             state->db,
-            "select dependencies from DependencyShards where gitDir = ? and resolver = ? and argsKey = ? and shard = ?");
+            "select dependencies from DependencyShards "
+            "where tecnixRevision = ? and gitDir = ? and resolver = ? and argsKey = ? and shard = ?");
         state->lookupAllShards.create(
             state->db,
-            "select shard, dependencies from DependencyShards where gitDir = ? and resolver = ? and argsKey = ?");
+            "select shard, dependencies from DependencyShards "
+            "where tecnixRevision = ? and gitDir = ? and resolver = ? and argsKey = ?");
     }
 
     static constexpr std::string_view dependencyBlobMagic = "TXDC";
@@ -924,8 +938,12 @@ struct TecnixEvalCache
         auto state(_state.lock());
         if (indicesByShard.size() == 1) {
             auto shard = indicesByShard.begin()->first;
-            auto stmt(
-                state->lookupShard.use().apply(scope.gitDir).apply(scope.resolver).apply(scope.argsKey).apply(shard));
+            auto stmt(state->lookupShard.use()
+                          .apply(tecnixVersion)
+                          .apply(scope.gitDir)
+                          .apply(scope.resolver)
+                          .apply(scope.argsKey)
+                          .apply(shard));
             if (!stmt.next())
                 return blobs;
             auto blobView = stmt.getBlob(0);
@@ -935,7 +953,11 @@ struct TecnixEvalCache
             return blobs;
         }
 
-        auto stmt(state->lookupAllShards.use().apply(scope.gitDir).apply(scope.resolver).apply(scope.argsKey));
+        auto stmt(state->lookupAllShards.use()
+                      .apply(tecnixVersion)
+                      .apply(scope.gitDir)
+                      .apply(scope.resolver)
+                      .apply(scope.argsKey));
         while (stmt.next()) {
             auto shard = static_cast<uint32_t>(stmt.getInt(0));
             auto indices = indicesByShard.find(shard);
@@ -1015,14 +1037,22 @@ struct TecnixEvalCache
         existingBlobs.reserve(updatesByShard.size());
         if (updatesByShard.size() == 1) {
             auto shard = updatesByShard.begin()->first;
-            auto stmt(
-                state->lookupShard.use().apply(scope.gitDir).apply(scope.resolver).apply(scope.argsKey).apply(shard));
+            auto stmt(state->lookupShard.use()
+                          .apply(tecnixVersion)
+                          .apply(scope.gitDir)
+                          .apply(scope.resolver)
+                          .apply(scope.argsKey)
+                          .apply(shard));
             if (stmt.next()) {
                 auto blobView = stmt.getBlob(0);
                 existingBlobs.emplace(shard, std::string(blobView.data(), blobView.size()));
             }
         } else {
-            auto stmt(state->lookupAllShards.use().apply(scope.gitDir).apply(scope.resolver).apply(scope.argsKey));
+            auto stmt(state->lookupAllShards.use()
+                          .apply(tecnixVersion)
+                          .apply(scope.gitDir)
+                          .apply(scope.resolver)
+                          .apply(scope.argsKey));
             while (stmt.next()) {
                 auto shard = static_cast<uint32_t>(stmt.getInt(0));
                 if (updatesByShard.find(shard) == updatesByShard.end())
@@ -1045,6 +1075,7 @@ struct TecnixEvalCache
         auto timestamp = time(nullptr);
         for (auto & [shard, blob] : blobs) {
             state->upsertShard.use()
+                .apply(tecnixVersion)
                 .apply(scope.gitDir)
                 .apply(scope.resolver)
                 .apply(scope.argsKey)

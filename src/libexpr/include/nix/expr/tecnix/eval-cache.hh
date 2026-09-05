@@ -20,6 +20,8 @@
 namespace nix {
 
 class EvalState;
+/** Persistent caching requires pure evaluation and an exact evaluator revision. */
+bool useTecnixEvalCache(const EvalState & state);
 struct SourceAccessor;
 struct Value;
 

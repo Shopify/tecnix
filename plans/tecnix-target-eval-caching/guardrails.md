@@ -53,11 +53,16 @@ Use this as a review checklist for source-dependency tracking and target-eval ca
   - Partial matches are misses.
   - Candidate validation may short-circuit on mismatch, but acceptance requires the whole candidate.
 
-- **Never trust commit identity for cache acceptance.**
-  - No cache validity by `rev`.
-  - No per-commit cache key.
-  - No per-commit/rev fast path.
+- **Never trust the target repository's commit identity for cache acceptance.**
+  - No cache validity by the source `rev`.
+  - No per-source-commit cache key.
+  - No per-source-commit fast path.
   - Changed-path or tree-diff data may filter affected-target output, but must not accept cache rows.
+
+
+- **Persistent rows must not cross Tecnix evaluator revisions.**
+  - Require a full evaluator revision stamp; unknown or abbreviated stamps bypass persistent caching.
+  - Apply the revision to both reads and writes, including single-shard and multi-shard lookups.
 
 - **Unknown or malformed cache data is a miss.**
   - Cache data is an optimization; bad rows must not produce stale answers.

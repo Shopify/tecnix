@@ -286,6 +286,9 @@ pkgs.nixComponents2.nix-util.overrideAttrs (
     ]
     ++ map (transformFlag "libutil") (ignoreCrossFile pkgs.nixComponents2.nix-util.mesonFlags)
     ++ map (transformFlag "libstore") (ignoreCrossFile pkgs.nixComponents2.nix-store.mesonFlags)
+    # A developer tree can change after configuration. Only immutable package
+    # builds may advertise a source revision for persistent evaluation caching.
+    ++ [ (lib.mesonOption "libstore:tecnix-revision" "unknown") ]
     ++ map (transformFlag "libfetchers") (ignoreCrossFile pkgs.nixComponents2.nix-fetchers.mesonFlags)
     ++ lib.optionals havePerl (
       map (transformFlag "perl") (ignoreCrossFile pkgs.nixComponents2.nix-perl-bindings.mesonFlags)

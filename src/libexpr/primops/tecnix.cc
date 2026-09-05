@@ -357,7 +357,7 @@ static void configureTecnixRepoContext(EvalState & state, const TecnixArgs & arg
  */
 static bool tecnixSourceTrackingEnabled(const EvalState & state, const TecnixArgs & tArgs)
 {
-    return tArgs.requireDependencies || (state.settings.pureEval && state.settings.tecnixEvalCache);
+    return tArgs.requireDependencies || useTecnixEvalCache(state);
 }
 
 /** Keyspace separator for modules built without tracking; see
@@ -555,7 +555,7 @@ struct TecnixDiscoveryResult
 static TecnixDiscoveryResult discoverTecnixTargetNames(
     EvalState & state, const PosIdx pos, const TecnixArgs & tArgs, DependencyFingerprintCache & fingerprintCache)
 {
-    bool useCache = state.settings.pureEval && state.settings.tecnixEvalCache;
+    bool useCache = useTecnixEvalCache(state);
     bool track = tecnixSourceTrackingEnabled(state, tArgs);
 
     std::string cacheKey{tecnixTargetNamesCacheKey};
@@ -721,7 +721,7 @@ static void prim_tecnixTargets(EvalState & state, const PosIdx pos, Value ** arg
         return;
     }
 
-    if (state.settings.pureEval && state.settings.tecnixEvalCache) {
+    if (useTecnixEvalCache(state)) {
         prim_tecnixTargetsCached(state, pos, v, tArgs);
         return;
     }
@@ -1017,7 +1017,7 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
     DependencyFingerprintCache & fingerprintCache,
     bool keepTargetValues = false)
 {
-    bool useCache = state.settings.pureEval && state.settings.tecnixEvalCache;
+    bool useCache = useTecnixEvalCache(state);
     printTalkative(
         "tecnixTargets dependencies: planning %d target ref(s), dependency cache %s, eval cores %d",
         args.targets.size(),

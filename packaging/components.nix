@@ -386,7 +386,9 @@ in
   nix-util-test-support = callPackage ../src/libutil-test-support/package.nix { };
   nix-util-tests = callPackage ../src/libutil-tests/package.nix { };
 
-  nix-store = callPackage ../src/libstore/package.nix { };
+  nix-store = callPackage ../src/libstore/package.nix {
+    tecnixRevision = (scope.patchedSrc or src).rev or "unknown";
+  };
   nix-store-c = callPackage ../src/libstore-c/package.nix { };
   nix-store-test-support = callPackage ../src/libstore-test-support/package.nix { };
   nix-store-tests = callPackage ../src/libstore-tests/package.nix { };

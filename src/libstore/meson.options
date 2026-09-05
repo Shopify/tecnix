@@ -1,6 +1,13 @@
 # vim: filetype=meson
 
 option(
+  'tecnix-revision',
+  type : 'string',
+  value : '',
+  description : 'full Tecnix source revision, overriding .version-tecnix',
+)
+
+option(
   'embedded-sandbox-shell',
   type : 'boolean',
   value : false,
