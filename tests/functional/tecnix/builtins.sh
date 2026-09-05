@@ -1032,6 +1032,7 @@ args: {
   allTargetNames = [ "alpha" "beta" ];
   resolve = id: {
     drvPath = "/nix/store/00000000000000000000000000000000-${builtins.hashString "sha256" (builtins.readFile (./deps + "/${id}.txt"))}-${id}.drv";
+    outputName = "out";
   };
 }
 RESOLVE_EOF
@@ -1260,6 +1261,10 @@ legacy_deps=$(tecnix_eval_json_cache "tecnixTargetDependencyPathSet (($drv_args)
 assert_json_equal "$legacy_deps" "$legacy_cold_deps" "legacy blob version should re-evaluate and return correct dependencies"
 grepQuiet "drv-world-resolver-evaluated" "$TEST_ROOT/drv-legacy-blob.err"
 grepQuietInverse "dependency cache hit" "$TEST_ROOT/drv-legacy-blob.err"
+
+legacy_warm_deps=$(tecnix_eval_json_cache "tecnixTargetDependencyPathSet (($drv_args) // { targets = [ \"alpha\" \"beta\" ]; })" 2> "$TEST_ROOT/drv-legacy-blob-warm.err")
+assert_json_equal "$legacy_warm_deps" "$legacy_cold_deps" "relearned cache entries should preserve target dependencies"
+grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/drv-legacy-blob-warm.err"
 
 # ============================================================
 # Raw-tree contract: git attributes do not filter the Tecnix view
