@@ -1047,7 +1047,8 @@ warm_deps=$(tecnix_eval_json_cache "tecnixTargetDependencyPathSet (($cache_args)
 assert_json_equal "$warm_deps" "$cold_deps" "warm dependency query should equal cold"
 assert_jq "$warm_deps" '.alpha | has("deps/alpha.txt")' "cached dependency sets should contain the per-target dep"
 grepQuiet "dependency cache hit" "$TEST_ROOT/cache-warm.err"
-test -f "$EVAL_CACHE_HOME/nix/tecnix-eval-cache-v2.sqlite"
+eval_cache_databases=("$EVAL_CACHE_HOME"/nix/tecnix-eval-cache-*.sqlite)
+EVAL_CACHE_DB="${eval_cache_databases[0]}"
 
 cold_names=$(tecnix_eval_json_cache "builtins.tecnixTargetNames ($cache_args)" 2> /dev/null)
 warm_names=$(tecnix_eval_json_cache "builtins.tecnixTargetNames ($cache_args)" 2> "$TEST_ROOT/cache-warm-names.err")
@@ -1066,14 +1067,13 @@ assert_jq "$fake_drv_targets" '.alpha.drvPath | startswith("/nix/store/000000000
     "invalid cached drv payloads should re-evaluate the target value"
 
 # ============================================================
-# Eval cache: target-value (drvPath payload) roundtrip
+# Eval cache: selected-output payload roundtrip
 # ============================================================
-# A proven closure candidate carries the drvPath its evaluation produced. When
-# that drv is still a valid store path, plain tecnixTargets answers from the
-# cache without calling the resolver; when the drv has been deleted, the
-# target value is re-evaluated (and the drv re-instantiated).
+# A proven closure candidate retains both the recipe and selected output.
+# Compare actual output paths and Nix string contexts, not just the drvPath:
+# importing a multi-output recipe alone can silently select another output.
 
-echo "Testing cached target values (drvPath payload)..."
+echo "Testing cached target values and selected outputs..."
 
 DRV_WORLD="$TEST_ROOT/tecnix-drv-world"
 createGitRepo "$DRV_WORLD"
@@ -1082,17 +1082,28 @@ createGitRepo "$DRV_WORLD"
     mkdir deps
     echo "echo alpha" > deps/alpha.txt
     echo "echo beta" > deps/beta.txt
+    echo "out" > selected-output
     # The trace proves whether the resolver was evaluated at all: fully warm
     # runs must answer from the cache without importing or applying it.
     cat > resolve.nix << 'RESOLVE_EOF'
 args: builtins.trace "drv-world-resolver-evaluated" {
   allTargetNames = [ "alpha" "beta" ];
-  resolve = id: derivation {
-    name = "drv-world-${id}";
-    system = "test-system";
-    builder = "/bin/sh";
-    args = [ "-c" (builtins.readFile (./deps + "/${id}.txt")) ];
-  };
+  resolve = id:
+    let
+      drv = derivation {
+        name = "drv-world-${id}";
+        system = "test-system";
+        builder = "/bin/sh";
+        args = [ "-c" (builtins.readFile (./deps + "/${id}.txt")) ];
+        outputs = [ "out" "dev" ];
+      };
+      selected = if id == "alpha"
+        then builtins.replaceStrings [ "\n" ] [ "" ] (builtins.readFile ./selected-output)
+        else "dev";
+    in drv // {
+      outputName = selected;
+      outPath = drv.${selected}.outPath;
+    };
 }
 RESOLVE_EOF
     git add -A
@@ -1102,6 +1113,11 @@ DRV_HEAD=$(get_head_sha "$DRV_WORLD")
 
 drv_args="{ gitDir = \"$DRV_WORLD/.git\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; }; rev = \"$DRV_HEAD\"; }"
 drv_paths_expr="builtins.mapAttrs (id: t: t.drvPath) (builtins.tecnixTargets (($drv_args) // { targets = [ \"alpha\" \"beta\" ]; }))"
+drv_projection="builtins.mapAttrs (_: t: { drv = t.drvPath; out = t.outPath; outputName = t.outputName; drvContext = builtins.getContext t.drvPath; outputContext = builtins.getContext t.outPath; })"
+drv_selected_expr="$drv_projection (builtins.tecnixTargets (($drv_args) // { targets = [ \"alpha\" \"beta\" ]; }))"
+cold_selected_values=$(tecnix_eval_json_no_cache "$drv_selected_expr")
+assert_jq "$cold_selected_values" '.alpha.outputName == "out" and .beta.outputName == "dev"' \
+    "the fixture should select different outputs of multi-output recipes"
 
 cold_drv_values=$(tecnix_eval_json_cache "$drv_paths_expr" 2> "$TEST_ROOT/drv-values-cold.err")
 grepQuiet "tecnixTargets dependencies: dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/drv-values-cold.err"
@@ -1113,21 +1129,28 @@ assert_json_equal "$warm_drv_values" "$cold_drv_values" "warm cached target valu
 grepQuiet "tecnixTargets dependencies: dependency cache hit for 'alpha'" "$TEST_ROOT/drv-values-warm.err"
 grepQuiet "tecnixTargets dependencies: dependency cache hit for 'beta'" "$TEST_ROOT/drv-values-warm.err"
 grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/drv-values-warm.err"
+warm_selected_values=$(tecnix_eval_json_cache "$drv_selected_expr" 2> "$TEST_ROOT/drv-selected-warm.err")
+assert_json_equal "$warm_selected_values" "$cold_selected_values" \
+    "warm target values should preserve selected outputs and both string contexts"
+grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/drv-selected-warm.err"
 
 # Cached values also serve the includeDependencies + includeTargets shape.
 # (In --json a derivation-shaped value serializes as its outPath string.)
 warm_drv_records=$(tecnix_eval_json_cache "builtins.tecnixTargets (($drv_args) // { targets = [ \"alpha\" \"beta\" ]; includeDependencies = true; })" 2> "$TEST_ROOT/drv-records-warm.err")
 grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/drv-records-warm.err"
-assert_jq "$warm_drv_records" '(.[0].value | endswith("-drv-world-alpha")) and (.[0].dependencies | has("deps/alpha.txt")) and (.[1].value | endswith("-drv-world-beta")) and (.[1].dependencies | has("deps/beta.txt"))' \
-    "cached target values should serve dependency records too"
+assert_json_equal "$(jq '[.[].value]' <<< "$warm_drv_records")" "$(jq '[.alpha.out, .beta.out]' <<< "$cold_selected_values")" \
+    "cached dependency records should preserve selected output paths"
+assert_jq "$warm_drv_records" '(.[0].dependencies | has("deps/alpha.txt")) and (.[1].dependencies | has("deps/beta.txt"))' \
+    "cached dependency records should retain each target's source dependencies"
 
 # A garbage-collected drv must not serve a cached value: that hit is an
 # ordinary miss, and re-evaluation re-instantiates the drv for the next run.
 echo "Testing cached target value fallback after drv deletion..."
 alpha_drv=$(jq -r '.alpha' <<< "$cold_drv_values")
 nix-store --delete "$alpha_drv" --ignore-liveness
-fallback_drv_values=$(tecnix_eval_json_cache "$drv_paths_expr" 2> "$TEST_ROOT/drv-values-fallback.err")
-assert_json_equal "$fallback_drv_values" "$cold_drv_values" "fallback re-evaluation should reproduce the deleted drv"
+fallback_selected_values=$(tecnix_eval_json_cache "$drv_selected_expr" 2> "$TEST_ROOT/drv-values-fallback.err")
+assert_json_equal "$fallback_selected_values" "$cold_selected_values" \
+    "fallback after recipe deletion should preserve selected outputs and string contexts"
 grepQuiet "tecnixTargets dependencies: dependency cache hit for 'alpha' has no valid target value, evaluating" "$TEST_ROOT/drv-values-fallback.err"
 grepQuiet "tecnixTargets: 1 target value(s) served from the cache" "$TEST_ROOT/drv-values-fallback.err"
 rewarmed_drv_values=$(tecnix_eval_json_cache "$drv_paths_expr" 2> "$TEST_ROOT/drv-values-rewarmed.err")
@@ -1184,10 +1207,59 @@ echo "Testing dependency-only warmup serves later target values..."
 deps_first_args="{ gitDir = \"$DRV_WORLD/.git\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; mode = \"deps-first\"; }; rev = \"$DRV_HEAD\"; }"
 tecnix_eval_json_cache "tecnixTargetDependencyPathSet (($deps_first_args) // { targets = [ \"alpha\" \"beta\" ]; })" > /dev/null 2> "$TEST_ROOT/deps-first-cold.err"
 grepQuiet "tecnixTargets dependencies: dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/deps-first-cold.err"
-deps_first_values=$(tecnix_eval_json_cache "builtins.mapAttrs (id: t: t.drvPath) (builtins.tecnixTargets (($deps_first_args) // { targets = [ \"alpha\" \"beta\" ]; }))" 2> "$TEST_ROOT/deps-first-warm.err")
-assert_json_equal "$deps_first_values" "$cold_drv_values" "dependency-warmed target values should equal directly evaluated values"
+deps_first_values=$(tecnix_eval_json_cache "$drv_projection (builtins.tecnixTargets (($deps_first_args) // { targets = [ \"alpha\" \"beta\" ]; }))" 2> "$TEST_ROOT/deps-first-warm.err")
+assert_json_equal "$deps_first_values" "$cold_selected_values" \
+    "dependency-only warmup should retain selected outputs and string contexts"
 grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/deps-first-warm.err"
 grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/deps-first-warm.err"
+
+# A supported outer blob is not enough: unknown payload versions and names
+# that select an import helper instead of a derivation output must miss.
+echo "Testing unsupported cached result payloads..."
+sqlite3 "$EVAL_CACHE_DB" "UPDATE DependencyShards SET dependencies = CAST(replace(CAST(dependencies AS TEXT), 'TXTV1', 'TXTV0') AS BLOB)"
+unknown_payload_values=$(tecnix_eval_json_cache "$drv_selected_expr" 2> "$TEST_ROOT/drv-payload-version.err")
+assert_json_equal "$unknown_payload_values" "$cold_selected_values" "unknown result payload versions should re-evaluate correctly"
+grepQuiet "drv-world-resolver-evaluated" "$TEST_ROOT/drv-payload-version.err"
+grepQuietInverse "served from the cache" "$TEST_ROOT/drv-payload-version.err"
+
+sqlite3 "$EVAL_CACHE_DB" "UPDATE DependencyShards SET dependencies = CAST(replace(CAST(dependencies AS TEXT), '.drv' || char(0) || 'out', '.drv' || char(0) || 'all') AS BLOB)"
+invalid_output_values=$(tecnix_eval_json_cache "$drv_selected_expr" 2> "$TEST_ROOT/drv-payload-output.err")
+assert_json_equal "$invalid_output_values" "$cold_selected_values" "a non-output payload name should re-evaluate correctly"
+grepQuiet "drv-world-resolver-evaluated" "$TEST_ROOT/drv-payload-output.err"
+grepQuiet "tecnixTargets: 1 target value(s) served from the cache" "$TEST_ROOT/drv-payload-output.err"
+
+# The selected-output input is lazy and does not affect drvPath. It must
+# still be forced and fingerprinted before the source-tracking scope ends.
+echo "Testing changes to output selection without recipe changes..."
+(
+    cd "$DRV_WORLD"
+    echo "dev" > selected-output
+    git add -- selected-output
+    git commit -m "select the dev output"
+)
+SELECTED_HEAD=$(get_head_sha "$DRV_WORLD")
+selected_args="(($drv_args) // { rev = \"$SELECTED_HEAD\"; })"
+selected_expr="$drv_projection (builtins.tecnixTargets (($selected_args) // { targets = [ \"alpha\" \"beta\" ]; }))"
+changed_selected_values=$(tecnix_eval_json_cache "$selected_expr" 2> "$TEST_ROOT/drv-selection-change.err")
+assert_json_equal "$changed_selected_values" "$(tecnix_eval_json_no_cache "$selected_expr")" \
+    "changing output selection should invalidate the cached result"
+assert_jq "$changed_selected_values" '.alpha.outputName == "dev" and .beta.outputName == "dev"' \
+    "the changed selector should choose the dev output"
+assert_json_equal "$(jq '.alpha.drv' <<< "$changed_selected_values")" "$(jq '.alpha.drv' <<< "$cold_selected_values")" \
+    "selection changes should not need a different recipe"
+grepQuiet "drv-world-resolver-evaluated" "$TEST_ROOT/drv-selection-change.err"
+
+# A legacy blob version (v1) must not be reused: old closures omitted the
+# selected-output input and can silently serve the wrong output. Rewrite only
+# the version field (bytes 5-8) to little-endian 1; a dependency-only query
+# must re-evaluate and return correct dependencies.
+echo "Testing legacy blob version regression..."
+legacy_cold_deps=$(tecnix_eval_json_no_cache "tecnixTargetDependencyPathSet (($drv_args) // { targets = [ \"alpha\" \"beta\" ]; })")
+sqlite3 "$EVAL_CACHE_DB" "UPDATE DependencyShards SET dependencies = CAST(substr(dependencies,1,4) || X'01000000' || substr(dependencies,9) AS BLOB)"
+legacy_deps=$(tecnix_eval_json_cache "tecnixTargetDependencyPathSet (($drv_args) // { targets = [ \"alpha\" \"beta\" ]; })" 2> "$TEST_ROOT/drv-legacy-blob.err")
+assert_json_equal "$legacy_deps" "$legacy_cold_deps" "legacy blob version should re-evaluate and return correct dependencies"
+grepQuiet "drv-world-resolver-evaluated" "$TEST_ROOT/drv-legacy-blob.err"
+grepQuietInverse "dependency cache hit" "$TEST_ROOT/drv-legacy-blob.err"
 
 # ============================================================
 # Raw-tree contract: git attributes do not filter the Tecnix view

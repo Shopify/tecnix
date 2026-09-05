@@ -107,7 +107,9 @@ struct TecnixEvalCache
     }
 
     static constexpr std::string_view dependencyBlobMagic = "TXDC";
-    static constexpr uint32_t dependencyBlobVersion = 1;
+    // v2: target payloads now carry {drvPath, outputName}; old v1 closures
+    // omitted the selected-output input and can silently serve the wrong output.
+    static constexpr uint32_t dependencyBlobVersion = 2;
     static constexpr uint32_t dependencyBlobFlags = 0;
     static constexpr size_t dependencyBlobFieldCount = 16;
     static constexpr size_t dependencyBlobHeaderSize = 4 + dependencyBlobFieldCount * sizeof(uint32_t);

@@ -92,10 +92,10 @@ Use this as a review checklist for source-dependency tracking and target-eval ca
 - **Dependency-only queries must not force target values.**
   - Continue to support `includeDependencies = true; includeTargets = false;`.
 
-- **A target-value cache hit needs the closure proof plus the drv.**
-  - A proven candidate may carry the evaluated target's `drvPath` as its payload.
-  - Reusing it requires that same complete closure proof plus the drv still being a valid store path; when target values are requested, anything else (no payload, malformed payload, garbage-collected drv) is an ordinary miss and re-evaluates.
-  - Cached target values are derivation-shaped (the `import <drvPath>` surface: `type`, `name`, `drvPath`, `outPath`, `outputs`, per-output attrs); resolver attributes outside that contract are not preserved on a value hit and must not be relied on.
+- **A target-value cache hit needs the closure proof, recipe, and selected output.**
+  - Store a versioned `{drvPath, outputName}` payload, with both fields forced under source tracking.
+  - Reusing it requires the complete closure proof, a locally valid recipe, and an output of the recorded name. Unsupported payloads, absent recipes, and invalid selections are ordinary misses.
+  - Cached values are the selected output of the imported recipe, with its Nix string contexts intact. Other resolver attributes are not preserved on a value hit and must not be relied on.
 
 - **Keep legacy `unsafeTectonixInternal*` compatibility isolated from the new Tecnix cache/history design.**
 
@@ -104,4 +104,6 @@ Use this as a review checklist for source-dependency tracking and target-eval ca
 - **Do not add migrations for unshipped development cache formats.**
   - During development, incompatible local rows should miss or be wiped and rebuilt.
 
-- **Keep the current development blob marker fixed unless the cache format becomes a shipped compatibility contract.**
+- **Bump the blob version when old observations become unsafe, not just when the format changes.**
+  - The version field is a compatibility boundary: old blobs that omit an input the current evaluator needs must be rejected, not silently reused.
+  - A version bump orphans all local rows; during development that is safe because the database is disposable.

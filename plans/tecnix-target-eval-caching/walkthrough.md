@@ -84,7 +84,7 @@ sequenceDiagram
 
 > **Structure: the per-run fingerprint memo.** A thread-local table from path to current fingerprint. It exists because the closures of many targets, and the historical candidates for one target, share most of their paths; each unique path is fingerprinted once per run — a git object-identifier and file-mode read, which is itself inexpensive — and every subsequent occurrence is a hash lookup. Validation cost therefore scales with the number of *unique* paths candidate scanning asks about, not with the total number of historical closure entries. (In a worldtree sandbox the clean tree is the daemon's immutable FUSE projection rather than a git repository: directory fingerprints come from a tree-oid xattr, and regular-file fingerprints from a blob-oid xattr when the daemon serves one, falling back to hashing content as a git blob, memoized in memory for the run — identical fingerprint strings, identical validation; see the explainer's §7.)
 
-If one candidate fully matches, the journey ends here: that candidate identifies the matching historical closure, the output is built directly from its pair stream, and everything described in the remaining sections is skipped — the resolver, every force, every frame, all interning. This asymmetry accounts for the difference of several orders of magnitude between warm and cold runs. The `absent` entries participate in the search as well: a path that the target once probed and did not find is checked to still be absent, so a newly created file fails the proof in exactly the way an edited one does.
+If one candidate fully matches, a dependency-only query builds its answer directly from that candidate's pair stream. A target-value query also checks the versioned `{drvPath, outputName}` payload, requires a locally valid recipe, and selects the recorded output from its imported value. This preserves the output path and Nix string context; an unsupported payload or unavailable output makes the query a miss instead. A usable hit skips the resolver and the source-tracking work below. The `absent` entries participate in validation too: a newly created file invalidates a candidate that previously observed its absence.
 
 For the purposes of this walkthrough, suppose no complete candidate matches. The lookup is a miss, and evaluation must run — under observation.
 
@@ -100,7 +100,7 @@ Two preparations precede the target itself.
 
 **The dirty overlay is established.** A single `git status` invocation partitions the tree: clean paths will be served from the git object store at the pinned commit, and modified paths from disk. If `git status` fails, evaluation fails. Assuming a clean tree in that situation would allow stale rows to validate against a tree that does not reflect reality, so the failure is made visible instead.
 
-The resolver is then applied to `"//services/api"`, the resulting value's `drvPath` is forced, and control descends into the evaluator.
+The resolver is then applied to `"//services/api"`. Its `drvPath` and selected `outputName` are forced while the tracking context remains active. The output name can depend on a source read that does not affect the recipe path, so tracking cannot stop after forcing `drvPath`.
 
 ## 6. Step ④: Inside Evaluation
 
