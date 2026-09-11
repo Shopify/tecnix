@@ -75,6 +75,12 @@ struct SQLite
      */
     void isCache();
 
+    /**
+     * The largest string or blob this connection can store, in bytes
+     * (`SQLITE_LIMIT_LENGTH`; 1,000,000,000 in a stock SQLite build).
+     */
+    size_t maxLength();
+
     void exec(const std::string & stmt);
 
     uint64_t getLastInsertedRowId();

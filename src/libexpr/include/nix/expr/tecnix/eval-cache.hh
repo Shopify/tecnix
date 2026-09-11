@@ -10,7 +10,7 @@
 #include "nix/util/ref.hh"
 
 #include <cstdint>
-#include <memory>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -75,18 +75,19 @@ struct TecnixDependencyUpsert
 
 /**
  * A proven cache hit: one stored candidate whose complete closure matched
- * current fingerprints. A move-only handle over the stored row bytes; output
- * is built directly from the row (no decoded object graph).
+ * current fingerprints. A non-owning view into the shard row being validated,
+ * valid only for the duration of the callback that receives it; output is
+ * built directly from the row bytes (no decoded object graph), and callers
+ * copy out whatever they keep.
  */
-class ValidatedDependencyBlob
+class DependencyCacheHit
 {
 public:
     struct Impl;
 
-    explicit ValidatedDependencyBlob(std::unique_ptr<Impl> impl);
-    ValidatedDependencyBlob(ValidatedDependencyBlob &&) noexcept;
-    ValidatedDependencyBlob & operator=(ValidatedDependencyBlob &&) noexcept;
-    ~ValidatedDependencyBlob();
+    explicit DependencyCacheHit(const Impl & impl);
+    DependencyCacheHit(const DependencyCacheHit &) = delete;
+    DependencyCacheHit & operator=(const DependencyCacheHit &) = delete;
 
     /** Dependency output (`path = fingerprint` attrs) built from the matched candidate's pair stream. */
     Value * toValue(EvalState & state) const;
@@ -96,24 +97,34 @@ public:
     std::optional<std::string_view> payload() const;
 
 private:
-    std::unique_ptr<Impl> impl;
+    const Impl & impl;
 };
 
 /**
  * Look up cached dependency rows for `keys` (target IDs or the discovery key)
- * and validate their candidates against current fingerprints. An entry is set
- * on a proven hit and nullopt on a miss.
+ * and validate their candidates against current fingerprints, one shard row
+ * at a time: `onHit(i, hit)` is called for each proven key while its row is
+ * loaded, and the row is released before the next shard is read, so memory is
+ * bounded by one row rather than the whole scope. Keys never reported are
+ * misses.
  */
-std::vector<std::optional<ValidatedDependencyBlob>> lookupValidatedDependencyBlobs(
+void lookupCachedDependencies(
     EvalState & state,
     const TecnixCacheScope & scope,
     std::span<const std::string> keys,
-    DependencyFingerprintCache & fingerprintCache);
+    DependencyFingerprintCache & fingerprintCache,
+    const std::function<void(size_t index, const DependencyCacheHit & hit)> & onHit);
 
 /**
- * Persist freshly learned closures. Cache writes are an optimization:
+ * Persist freshly learned closures by merging each into its key's stored
+ * history: the fresh closure becomes the newest candidate, and every history
+ * in the rewritten rows is trimmed to its `historyLimit` most recent distinct
+ * candidates (the fresh closure is always kept). The merge happens under the
+ * database write lock, so evaluators sharing a cache accumulate each other's
+ * candidates instead of overwriting them. Cache writes are an optimization:
  * failures warn and continue, and never fail the evaluation.
  */
-void upsertDependencyClosures(const TecnixCacheScope & scope, const std::vector<TecnixDependencyUpsert> & entries);
+void upsertDependencyClosures(
+    const TecnixCacheScope & scope, const std::vector<TecnixDependencyUpsert> & entries, size_t historyLimit);
 
 } // namespace nix

@@ -128,6 +128,11 @@ void SQLite::isCache()
     exec("pragma main.journal_mode = wal");
 }
 
+size_t SQLite::maxLength()
+{
+    return sqlite3_limit(db, SQLITE_LIMIT_LENGTH, -1);
+}
+
 void SQLite::exec(const std::string & stmt)
 {
     retrySQLite<void>([&]() {

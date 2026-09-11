@@ -1270,6 +1270,135 @@ assert_json_equal "$legacy_warm_deps" "$legacy_cold_deps" "relearned cache entri
 grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/drv-legacy-blob-warm.err"
 
 # ============================================================
+# Eval cache: per-target history bound (tecnix-eval-cache-history)
+# ============================================================
+# Each key keeps its N most recent distinct source closures. Two commits give
+# alpha two closures; with a history of 1 (or 0, which keeps only the newest)
+# the second evicts the first, so switching back to v1 re-evaluates, while the
+# default keeps both.
+
+echo "Testing eval cache history bound..."
+
+HISTORY_WORLD="$TEST_ROOT/tecnix-history-world"
+createGitRepo "$HISTORY_WORLD"
+(
+    cd "$HISTORY_WORLD"
+    mkdir deps
+    echo "alpha v1" > deps/alpha.txt
+    echo "earth v1" > deps/earth.txt
+    # A target's file may name one more file to read, so a commit can grow a
+    # closure by a path (`include 00-extra.txt` below).
+    cat > resolve.nix << 'RESOLVE_EOF'
+args: {
+  allTargetNames = [ "alpha" "earth" ];
+  resolve = id:
+    let
+      text = builtins.readFile (./deps + "/${id}.txt");
+      included = builtins.match "include ([^\n]*)\n?" text;
+      extra = if included == null then "" else builtins.readFile (./deps + "/${builtins.head included}");
+    in {
+      drvPath = "/nix/store/00000000000000000000000000000000-${builtins.hashString "sha256" (text + extra)}-${id}.drv";
+    };
+}
+RESOLVE_EOF
+    git add -A
+    git commit -m "history world v1"
+    echo "include 00-extra.txt" > deps/alpha.txt
+    echo "extra" > deps/00-extra.txt
+    git add -A
+    git commit -m "history world v2"
+)
+HISTORY_V1=$(git -C "$HISTORY_WORLD" rev-parse HEAD~1)
+HISTORY_V2=$(get_head_sha "$HISTORY_WORLD")
+
+# $1 = history limit, $2 = expression
+tecnix_eval_json_cache_with_history() {
+    local expr
+    expr=$(rewrite_tecnix_test_expr "$2")
+    XDG_CACHE_HOME="$EVAL_CACHE_HOME" nix eval --json -v \
+        --extra-experimental-features 'nix-command' \
+        --option lazy-trees true \
+        --option tecnix-eval-cache true \
+        --option tecnix-eval-cache-history "$1" \
+        --pure-eval \
+        --expr "$expr"
+}
+
+# $1 = history limit, $2 = cache scope (passed as `args`, so each case gets its
+# own cache rows), $3 = rev, $4... = targets.
+history_deps() {
+    local history=$1 scope=$2 rev=$3; shift 3
+    local targets; targets=$(printf '"%s" ' "$@")
+    tecnix_eval_json_cache_with_history "$history" "tecnixTargetDependencyPathSet { gitDir = \"$HISTORY_WORLD/.git\"; resolver = \"resolve.nix\"; args = { scope = \"$scope\"; }; rev = \"$rev\"; targets = [ $targets ]; }"
+}
+
+for history in 0 1 32; do
+    v1=$(history_deps "$history" "history-$history" "$HISTORY_V1" alpha 2> /dev/null)
+    history_deps "$history" "history-$history" "$HISTORY_V2" alpha > /dev/null 2>&1
+    v1_again=$(history_deps "$history" "history-$history" "$HISTORY_V1" alpha 2> "$TEST_ROOT/history-$history.err")
+    assert_json_equal "$v1_again" "$v1" "v1 dependencies should be reproduced at history $history"
+done
+grepQuiet "dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/history-0.err"
+grepQuiet "dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/history-1.err"
+grepQuiet "dependency cache hit for 'alpha'" "$TEST_ROOT/history-32.err"
+
+# Lowering the limit trims every history in a row on its next write, not just
+# the target being written: with alpha holding [v2, v1], a write into the same
+# row at a limit of 1 (earth's first miss) leaves alpha with only v2.
+echo "Testing that a lowered history limit shrinks existing rows..."
+history_deps 32 lower "$HISTORY_V1" alpha > /dev/null 2>&1
+history_deps 32 lower "$HISTORY_V2" alpha > /dev/null 2>&1
+history_deps 32 lower "$HISTORY_V1" alpha > /dev/null 2> "$TEST_ROOT/lower-before.err"
+grepQuiet "dependency cache hit for 'alpha'" "$TEST_ROOT/lower-before.err"
+history_deps 1 lower "$HISTORY_V2" alpha earth > /dev/null 2> "$TEST_ROOT/lower-write.err"
+grepQuiet "dependency cache hit for 'alpha'" "$TEST_ROOT/lower-write.err"
+grepQuiet "dependency cache miss, evaluating 'earth'" "$TEST_ROOT/lower-write.err"
+history_deps 32 lower "$HISTORY_V1" alpha > /dev/null 2> "$TEST_ROOT/lower-after.err"
+grepQuiet "dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/lower-after.err"
+
+# ============================================================
+# Eval cache: merging into a row keeps its other targets intact
+# ============================================================
+# `alpha` and `earth` hash to the same shard, so they share a row. At v2 alpha
+# alone changes, and its new closure adds a path (deps/00-extra.txt) that sorts
+# before every existing one, so merging it renumbers every string id that
+# earth's stored candidate refers to. earth must still prove and reproduce its
+# closure afterwards, and so must alpha's older candidate on the way back to v1.
+
+echo "Testing eval cache merges preserve a row's other targets..."
+
+merge_v1=$(history_deps 8 merge-row "$HISTORY_V1" alpha earth 2> /dev/null)
+merge_v2=$(history_deps 8 merge-row "$HISTORY_V2" alpha earth 2> "$TEST_ROOT/merge-row-v2.err")
+grepQuiet "dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/merge-row-v2.err"
+grepQuiet "dependency cache hit for 'earth'" "$TEST_ROOT/merge-row-v2.err"
+assert_jq "$merge_v2" '.alpha | has("deps/00-extra.txt")' "alpha's v2 closure should include the newly read file"
+assert_json_equal "$(jq .earth <<< "$merge_v2")" "$(jq .earth <<< "$merge_v1")" "earth's stored closure should survive alpha's merge"
+merge_v1_again=$(history_deps 8 merge-row "$HISTORY_V1" alpha earth 2> "$TEST_ROOT/merge-row-v1-again.err")
+grepQuietInverse "dependency cache miss" "$TEST_ROOT/merge-row-v1-again.err"
+assert_json_equal "$merge_v1_again" "$merge_v1" "both targets should reproduce their v1 closures from the merged row"
+
+# ============================================================
+# Eval cache: concurrent evaluators merge into shared rows
+# ============================================================
+# Evaluators on one machine share the cache database. Two processes learning
+# different closures for the same target (so the same shard row) at once must
+# both land: each write merges into the latest committed row under the
+# database write lock rather than replacing it.
+
+echo "Testing concurrent evaluators merge into the shared eval cache..."
+
+history_deps 64 concurrent "$HISTORY_V1" alpha > /dev/null 2>&1 &
+merge_v1_pid=$!
+history_deps 64 concurrent "$HISTORY_V2" alpha > /dev/null 2>&1 &
+merge_v2_pid=$!
+wait "$merge_v1_pid"
+wait "$merge_v2_pid"
+for rev in "$HISTORY_V1" "$HISTORY_V2"; do
+    history_deps 64 concurrent "$rev" alpha > /dev/null 2> "$TEST_ROOT/merge-warm.err"
+    grepQuiet "dependency cache hit for 'alpha'" "$TEST_ROOT/merge-warm.err"
+done
+
+# ============================================================
 # Raw-tree contract: git attributes do not filter the Tecnix view
 # ============================================================
 # The clean backend serves the raw committed tree. An export-ignore rule must
