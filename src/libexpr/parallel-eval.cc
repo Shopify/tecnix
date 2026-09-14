@@ -68,6 +68,7 @@ void Executor::createWorker(State & state)
     attrs.set_stack_size(evalStackSize);
     state.threads.push_back(boost::thread(attrs, [&]() {
 #if NIX_USE_BOEHMGC
+        BoehmThreadStack threadStack;
         GC_stack_base sb;
         GC_get_stack_base(&sb);
         GC_register_my_thread(&sb);

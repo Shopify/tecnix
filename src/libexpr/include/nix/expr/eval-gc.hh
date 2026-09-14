@@ -52,6 +52,26 @@ void assertGCInitialized();
 
 #if NIX_USE_BOEHMGC
 /**
+ * Cache native stack bounds before registering a worker with Boehm. Keep
+ * this record alive until after unregistering the worker.
+ */
+class BoehmThreadStack
+{
+    void * threadId;
+    char * osStackLo;
+    char * osStackHi;
+    BoehmThreadStack * next;
+
+    friend void fixupBoehmStackPointer(void **, void *);
+
+public:
+    BoehmThreadStack();
+    ~BoehmThreadStack();
+    BoehmThreadStack(const BoehmThreadStack &) = delete;
+    BoehmThreadStack & operator=(const BoehmThreadStack &) = delete;
+};
+
+/**
  * The number of GC cycles since initGC().
  */
 size_t getGCCycles();

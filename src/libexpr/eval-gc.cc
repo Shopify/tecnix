@@ -80,6 +80,60 @@ static size_t getFreeMem()
     return 0;
 }
 
+// The stack corrector runs under Boehm's allocation lock, potentially with
+// other threads suspended while holding malloc locks. Query pthread bounds
+// before registration, and use the GC lock to publish/remove stack records.
+static BoehmThreadStack * threadStacks = nullptr;
+
+BoehmThreadStack::BoehmThreadStack()
+    : threadId(reinterpret_cast<void *>(pthread_self()))
+{
+    size_t osStackSize;
+#  ifdef __APPLE__
+    osStackSize = pthread_get_stacksize_np(pthread_self());
+    osStackHi = (char *) pthread_get_stackaddr_np(pthread_self());
+    osStackLo = osStackHi - osStackSize;
+#  else
+    pthread_attr_t pattr;
+    if (pthread_attr_init(&pattr))
+        throw Error("BoehmThreadStack: pthread_attr_init failed");
+#    ifdef HAVE_PTHREAD_GETATTR_NP
+    if (pthread_getattr_np(pthread_self(), &pattr))
+        throw Error("BoehmThreadStack: pthread_getattr_np failed");
+#    else
+#      error "Need  `pthread_attr_get_np`"
+#    endif
+    if (pthread_attr_getstack(&pattr, (void **) &osStackLo, &osStackSize))
+        throw Error("BoehmThreadStack: pthread_attr_getstack failed");
+    if (pthread_attr_destroy(&pattr))
+        throw Error("BoehmThreadStack: pthread_attr_destroy failed");
+    osStackHi = osStackLo + osStackSize;
+#  endif
+
+    GC_call_with_alloc_lock(
+        [](void * data) -> void * {
+            auto & stack = *static_cast<BoehmThreadStack *>(data);
+            stack.next = threadStacks;
+            threadStacks = &stack;
+            return nullptr;
+        },
+        this);
+}
+
+BoehmThreadStack::~BoehmThreadStack()
+{
+    GC_call_with_alloc_lock(
+        [](void * data) -> void * {
+            auto stack = static_cast<BoehmThreadStack *>(data);
+            auto link = &threadStacks;
+            while (*link != stack)
+                link = &(*link)->next;
+            *link = stack->next;
+            return nullptr;
+        },
+        this);
+}
+
 /**
  * When a thread goes into a coroutine, we lose its original sp until
  * control flow returns to the thread. This causes Boehm GC to crash
@@ -95,37 +149,16 @@ static size_t getFreeMem()
  * Note that we don't scan coroutine stacks. It's currently assumed
  * that we don't have GC roots in coroutines.
  */
-void fixupBoehmStackPointer(void ** sp_ptr, void * _pthread_id)
+void fixupBoehmStackPointer(void ** sp_ptr, void * pthread_id)
 {
-    void *& sp = *sp_ptr;
-    auto pthread_id = reinterpret_cast<pthread_t>(_pthread_id);
-    size_t osStackSize;
-    char * osStackHi;
-    char * osStackLo;
-
-#  ifdef __APPLE__
-    osStackSize = pthread_get_stacksize_np(pthread_id);
-    osStackHi = (char *) pthread_get_stackaddr_np(pthread_id);
-    osStackLo = osStackHi - osStackSize;
-#  else
-    pthread_attr_t pattr;
-    if (pthread_attr_init(&pattr))
-        throw Error("fixupBoehmStackPointer: pthread_attr_init failed");
-#    ifdef HAVE_PTHREAD_GETATTR_NP
-    if (pthread_getattr_np(pthread_id, &pattr))
-        throw Error("fixupBoehmStackPointer: pthread_getattr_np failed");
-#    else
-#      error "Need  `pthread_attr_get_np`"
-#    endif
-    if (pthread_attr_getstack(&pattr, (void **) &osStackLo, &osStackSize))
-        throw Error("fixupBoehmStackPointer: pthread_attr_getstack failed");
-    if (pthread_attr_destroy(&pattr))
-        throw Error("fixupBoehmStackPointer: pthread_attr_destroy failed");
-    osStackHi = osStackLo + osStackSize;
-#  endif
-
-    if (sp >= osStackHi || sp < osStackLo) // sp is outside the os stack
-        sp = osStackLo;
+    for (auto stack = threadStacks; stack; stack = stack->next) {
+        if (stack->threadId != pthread_id)
+            continue;
+        auto & sp = *sp_ptr;
+        if (sp >= stack->osStackHi || sp < stack->osStackLo)
+            sp = stack->osStackLo;
+        return;
+    }
 }
 
 static inline void initGCReal()
@@ -158,6 +191,7 @@ static inline void initGCReal()
 
     GC_set_oom_fn(oomHandler);
 
+    static BoehmThreadStack mainThreadStack;
     GC_set_sp_corrector(&fixupBoehmStackPointer);
     assert(GC_get_sp_corrector());
 
