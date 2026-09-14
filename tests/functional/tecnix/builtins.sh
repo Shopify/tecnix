@@ -1073,6 +1073,9 @@ assert_jq "$fake_drv_targets" '.alpha.drvPath | startswith("/nix/store/000000000
 # A proven closure candidate retains both the recipe and selected output.
 # Compare actual output paths and Nix string contexts, not just the drvPath:
 # importing a multi-output recipe alone can silently select another output.
+# For outputs = [ "out" "dev" ], import defaults to the alphabetically first
+# output, "dev". Neither derivation nor import adds outputSpecified, even
+# when selecting an output explicitly.
 
 echo "Testing cached target values and selected outputs..."
 
@@ -1098,10 +1101,8 @@ args: builtins.trace "drv-world-resolver-evaluated" {
         args = [ "-c" (builtins.readFile (./deps + "/${id}.txt")) ];
         outputs = [ "out" "dev" ];
       };
-      selected = if id == "alpha"
-        then builtins.replaceStrings [ "\n" ] [ "" ] (builtins.readFile ./selected-output)
-        else "dev";
-    in drv // {
+      selected = builtins.replaceStrings [ "\n" ] [ "" ] (builtins.readFile ./selected-output);
+    in if id == "beta" then drv.dev else drv // {
       outputName = selected;
       outPath = drv.${selected}.outPath;
     };
@@ -1114,11 +1115,13 @@ DRV_HEAD=$(get_head_sha "$DRV_WORLD")
 
 drv_args="{ gitDir = \"$DRV_WORLD/.git\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; }; rev = \"$DRV_HEAD\"; }"
 drv_paths_expr="builtins.mapAttrs (id: t: t.drvPath) (builtins.tecnixTargets (($drv_args) // { targets = [ \"alpha\" \"beta\" ]; }))"
-drv_projection="builtins.mapAttrs (_: t: { drv = t.drvPath; out = t.outPath; outputName = t.outputName; drvContext = builtins.getContext t.drvPath; outputContext = builtins.getContext t.outPath; })"
+drv_projection="builtins.mapAttrs (_: t: { drv = t.drvPath; out = t.outPath; outputName = t.outputName; hasOutputSpecified = t ? outputSpecified; drvContext = builtins.getContext t.drvPath; outputContext = builtins.getContext t.outPath; })"
 drv_selected_expr="$drv_projection (builtins.tecnixTargets (($drv_args) // { targets = [ \"alpha\" \"beta\" ]; }))"
 cold_selected_values=$(tecnix_eval_json_no_cache "$drv_selected_expr")
 assert_jq "$cold_selected_values" '.alpha.outputName == "out" and .beta.outputName == "dev"' \
     "the fixture should select different outputs of multi-output recipes"
+assert_jq "$cold_selected_values" 'all(.[]; .hasOutputSpecified == false)' \
+    "lazy and explicit output selection should leave outputSpecified absent"
 
 cold_drv_values=$(tecnix_eval_json_cache "$drv_paths_expr" 2> "$TEST_ROOT/drv-values-cold.err")
 grepQuiet "tecnixTargets dependencies: dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/drv-values-cold.err"
@@ -1132,7 +1135,7 @@ grepQuiet "tecnixTargets dependencies: dependency cache hit for 'beta'" "$TEST_R
 grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/drv-values-warm.err"
 warm_selected_values=$(tecnix_eval_json_cache "$drv_selected_expr" 2> "$TEST_ROOT/drv-selected-warm.err")
 assert_json_equal "$warm_selected_values" "$cold_selected_values" \
-    "warm target values should preserve selected outputs and both string contexts"
+    "warm target values should preserve selected outputs, absent outputSpecified, and both string contexts"
 grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/drv-selected-warm.err"
 
 # Cached values also serve the includeDependencies + includeTargets shape.

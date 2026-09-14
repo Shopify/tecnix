@@ -850,8 +850,7 @@ static TargetDependencyResult evalTargetDependencies(
     EvalSourceAccessSetId resolveSourceDeps,
     const std::string & target,
     bool keepTargetValue,
-    bool track,
-    bool cachePayload)
+    bool track)
 {
     auto started = std::chrono::steady_clock::now();
     printTalkative(
@@ -887,8 +886,7 @@ static TargetDependencyResult evalTargetDependencies(
                         context,
                         pos,
                         "while evaluating the selected output of a tecnix target");
-                    if (cachePayload && context.empty() && !outputName.empty()
-                        && drvPath.find('\0') == std::string_view::npos
+                    if (context.empty() && !outputName.empty() && drvPath.find('\0') == std::string_view::npos
                         && outputName.find('\0') == std::string_view::npos) {
                         targetPayload.reserve(targetValuePayloadPrefix.size() + drvPath.size() + 1 + outputName.size());
                         targetPayload.append(targetValuePayloadPrefix);
@@ -1086,8 +1084,7 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
                 preparedResolve.sourceDeps,
                 target,
                 keepTargetValues,
-                tecnixSourceTrackingEnabled(state, args),
-                useCache);
+                tecnixSourceTrackingEnabled(state, args));
             if (results[i])
                 results[i]->cacheNeedsUpsert = true;
         };
