@@ -69,7 +69,7 @@ struct TecnixDependencyUpsert
     std::string_view target;
     const DependencyClosure * dependencies;
     /** Stored as the candidate's payload (discovery's target-name JSON, or a
-        target's evaluated drvPath); empty for none. */
+        target's evaluated drvPath/outputName result); empty for none. */
     std::string payload;
 };
 
@@ -92,7 +92,7 @@ public:
     Value * toValue(EvalState & state) const;
 
     /** The matched candidate's payload (discovery's target-name JSON, or a
-        target's evaluated drvPath), if any. */
+        target's evaluated drvPath/outputName result), if any. */
     std::optional<std::string_view> payload() const;
 
 private:
