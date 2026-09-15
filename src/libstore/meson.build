@@ -31,10 +31,11 @@ configdata_priv.set_quoted(
   fs.read('../../.version-determinate').strip(),
 )
 
-configdata_priv.set_quoted(
-  'TECNIX_VERSION',
-  fs.read('../../.version-tecnix').strip(),
-)
+tecnix_version = get_option('tecnix-revision')
+if tecnix_version == ''
+  tecnix_version = fs.read('../../.version-tecnix').strip()
+endif
+configdata_priv.set_quoted('TECNIX_VERSION', tecnix_version)
 
 subdir('nix-meson-build-support/default-system-cpu')
 

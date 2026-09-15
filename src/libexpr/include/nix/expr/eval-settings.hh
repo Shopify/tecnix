@@ -510,8 +510,9 @@ struct EvalSettings : Config
         true,
         "tecnix-eval-cache",
         R"(
-          Whether to use the Tecnix evaluation cache for target-dependency and
-          target-name discovery.
+          Whether to cache Tecnix target results, dependencies, and target names.
+          Persistent caching also requires pure evaluation and a full Tecnix
+          evaluator revision stamp.
 
           Disabling this forces Tecnix dependency discovery to re-evaluate
           instead of reusing results whose recorded source fingerprints still

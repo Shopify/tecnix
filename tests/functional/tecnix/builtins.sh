@@ -1204,6 +1204,60 @@ grepQuiet "tecnixTargetNames: discovery cache hit" "$TEST_ROOT/drv-report-warm-p
 grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/drv-report-warm-parallel.err"
 grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/drv-report-warm-parallel.err"
 
+# ============================================================
+# Eval cache: Tecnix revision isolation
+# ============================================================
+# The Tecnix evaluator revision (embedded at build time) scopes cache
+# rows. Relabeling stored rows as another revision must force
+# re-evaluation, even though source inputs and payloads are unchanged.
+
+echo "Testing cache isolation between Tecnix revisions..."
+
+# Relabel all stored rows as another evaluator build. Exercise both
+# single-shard and multi-shard lookups.
+sqlite3 "$EVAL_CACHE_DB" "UPDATE DependencyShards SET tecnixRevision = '0000000000000000000000000000000000000000'"
+
+# Single-target lookup: the relabeled row misses, the resolver runs, and
+# the correct drvPath is re-evaluated and stored under the real revision.
+revision_alpha_values=$(tecnix_eval_json_cache "builtins.mapAttrs (id: t: t.drvPath) (builtins.tecnixTargets (($drv_args) // { targets = [ \"alpha\" ]; }))" 2> "$TEST_ROOT/drv-revision-single.err")
+assert_json_equal "$revision_alpha_values" "$(jq '{alpha}' <<< "$cold_drv_values")" \
+    "another evaluator revision's single-target entry should re-evaluate correctly"
+grepQuiet "drv-world-resolver-evaluated" "$TEST_ROOT/drv-revision-single.err"
+grepQuietInverse "served from the cache" "$TEST_ROOT/drv-revision-single.err"
+
+# Mixed batch: alpha was just re-evaluated under the real revision (a hit),
+# while beta still carries the relabeled revision (a miss). The resolver
+# runs for beta only; alpha is served from the cache.
+revision_batch_values=$(tecnix_eval_json_cache "$drv_paths_expr" 2> "$TEST_ROOT/drv-revision-batch.err")
+assert_json_equal "$revision_batch_values" "$cold_drv_values" \
+    "another evaluator revision's remaining batch entry should re-evaluate correctly"
+grepQuiet "drv-world-resolver-evaluated" "$TEST_ROOT/drv-revision-batch.err"
+grepQuiet "tecnixTargets: 1 target value(s) served from the cache" "$TEST_ROOT/drv-revision-batch.err"
+
+# Rewarm: both entries are now stored under the real revision and serve
+# from the cache without calling the resolver.
+revision_warm_values=$(tecnix_eval_json_cache "$drv_paths_expr" 2> "$TEST_ROOT/drv-revision-warm.err")
+assert_json_equal "$revision_warm_values" "$cold_drv_values" "new evaluator entries should become reusable"
+grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/drv-revision-warm.err"
+grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/drv-revision-warm.err"
+
+# The target repository's commit is not the evaluator revision. Identical
+# source contents at another commit must remain reusable without re-evaluation.
+echo "Testing unchanged source commit reuse..."
+SOURCE_HEAD=$(get_head_sha "$DRV_WORLD")
+source_args="(($drv_args) // { rev = \"$SOURCE_HEAD\"; })"
+source_values=$(tecnix_eval_json_cache "builtins.mapAttrs (id: t: t.drvPath) (builtins.tecnixTargets (($source_args) // { targets = [ \"alpha\" \"beta\" ]; }))")
+(
+    cd "$DRV_WORLD"
+    git commit --allow-empty -m "advance the source commit without changing inputs"
+)
+UNCHANGED_HEAD=$(get_head_sha "$DRV_WORLD")
+unchanged_args="(($drv_args) // { rev = \"$UNCHANGED_HEAD\"; })"
+unchanged_values=$(tecnix_eval_json_cache "builtins.mapAttrs (id: t: t.drvPath) (builtins.tecnixTargets (($unchanged_args) // { targets = [ \"alpha\" \"beta\" ]; }))" 2> "$TEST_ROOT/drv-source-commit.err")
+assert_json_equal "$unchanged_values" "$source_values" "unchanged sources should reuse answers across source commits"
+grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/drv-source-commit.err"
+grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/drv-source-commit.err"
+
 # Dependency-only queries store value payloads too: a dependency pass (CI
 # warming the cache) is enough for a later plain tecnixTargets call in the
 # same scope to be answered without evaluating anything.

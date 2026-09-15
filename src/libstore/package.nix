@@ -22,6 +22,7 @@
   # Configuration Options
 
   version,
+  tecnixRevision ? null,
 
   embeddedSandboxShell ? stdenv.hostPlatform.isStatic && !stdenv.hostPlatform.isDarwin,
 
@@ -87,6 +88,7 @@ mkMesonLibrary (finalAttrs: {
     (lib.mesonEnable "s3-aws-auth" withAWS)
     (lib.mesonEnable "wasm" enableWasm)
   ]
+  ++ lib.optional (tecnixRevision != null) (lib.mesonOption "tecnix-revision" tecnixRevision)
   ++ lib.optionals stdenv.hostPlatform.isLinux [
     (lib.mesonOption "sandbox-shell" "${busybox-sandbox-shell}/bin/busybox")
   ];

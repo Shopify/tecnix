@@ -46,11 +46,11 @@ Argument handling is largely routine. Two decisions made at this stage matter la
 
 First, **the repository context is pinned.** The `gitDir`, `rev`, and checkout path configure the evaluator's source accessors, and they do so exactly once per evaluator instance. A second call with a different `rev` produces an error rather than a silent reconfiguration. The reason is that the accessors, fingerprints, and cached content constructed downstream are all built lazily against a single commit; permitting reconfiguration would allow content from two commits to mix without any indication that it had.
 
-Second, **the `args` value becomes part of the cache key.** It is converted to a canonical JSON encoding, called the `argsKey`. This is sound because the resolver receives the same value: results can depend on the arguments only through content that is, by construction, the key. It is worth observing what the cache key does *not* contain: the commit. Validity across commits is established by proof rather than by key, as the next step describes.
+Second, **the `args` value becomes part of the cache key.** It is converted to canonical JSON, called the `argsKey`. The resolver receives the same value, so argument-dependent results are scoped by the same content. The key also contains the full Tecnix evaluator revision. It does not contain the target repository's commit: source reuse is established by fingerprint validation. Unknown or abbreviated evaluator revision stamps bypass persistent caching.
 
 ## 4. Step ②: The Cache Question
 
-> **Structure: `TecnixEvalCache`.** A SQLite database holding shard rows keyed by `(gitDir, resolver, argsKey, shard)`. Each shard row contains bounded source-closure histories for the targets assigned to that shard. It exists because skipping evaluation requires remembering what would certify the skipped result.
+> **Structure: `TecnixEvalCache`.** A SQLite database holding shard rows keyed by `(tecnixRevision, gitDir, resolver, argsKey, shard)`. Each shard holds bounded source-closure histories for its targets, isolated from other evaluator revisions. It exists because skipping evaluation requires remembering what would certify the skipped result.
 
 The shard containing `//services/api` is loaded. A single target uses a point lookup for its shard; when many targets are requested, one range scan retrieves the relevant shard rows, and their validation proceeds outside the database lock. Each row's blob begins with the magic bytes `TXDC` (explainer §8).
 

@@ -58,7 +58,7 @@ It does not, because the derivation is the *output* of evaluation, not its input
 
 Tecnix therefore makes evaluation itself input-addressed, with the source closure (§4) playing the role for evaluation that the input hash plays for builds.
 
-Pure evaluation is load-bearing for this construction. The addressing is sound only if every input to evaluation flows through a channel that can be fingerprinted: the pinned git tree, the overlay of uncommitted changes, and the declared arguments. Impure evaluation may consult environment variables, the clock, or arbitrary filesystem paths, none of which a source closure can certify. The persistent cache therefore engages only under `pure-eval`. Impure evaluation continues to function and is still tracked within a run, but its results are never trusted across runs.
+Pure evaluation is load-bearing for this construction. The addressing is sound only if every input to evaluation flows through a channel that can be fingerprinted: the pinned git tree, the overlay of uncommitted changes, and the declared arguments. Impure evaluation may consult environment variables, the clock, or arbitrary filesystem paths, none of which a source closure can certify. The persistent cache requires both `pure-eval` and a full Tecnix evaluator revision stamp. Unknown or abbreviated stamps bypass it rather than sharing an ambiguous namespace. Explicit dependency queries still track their inputs when persistent caching is disabled.
 
 ### 2.3 Design constraints
 
@@ -335,17 +335,19 @@ The failure policy throughout is to fail closed. If `git status` fails, evaluati
 
 ## 8. The Persistent Cache
 
-The cache is a single SQLite database with one physical row family:
+The cache is `tecnix-eval-cache-v3.sqlite`, a single SQLite database with one physical row family:
 
 ```
-DependencyShards(gitDir, resolver, argsKey, shard → multi-target history blob)
+DependencyShards(tecnixRevision, gitDir, resolver, argsKey, shard → multi-target history blob)
 ```
 
 Target discovery (§9) is stored in the same rows, under a reserved key whose candidates carry the discovered target list as a payload; discovery thereby shares the lookup, validation, history, and compaction machinery of ordinary targets rather than maintaining a parallel implementation. The key contains no commit. The `argsKey` column holds the canonical JSON encoding of the caller's `args` value; this is sound as a key because the resolver receives that same value, so results can depend on the arguments only through content that is, by construction, the key.[^ambient-inputs] Validity across trees is established entirely by the closure-matching procedure of §4.1.
 
 Ordinary target candidates carry a versioned `{drvPath, outputName}` payload. Both fields are forced under source tracking, so a source read that changes only output selection still invalidates the candidate. The payload consists of `TXTV1`, a NUL byte, the recipe path, another NUL, and the selected output name. Its fields are viewed directly in the stored bytes, without parsing a JSON object on each hit. A target-value hit also requires a locally valid recipe and an output of that name. Importing the recipe and selecting the recorded output preserves its Nix string contexts — the dependency metadata attached to strings. An unsupported payload, missing recipe, or invalid output selection is an ordinary miss.
 
-[^ambient-inputs]: Ambient inputs that a pure evaluation can still observe — `builtins.nixVersion`, the store directory — are deliberately *not* part of the cache key. This aligns with Nix's existing flake evaluation cache, whose key is likewise content-only. Changes to the evaluator itself, or to Tecnix semantics, are instead handled by bumping the version in the cache's filename (`tecnix-eval-cache-v2.sqlite`), which orphans old rows wholesale rather than mixing results from two evaluator versions in one database.
+The `tecnixRevision` column holds the Tecnix evaluator build revision, not the target repository's commit. Source commits and evaluator revisions are distinct: a source tree that has not changed produces identical fingerprints at any commit, so reuse across commits comes from closure proof, while a different evaluator build starts a separate row family regardless of source state.
+
+[^ambient-inputs]: Exact evaluator revision equality is the initial compatibility boundary. Even a Tecnix revision that leaves evaluation behavior unchanged starts a separate row family. Package builds supply the full revision through the `tecnix-revision` Meson option or `.version-tecnix`; unknown and abbreviated stamps disable persistent caching. This isolates evaluator-code changes, not arbitrary changes to ambient configuration. Other pure-observable inputs, such as the store directory, are not separate key fields here and must remain consistent within a local cache namespace.
 
 A dependency shard row is therefore a physical container for many bounded per-target proof histories, not a log indexed by commits. Each target candidate in that history is a complete source closure: a map from observed source paths to the fingerprints they had when the target was evaluated. A cache hit means that one whole candidate for that target still matches the current tree. The commit at which the candidate was learned may be useful metadata for ordering or eviction, but it is never proof of validity.
 
@@ -376,11 +378,11 @@ The cache keeps **bounded historical source closures, not per-commit entries.** 
 
 A fixed candidate count is the simplest first policy. If measurements show that useful histories are mostly time-shaped rather than count-shaped, a future cache could retain candidates by an approximate 24-hour TTL instead: keep all distinct closures learned in the recent window, then evict by age. That would trade a slightly less predictable row size for a policy closer to the product goal of surviving normal daily branch and merge-queue churn.
 
-Consequently, the cache grows with the logical key space and the bounded history per target, not with repository history. A target's history lives inside the `DependencyShards` row selected by `(gitDir, resolver, argsKey, shard)`, where the shard is a stable hash of the target name; discovery history lives under a reserved key in the same scheme. Within a target history, inserting a freshly evaluated closure deduplicates identical closure content and evicts old candidates by policy when the bound is reached.
+Consequently, the cache grows with the logical key space and bounded history per target, not with the target repository's commit history. A target's history lives inside the `DependencyShards` row selected by `(tecnixRevision, gitDir, resolver, argsKey, shard)`, where the shard is a stable hash of the target name; discovery history lives under a reserved key in the same scheme. Within a target history, inserting a freshly evaluated closure deduplicates identical closure content and evicts old candidates by policy when the bound is reached.
 
 The important behavioral consequence is that switching between divergent trees need not thrash the cache. If two branches produce different but recently seen closures for the same target, both can remain as candidates, and either branch can hit by proving its candidate against the current tree. If the useful candidate has been evicted, the result is only a cold re-evaluation; eviction is a performance policy, not a correctness policy.
 
-The unbounded dimensions are the key tuples themselves: each distinct `args` value, resolver path, or repository location materializes its own row set, and abandoned tuples are not currently reclaimed. The validation discipline supplies the operational escape hatch: since no row is ever trusted without proof against the current tree, the database is disposable. Deleting it is always safe and costs cold re-evaluation.
+The unbounded dimensions are the key tuples themselves: each evaluator revision, `args` value, resolver path, or repository location materializes its own row set, and abandoned tuples are not currently reclaimed. Old evaluator rows can coexist with new ones, but cannot satisfy the new revision's lookups. The database remains disposable: deleting it is safe and costs cold re-evaluation.
 
 ---
 
@@ -450,7 +452,7 @@ Everything else — the interning structure, the frames, the accessors, the cach
 
 ## 11. Limitations
 
-The following limitations are deliberate and documented. The persistent cache requires `pure-eval` (§2.2). Dirty-file state is captured once per evaluation, so mutating the checkout during a query is outside the contract. Access to the repository root is not representable in the closure format and fails closed. The cache has no key-tuple eviction policy; abandoned `(gitDir, resolver, argsKey)` row sets accumulate until the database is deleted, which is always safe (§8.1).
+The following limitations are deliberate and documented. The persistent cache requires `pure-eval` and a full Tecnix revision stamp (§2.2); unversioned development builds evaluate without persistent caching. Dirty-file state is captured once per evaluation, so mutating the checkout during a query is outside the contract. Access to the repository root is not representable in the closure format and fails closed. The cache has no key-tuple eviction policy; abandoned `(tecnixRevision, gitDir, resolver, argsKey)` row sets accumulate until the database is deleted (§8.1).
 
 **Future work.** In a worldtree sandbox, directory and regular-file fingerprints are already single O(1) xattr reads when the daemon serves `user.worldtree.blob-oid` beside `user.worldtree.tree-oid` (§7). The remaining hash fallback covers symlinks — which cannot carry user xattrs at all — and daemons that predate the blob-oid xattr; it is memoized in memory per evaluation. A daemon-side answer for symlink oids (for example serving the parent's raw tree object, whose `(mode, name, oid)` entries are exactly what libgit2 itself reads) would delete the fallback entirely; because every mechanism emits identical fingerprint strings, that change invalidates no stored closure. Additionally, the projection is zone-granular: committed paths outside every visible zone are not observable historically, and mutable-sandbox dirty discovery still assumes a local `git status`, whose worldtree replacement is the daemon's `scoped.status`.
 
