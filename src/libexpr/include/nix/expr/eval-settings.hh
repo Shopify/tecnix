@@ -518,6 +518,49 @@ struct EvalSettings : Config
           match.
         )"};
 
+    Setting<unsigned> tecnixEvalCacheHistory{
+        this,
+        32,
+        "tecnix-eval-cache-history",
+        R"(
+          How many past evaluations the Tecnix evaluation cache keeps per
+          target (and for target-name discovery). Each entry is one complete
+          source closure: the paths an evaluation read and their fingerprints
+          at the time. A cached result is reused when any kept closure still
+          matches the current tree, so a longer history survives more branch
+          switching and merge-queue churn before falling back to
+          re-evaluation, at the cost of larger cache rows and more candidates
+          to check on a lookup.
+
+          The bound is applied whenever a cache row is written: the newly
+          learned closure is always kept and the oldest are dropped beyond the
+          limit, so `0` keeps only the most recent evaluation, and lowering
+          the value shrinks existing histories as they are next written.
+          Evaluators sharing a cache merge into the same history, and each
+          applies its own value to the rows it writes, so the smallest value
+          among them is what bounds shared histories: raise it on every
+          evaluator using the cache directory, not just one.
+
+          Cache rows hold one shard of targets (256 shards per cache scope)
+          and grow linearly with this setting: a row is roughly
+          `8 bytes × targets in the shard × history × paths per closure`,
+          plus about 1 MB of shared strings. For a dense shard (~100 targets
+          with ~250-path closures) that is about 0.3 MB per unit of history:
+
+          - `32` (the default): ~9 MB per row
+          - `128`: ~35 MB per row
+          - `1024`: ~280 MB per row
+          - `10240`: ~2.8 GB per row, past the 1 GB that SQLite allows in a
+            single row; such rows are not written (a warning).
+
+          A full-target evaluation reads every row of its scope, so on disk
+          and in bytes read per evaluation expect a few GB per scope at `128`
+          once histories fill. Memory is bounded by one row at a time: a hit
+          holds about twice the row while validating it, a miss about four
+          times the row while merging and storing it (~36 MB at `32`, ~140 MB
+          at `128`, ~1.1 GB at `1024` for a dense shard).
+        )"};
+
     Setting<bool> tecnixParallelDependencies{
         this,
         true,

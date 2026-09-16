@@ -67,6 +67,7 @@ sources = files(
   'primops.cc',
   'search-path.cc',
   'tecnix-dependency-tracking.cc',
+  'tecnix-eval-cache-row.cc',
   'tecnix-worldtree.cc',
   'tectonix.cc',
   'trivial.cc',

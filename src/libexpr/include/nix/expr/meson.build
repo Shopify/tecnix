@@ -38,6 +38,8 @@ headers = [ config_pub_h ] + files(
   'static-string-data.hh',
   'symbol-table.hh',
   'tecnix/access-set-graph.hh',
+  'tecnix/eval-cache-row.hh',
+  'tecnix/eval-cache.hh',
   'tecnix/force-value.hh',
   'tecnix/source-accessors.hh',
   'tecnix/source-deps.hh',
