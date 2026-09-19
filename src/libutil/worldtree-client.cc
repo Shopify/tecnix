@@ -547,4 +547,19 @@ std::vector<ZoneSha> Client::zoneTreeShas(uint64_t ws, const std::vector<std::st
     return out;
 }
 
+void Client::ping(uint64_t ws)
+{
+    std::string req;
+    putVarintField(req, 1, ws); // ResolveRefReq { ws = 1, name = 2 }
+    putLenField(req, 2, "HEAD");
+
+    try {
+        (void) call("scoped.resolve_ref", req);
+    } catch (const RpcError &) {
+        // A well-formed refusal (e.g. an unborn HEAD, or a daemon that stops serving this
+        // verb) is still proof of a live connection, and the daemon reset its idle timer
+        // when it read the frame. Nothing else to do: the heartbeat's only job is done.
+    }
+}
+
 } // namespace nix::worldtree

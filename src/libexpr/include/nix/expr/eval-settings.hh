@@ -658,6 +658,27 @@ struct EvalSettings : Config
           socket remains the control plane for the mutable root checkout; committed
           Tecnix source bytes and manifest metadata are read directly from this filesystem.
         )"};
+
+    Setting<uint64_t> tectonixWorldtreeKeepaliveIntervalMs{
+        this,
+        120000,
+        "tectonix-worldtree-keepalive-interval-ms",
+        R"(
+          How often, in milliseconds, to heartbeat an idle worldtree control connection.
+
+          The daemon reaps a control-plane connection that has been idle for its
+          `idle_timeout` (300 s in every worldtreed listener today), and the client only
+          finds out at its next request — which then fails mid-evaluation with
+          `worldtree: daemon closed the connection`. Source bytes come from the FUSE
+          projection rather than the socket, so a wide evaluation routinely leaves the
+          control connection untouched for longer than that window.
+
+          The heartbeat is a single cheap, side-effect-free request per interval per
+          connection, serialized with real requests, so it costs nothing measurable. Keep
+          it comfortably below the daemon's `idle_timeout` — the default leaves room for a
+          missed beat. `0` disables it (only sensible against a daemon with no reaper).
+          Consulted only when `tectonix-worldtree-socket` is set.
+        )"};
 };
 
 /**

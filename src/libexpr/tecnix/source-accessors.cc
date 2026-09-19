@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
@@ -23,6 +25,7 @@
 #include <ranges>
 #include <set>
 #include <sstream>
+#include <thread>
 
 #include <sys/xattr.h>
 
@@ -193,10 +196,27 @@ struct WorldtreeConn
     std::mutex mutex;
     worldtree::Client client;
 
-    WorldtreeConn(worldtree::Client && client, uint64_t ws)
+    WorldtreeConn(worldtree::Client && client, uint64_t ws, std::chrono::milliseconds keepaliveInterval)
         : ws(ws)
         , client(std::move(client))
     {
+        // The daemon reaps a control connection idle for its `idle_timeout` (300 s), and a
+        // wide evaluation reads source bytes from the FUSE projection rather than this
+        // socket — so long gaps are normal and the reaper is a live hazard. Heartbeat it.
+        // A zero interval disables the heartbeat (no thread at all).
+        if (keepaliveInterval > std::chrono::milliseconds::zero())
+            keepaliveThread = std::thread([this, keepaliveInterval] { keepalive(keepaliveInterval); });
+    }
+
+    ~WorldtreeConn()
+    {
+        {
+            std::lock_guard<std::mutex> lock(keepaliveMutex);
+            keepaliveStop = true;
+        }
+        keepaliveWake.notify_all();
+        if (keepaliveThread.joinable())
+            keepaliveThread.join();
     }
 
     /** The dirty set with each zone's changed files (for full ZoneDirtyInfo). */
@@ -216,6 +236,43 @@ struct WorldtreeConn
             return std::nullopt;
         return oidToHash(*resp.front().treeSha);
     }
+
+private:
+    /**
+     * Heartbeat the connection every `interval` until it is torn down, so the daemon's
+     * idle reaper never sees the whole window elapse.
+     *
+     * The probe takes the same `mutex` as a real request, so the two never interleave on
+     * the wire; a heartbeat that waits behind a long request is not late, because that
+     * request's own traffic reset the daemon's timer. A transport failure means the
+     * connection is gone and this seam cannot re-dial it, so the loop retires quietly and
+     * leaves the next real request to surface the error with its own context.
+     */
+    void keepalive(std::chrono::milliseconds interval)
+    {
+        std::unique_lock<std::mutex> lock(keepaliveMutex);
+        // `wait_for` returns the predicate: true means "stop requested", so the loop body
+        // runs exactly on a full interval of quiet and exits promptly on teardown.
+        while (!keepaliveWake.wait_for(lock, interval, [this] { return keepaliveStop; })) {
+            lock.unlock();
+            bool alive = true;
+            try {
+                std::lock_guard<std::mutex> callLock(mutex);
+                client.ping(ws);
+            } catch (const std::exception & e) {
+                debug("worldtree: control-connection keepalive stopping: %s", e.what());
+                alive = false;
+            }
+            lock.lock();
+            if (!alive)
+                return;
+        }
+    }
+
+    std::thread keepaliveThread;
+    std::mutex keepaliveMutex;
+    std::condition_variable keepaliveWake;
+    bool keepaliveStop = false;
 };
 
 static constexpr std::string_view WORLDTREE_TREE_OID_XATTR = "user.worldtree.tree-oid";
@@ -302,7 +359,8 @@ static std::shared_ptr<WorldtreeConn> connectWorldtree(const EvalState & state)
     // `ProtocolError` propagate rather than silently degrading to libgit2 (which would read
     // the wrong content, or none).
     auto ws = state.settings.tectonixWorldtreeWorkspace.get();
-    return std::make_shared<WorldtreeConn>(worldtree::Client::connect(socketPath), ws);
+    auto keepalive = std::chrono::milliseconds(state.settings.tectonixWorldtreeKeepaliveIntervalMs.get());
+    return std::make_shared<WorldtreeConn>(worldtree::Client::connect(socketPath), ws, keepalive);
 }
 
 static std::shared_ptr<WorldtreeConn> worldtreeControlConn(const EvalState & state)

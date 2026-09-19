@@ -123,6 +123,19 @@ public:
     /// zone yields its committed oid, a dirty zone the synthesized frontier oid.
     std::vector<ZoneSha> zoneTreeShas(uint64_t ws, const std::vector<std::string> & zones);
 
+    /// A liveness heartbeat: one request/reply round trip that resets the daemon's
+    /// idle-connection timer, keeping a connection the evaluator has not needed for a
+    /// while out of the reaper (`ServeConfig::idle_timeout`, 300 s).
+    ///
+    /// The daemon has no dedicated ping verb, so this uses the cheapest side-effect-free
+    /// one it does have: `scoped.resolve_ref` of `HEAD`, an overlay-then-base ref lookup
+    /// that touches no working tree (unlike a `dirty_zones` sweep or a `zone_tree_shas`
+    /// with an empty zone list) and, unlike a deliberately unknown method, is a verb the
+    /// daemon accounts for by name. A typed [`RpcError`] reply still proves the connection
+    /// is alive and has already reset the timer, so only a transport failure
+    /// ([`ProtocolError`]) is reported — the connection is then gone for good.
+    void ping(uint64_t ws);
+
 private:
     explicit Client(int fd);
 

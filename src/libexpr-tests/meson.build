@@ -74,6 +74,7 @@ sources = files(
   'value/context.cc',
   'value/print.cc',
   'value/value.cc',
+  'worldtree-keepalive.cc',
 )
 
 include_dirs = [ include_directories('.') ]
