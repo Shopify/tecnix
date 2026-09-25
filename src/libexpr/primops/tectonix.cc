@@ -161,6 +161,7 @@ static void prim_unsafeTectonixInternalTree(EvalState & state, const PosIdx pos,
     GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
     auto accessor = repo->getAccessor(hash, opts, "world-tree");
 
+    FetchToStoreCallerScope callerScope(FetchToStoreCaller::TectonixTree);
     auto storePath = fetchToStore(
         state.fetchSettings,
         *state.store,
