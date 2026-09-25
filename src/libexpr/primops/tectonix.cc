@@ -460,5 +460,67 @@ static RegisterPrimOp primop_unsafeTectonixInternalGitSha({
     )",
     .impl = prim_unsafeTectonixInternalGitSha,
 });
+// ============================================================================
+// builtins.tectonixWorldInput worldPath
+// Returns a string "/nix/var/tectonix/world/<tree-oid>" with World context.
+// Does NOT copy anything into the store. The oid is recorded in Tecnix
+// tracking (same as __unsafeTectonixInternalTreeSha).
+// ============================================================================
+static void prim_tectonixWorldInput(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto worldPath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'worldPath' argument to builtins.tectonixWorldInput");
+
+    // Record the access in Tecnix tracking (same as __unsafeTectonixInternalTreeSha).
+    if (auto ctx = currentTecnixThreadState.trackingContext)
+        ctx->recordAccess(normalizeTrackedRepoPath(worldPath));
+
+    // Get the tree oid for this world path.
+    auto sha = getWorldTreeSha(state, worldPath);
+    auto oidStr = sha.gitRev();
+
+    // Build the view mount path: <view-root>/<oid>
+    // The view root is /nix/var/tectonix/world (canonical on both Linux and macOS).
+    // On macOS without a sandbox, the host path equals the build path.
+    static constexpr const char * viewRoot = "/nix/var/tectonix/world";
+    auto mountPath = std::string(viewRoot) + "/" + oidStr;
+
+    // Create World string context element.
+    NixStringContext context;
+    context.insert(NixStringContextElem::World{
+        .oid = sha,
+        .path = std::string(worldPath),
+    });
+
+    v.mkString(mountPath, context, state.mem);
+}
+
+static RegisterPrimOp primop_tectonixWorldInput({
+    .name = "__tectonixWorldInput",
+    .args = {"worldPath"},
+    .doc = R"(
+      Declare a World input for a derivation. Returns the view mount path
+      (`<view-root>/<tree-oid>`) as a string with World input context.
+
+      The path is NOT copied into the Nix store. Instead, the oid and path
+      are recorded in the string context, and `derivationStrict` collects
+      them into the `__worldInputs` derivation attribute. A provider
+      materializes the tree at build time.
+
+      Example:
+      ```nix
+      let src = builtins.tectonixWorldInput "//areas/tools/cargo-wrapper"; in
+      derivation {
+        name = "check";
+        builder = "${pkgs.bash}/bin/sh";
+        args = [ "-c" "find ${src} -type f | sort > $out" ];
+        __worldInputs = "auto";  # collected from context automatically
+      }
+      ```
+
+      Requires `--tectonix-git-dir` and `--tectonix-git-sha` to be set.
+    )",
+    .impl = prim_tectonixWorldInput,
+});
 
 } // namespace nix

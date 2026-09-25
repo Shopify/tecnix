@@ -25,7 +25,7 @@ struct ExperimentalFeatureDetails
  * feature, we either have no issue at all if few features are not added
  * at the end of the list, or a proper merge conflict if they are.
  */
-constexpr size_t numXpFeatures = 1 + static_cast<size_t>(Xp::CNSA);
+constexpr size_t numXpFeatures = 1 + static_cast<size_t>(Xp::WorldInputs);
 
 constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails = {{
     {
@@ -312,6 +312,16 @@ constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails
             Enable support for keys and signatures using algorithms from the
             Commercial National Security Algorithm (CNSA) Suite: ECDSA P-384
             and ML-DSA-44, ML-DSA-65, and ML-DSA-87.
+        )",
+        .trackingUrl = "",
+    },
+    {
+        .tag = Xp::WorldInputs,
+        .name = "world-inputs",
+        .description = R"(
+            Enable native World inputs: derivations can declare git-tree-oid-addressed
+            source views via `builtins.tectonixWorldInput` and the `__worldInputs`
+            derivation attribute. A provider materializes these views at build time.
         )",
         .trackingUrl = "",
     },

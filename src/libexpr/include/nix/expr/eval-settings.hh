@@ -657,6 +657,18 @@ struct EvalSettings : Config
           This setting is consulted only when `tectonix-worldtree-socket` is set. The
           socket remains the control plane for the mutable root checkout; committed
           Tecnix source bytes and manifest metadata are read directly from this filesystem.
+    };
+
+    Setting<std::string> tectonixWorldViewRoot{
+        this,
+        "/nix/var/tectonix/world",
+        "tectonix-world-view-root",
+        R"(
+          Root directory for World input views.
+
+          When `builtins.tectonixWorldInput` is used, the returned path is
+          `<view-root>/<tree-oid>`. The builder's World-inputs provider must
+          materialize the tree at this path before the build runs.
         )"};
 };
 

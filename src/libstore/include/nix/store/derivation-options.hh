@@ -20,7 +20,18 @@ struct StructuredAttrs;
 
 template<typename V>
 struct DerivedPathMap;
+/**
+ * A single World input declaration: a World path and its git tree oid.
+ * The builder's provider materializes the tree at
+ * `<world-view-root>/<oid>` before the build runs.
+ */
+struct DerivationOptionsWorldInput
+{
+    std::string path;
+    std::string oid;
 
+    bool operator==(const DerivationOptionsWorldInput &) const = default;
+};
 /**
  * This represents all the special options on a `Derivation`.
  *
@@ -146,6 +157,15 @@ struct DerivationOptions
      * env: __impureHostDeps
      */
     StringSet impureHostDeps = {};
+    /**
+     * env: __worldInputs
+     *
+     * A JSON array of `{"path": "...", "oid": "..."}` objects.
+     * Collected automatically by `derivationStrict` from World string
+     * context elements. Each entry declares a source tree the derivation
+     * reads at build time.
+     */
+    std::vector<DerivationOptionsWorldInput> worldInputs = {};
 
     /**
      * env: impureEnvVars

@@ -630,6 +630,7 @@ string_t AttrCursor::getStringWithContext()
                             },
                             [&](const NixStringContextElem::Opaque & o) -> const StorePath * { return &o.path; },
                             [&](const NixStringContextElem::Path & p) -> const StorePath * { return nullptr; },
+                            [&](const NixStringContextElem::World & w) -> const StorePath * { return nullptr; },
                         },
                         c.raw);
                     if (path) {

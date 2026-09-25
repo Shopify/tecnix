@@ -579,6 +579,18 @@ public:
               empty line. Entries have the same format as `sandbox-paths`.
         )"};
 
+    Setting<std::string> worldInputsProvider{
+        this,
+        "",
+        "world-inputs-provider",
+        R"(
+          Program that materializes World input views for derivations that
+          declare `__worldInputs`. Invoked as `<program> <oid> <dst-dir>`
+          and must leave a read-only directory at `<dst-dir>` whose contents
+          hash to the given tree oid. When empty (the default), builds with
+          World inputs fail with a clear error.
+        )"};
+
 #ifdef __linux__
     Setting<bool> filterSyscalls{
         this,

@@ -120,6 +120,20 @@ TEST(NixStringContextElemTest, built_built_xp)
     ASSERT_THROW(
         NixStringContextElem::parse("!foo!bar!g1w7hy3qg1w7hy3qg1w7hy3qg1w7hy3q-x.drv"), MissingExperimentalFeature);
 }
+/**
+ * Round trip (string <-> data structure) test for
+ * `NixStringContextElem::World`.
+ */
+TEST(NixStringContextElemTest, world)
+{
+    std::string_view world = "~a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2://areas/tools/tec";
+    auto elem = NixStringContextElem::parse(world);
+    auto * p = std::get_if<NixStringContextElem::World>(&elem.raw);
+    ASSERT_TRUE(p);
+    ASSERT_EQ(p->oid.to_string(HashFormat::Base16, false), "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
+    ASSERT_EQ(p->path, "//areas/tools/tec");
+    ASSERT_EQ(elem.to_string(), world);
+}
 
 #ifndef COVERAGE
 
