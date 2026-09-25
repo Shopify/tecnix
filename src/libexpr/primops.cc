@@ -17,6 +17,7 @@
 #include "nix/expr/value-to-xml.hh"
 #include "nix/expr/primops.hh"
 #include "nix/fetchers/fetch-to-store.hh"
+#include "nix/expr/ingestion-stats.hh"
 #include "nix/util/sort.hh"
 #include "nix/util/mounted-source-accessor.hh"
 #include "nix/expr/provenance.hh"
@@ -2970,6 +2971,7 @@ static void addPath(
                 : path2;
 
             FetchToStoreCallerScope callerScope(FetchToStoreCaller::BuiltinsPath);
+            IngestionSiteScope ingestionSiteScope(pos);
             auto dstPath = refs.empty() ? fetchToStore(
                                               state.fetchSettings,
                                               *state.store,
