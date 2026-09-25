@@ -66,9 +66,11 @@ std::string_view fetchToStoreCallerName(FetchToStoreCaller caller)
         return "tectonixZone";
     case FetchToStoreCaller::TectonixTree:
         return "tectonixTree";
-    default:
+    case FetchToStoreCaller::Other:
+    case FetchToStoreCaller::Count:
         return "other";
     }
+    unreachable();
 }
 
 FetchToStoreCallerScope::FetchToStoreCallerScope(FetchToStoreCaller caller)
