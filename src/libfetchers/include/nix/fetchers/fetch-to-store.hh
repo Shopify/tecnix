@@ -68,6 +68,21 @@ struct FetchToStoreStats
 std::vector<FetchToStoreStats> getFetchToStoreStats();
 
 /**
+ * Running totals of the ingestion work (hashing or copying a path into the
+ * store) done by the calling thread, across all callers. Evaluator code
+ * snapshots these around a call to charge the ingestion it caused to a call
+ * site or target.
+ */
+struct FetchToStoreThreadTotals
+{
+    uint64_t ingestions = 0;
+    uint64_t bytesCopied = 0;
+    uint64_t nanosIngesting = 0;
+};
+
+FetchToStoreThreadTotals getFetchToStoreThreadTotals();
+
+/**
  * Copy the `path` to the Nix store.
  */
 StorePath fetchToStore(

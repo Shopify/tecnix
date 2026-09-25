@@ -51,6 +51,8 @@ AtomicFetchToStoreStats fetchToStoreStats[nFetchToStoreCallers];
 
 thread_local FetchToStoreCaller currentFetchToStoreCaller = FetchToStoreCaller::Other;
 
+thread_local FetchToStoreThreadTotals fetchToStoreThreadTotals;
+
 } // namespace
 
 std::string_view fetchToStoreCallerName(FetchToStoreCaller caller)
@@ -101,6 +103,11 @@ std::vector<FetchToStoreStats> getFetchToStoreStats()
         };
     }
     return out;
+}
+
+FetchToStoreThreadTotals getFetchToStoreThreadTotals()
+{
+    return fetchToStoreThreadTotals;
 }
 
 StorePath fetchToStore(
@@ -211,6 +218,7 @@ std::pair<StorePath, Hash> fetchToStore2(
                   auto storePath = store.addToStore(name, path, method, HashAlgorithm::SHA256, {}, filter2, repair);
                   auto info = store.queryPathInfo(storePath);
                   stats.bytesCopied += info->narSize;
+                  fetchToStoreThreadTotals.bytesCopied += info->narSize;
                   assert(info->references.empty());
                   auto hash = method == ContentAddressMethod::Raw::NixArchive ? info->narHash : ({
                       if (!info->ca || info->ca->method != method)
@@ -231,8 +239,11 @@ std::pair<StorePath, Hash> fetchToStore2(
         stats.dryRunIngestions++;
     if (filter)
         stats.filteredIngestions++;
-    stats.nanosIngesting += static_cast<uint64_t>(
+    auto nanos = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ingestStart).count());
+    stats.nanosIngesting += nanos;
+    fetchToStoreThreadTotals.ingestions++;
+    fetchToStoreThreadTotals.nanosIngesting += nanos;
 
     if (cacheKey)
         settings.getCache()->upsert(*cacheKey, {{"hash", hash.to_string(HashFormat::SRI, true)}});

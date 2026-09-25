@@ -10,6 +10,7 @@
 #include "nix/expr/eval-settings.hh"
 #include "nix/expr/parallel-eval.hh"
 #include "nix/expr/primops.hh"
+#include "nix/expr/ingestion-stats.hh"
 #include "nix/expr/tecnix/access-set-graph.hh"
 #include "nix/expr/tecnix/eval-cache.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
@@ -880,6 +881,7 @@ static TargetDependencyResult evalTargetDependencies(
     bool track)
 {
     auto started = std::chrono::steady_clock::now();
+    IngestionTargetScope ingestionTargetScope(target);
     printTalkative(
         "tecnixTargets dependencies: start evaluating '%s' on %s thread",
         target,

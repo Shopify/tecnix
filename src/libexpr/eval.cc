@@ -29,6 +29,7 @@
 #include "nix/util/current-process.hh"
 #include "nix/store/async-path-writer.hh"
 #include "nix/expr/parallel-eval.hh"
+#include "nix/expr/ingestion-stats.hh"
 
 #include "parser-tab.hh"
 
@@ -44,6 +45,8 @@
 #include <fstream>
 #include <functional>
 #include <ranges>
+#include <mutex>
+#include <unordered_map>
 
 #include <nlohmann/json.hpp>
 
@@ -2591,6 +2594,82 @@ BackedStringView EvalState::coerceToString(
         .debugThrow();
 }
 
+namespace {
+
+struct IngestionCounts
+{
+    uint64_t ingestions = 0;
+    uint64_t bytes = 0;
+    uint64_t nanos = 0;
+
+    void add(const IngestionCounts & other)
+    {
+        ingestions += other.ingestions;
+        bytes += other.bytes;
+        nanos += other.nanos;
+    }
+};
+
+struct IngestionAttribution
+{
+    std::mutex mutex;
+    std::unordered_map<std::string, IngestionCounts> byTarget;
+    std::unordered_map<PosIdx, IngestionCounts> bySite;
+};
+
+IngestionAttribution ingestionAttribution;
+
+thread_local const std::string * currentIngestionTarget = nullptr;
+
+/** Work already charged by site scopes on this thread, so enclosing scopes can exclude it. */
+thread_local IngestionCounts ingestionChargedByScopes;
+
+} // namespace
+
+IngestionTargetScope::IngestionTargetScope(const std::string & target)
+    : previous(currentIngestionTarget)
+{
+    currentIngestionTarget = &target;
+}
+
+IngestionTargetScope::~IngestionTargetScope()
+{
+    currentIngestionTarget = previous;
+}
+
+IngestionSiteScope::IngestionSiteScope(PosIdx pos)
+    : pos(pos)
+{
+    auto totals = getFetchToStoreThreadTotals();
+    ingestions = totals.ingestions;
+    bytes = totals.bytesCopied;
+    nanos = totals.nanosIngesting;
+    innerIngestions = ingestionChargedByScopes.ingestions;
+    innerBytes = ingestionChargedByScopes.bytes;
+    innerNanos = ingestionChargedByScopes.nanos;
+}
+
+IngestionSiteScope::~IngestionSiteScope()
+{
+    auto totals = getFetchToStoreThreadTotals();
+    IngestionCounts own{
+        .ingestions = (totals.ingestions - ingestions) - (ingestionChargedByScopes.ingestions - innerIngestions),
+        .bytes = (totals.bytesCopied - bytes) - (ingestionChargedByScopes.bytes - innerBytes),
+        .nanos = (totals.nanosIngesting - nanos) - (ingestionChargedByScopes.nanos - innerNanos),
+    };
+    if (own.ingestions == 0)
+        return;
+    ingestionChargedByScopes.add(own);
+    try {
+        std::lock_guard lock(ingestionAttribution.mutex);
+        ingestionAttribution.bySite[pos].add(own);
+        ingestionAttribution.byTarget[currentIngestionTarget ? *currentIngestionTarget : std::string("(no target)")]
+            .add(own);
+    } catch (...) {
+        // Statistics only: never let bookkeeping escape a destructor.
+    }
+}
+
 StorePath EvalState::copyPathToStore(NixStringContext & context, const SourcePath & path, PosIdx pos)
 {
     // fetchToStore's srcToStore cache can make repeated path materialization a
@@ -2604,6 +2683,7 @@ StorePath EvalState::copyPathToStore(NixStringContext & context, const SourcePat
         error<EvalError>("file names are not allowed to end in '%1%'", drvExtension).debugThrow();
 
     FetchToStoreCallerScope callerScope(FetchToStoreCaller::CoercedPath);
+    IngestionSiteScope ingestionSiteScope(pos);
     auto dstPath = fetchToStore(
         fetchSettings,
         *store,
@@ -3156,6 +3236,39 @@ void EvalState::printStatistics()
                 {"secondsIngesting", s.secondsIngesting},
             };
         }
+    }
+    {
+        std::lock_guard lock(ingestionAttribution.mutex);
+        std::vector<std::pair<PosIdx, IngestionCounts>> sites(
+            ingestionAttribution.bySite.begin(), ingestionAttribution.bySite.end());
+        std::ranges::sort(sites, [](const auto & a, const auto & b) {
+            if (a.second.bytes != b.second.bytes)
+                return a.second.bytes > b.second.bytes;
+            return a.second.ingestions > b.second.ingestions;
+        });
+        auto & siteList = topObj["fetchToStoreBySite"];
+        siteList = json::array();
+        for (const auto & [sitePos, counts] : sites | std::views::take(100)) {
+            json obj = json::object();
+            if (auto p = positions[sitePos]) {
+                if (auto path = std::get_if<SourcePath>(&p.origin))
+                    obj["file"] = path->to_string();
+                obj["line"] = p.line;
+                obj["column"] = p.column;
+            }
+            obj["ingestions"] = counts.ingestions;
+            obj["bytesCopied"] = counts.bytes;
+            obj["secondsIngesting"] = static_cast<double>(counts.nanos) / 1e9;
+            siteList.push_back(std::move(obj));
+        }
+        auto & targetObj = topObj["fetchToStoreByTarget"];
+        targetObj = json::object();
+        for (const auto & [target, counts] : ingestionAttribution.byTarget)
+            targetObj[target] = {
+                {"ingestions", counts.ingestions},
+                {"bytesCopied", counts.bytes},
+                {"secondsIngesting", static_cast<double>(counts.nanos) / 1e9},
+            };
     }
 #if NIX_USE_BOEHMGC
     topObj["gc"] = {
