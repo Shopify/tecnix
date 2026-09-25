@@ -741,6 +741,7 @@ StorePath getLegacyTectonixZoneStorePath(EvalState & state, std::string_view zon
         auto accessor = repo->getAccessor(treeSha, opts, "zone");
 
         std::string name = "zone-" + sanitizeZoneNameForStore(zonePath);
+        FetchToStoreCallerScope callerScope(FetchToStoreCaller::TectonixZone);
         auto storePath = fetchToStore(
             state.fetchSettings, *state.store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
 
@@ -759,6 +760,7 @@ worldtreeMountAccessor(EvalState & state, const Hash & treeSha, std::string_view
 
     if (!state.settings.lazyTrees) {
         // Eager: copy the zone content into the store now (content-addressed by content).
+        FetchToStoreCallerScope callerScope(FetchToStoreCaller::TectonixZone);
         auto storePath = fetchToStore(
             state.fetchSettings, *state.store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
         state.allowPath(storePath);
@@ -974,6 +976,7 @@ static StorePath getLegacyTectonixZoneFromCheckout(
 
     if (!state.settings.lazyTrees) {
         auto accessor = makeDirtyAccessor();
+        FetchToStoreCallerScope callerScope(FetchToStoreCaller::TectonixZone);
         auto storePath = fetchToStore(
             state.fetchSettings, *state.store, SourcePath(accessor, CanonPath::root), FetchMode::Copy, name);
         state.allowPath(storePath);

@@ -23,6 +23,7 @@ SourcePath EvalState::storePath(const StorePath & path)
 StorePath EvalState::devirtualize(const StorePath & path, StringMap * rewrites)
 {
     if (auto mount = storeFS->getMount(CanonPath(store->printStorePath(path)))) {
+        FetchToStoreCallerScope callerScope(FetchToStoreCaller::Devirtualize);
         auto storePath = fetchToStore(
             fetchSettings,
             *store,

@@ -2603,6 +2603,7 @@ StorePath EvalState::copyPathToStore(NixStringContext & context, const SourcePat
     if (nix::isDerivation(path.path.abs()))
         error<EvalError>("file names are not allowed to end in '%1%'", drvExtension).debugThrow();
 
+    FetchToStoreCallerScope callerScope(FetchToStoreCaller::CoercedPath);
     auto dstPath = fetchToStore(
         fetchSettings,
         *store,
@@ -3138,6 +3139,24 @@ void EvalState::printStatistics()
     topObj["nrLookups"] = nrLookups.load();
     topObj["nrPrimOpCalls"] = nrPrimOpCalls.load();
     topObj["nrFunctionCalls"] = nrFunctionCalls.load();
+    {
+        auto & fetchToStoreObj = topObj["fetchToStore"];
+        fetchToStoreObj = json::object();
+        auto fetchStats = getFetchToStoreStats();
+        for (size_t i = 0; i < fetchStats.size(); ++i) {
+            const auto & s = fetchStats[i];
+            fetchToStoreObj[std::string(fetchToStoreCallerName(static_cast<FetchToStoreCaller>(i)))] = {
+                {"calls", s.calls},
+                {"memoryCacheHits", s.memoryCacheHits},
+                {"persistentCacheHits", s.persistentCacheHits},
+                {"ingestions", s.ingestions},
+                {"dryRunIngestions", s.dryRunIngestions},
+                {"filteredIngestions", s.filteredIngestions},
+                {"bytesCopied", s.bytesCopied},
+                {"secondsIngesting", s.secondsIngesting},
+            };
+        }
+    }
 #if NIX_USE_BOEHMGC
     topObj["gc"] = {
         {"heapSize", heapSize},

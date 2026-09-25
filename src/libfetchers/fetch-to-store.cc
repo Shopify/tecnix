@@ -5,6 +5,9 @@
 
 #include <boost/unordered/concurrent_flat_map.hpp>
 
+#include <atomic>
+#include <chrono>
+
 namespace nix {
 
 struct SrcToStore
@@ -26,6 +29,76 @@ makeSourcePathToHashCacheKey(std::string_view fingerprint, ContentAddressMethod 
     return fetchers::Cache::Key{
         "sourcePathToHash",
         {{"fingerprint", std::string(fingerprint)}, {"method", std::string{method.render()}}, {"path", path.abs()}}};
+}
+
+namespace {
+
+struct AtomicFetchToStoreStats
+{
+    std::atomic<uint64_t> calls{0};
+    std::atomic<uint64_t> memoryCacheHits{0};
+    std::atomic<uint64_t> persistentCacheHits{0};
+    std::atomic<uint64_t> ingestions{0};
+    std::atomic<uint64_t> dryRunIngestions{0};
+    std::atomic<uint64_t> filteredIngestions{0};
+    std::atomic<uint64_t> bytesCopied{0};
+    std::atomic<uint64_t> nanosIngesting{0};
+};
+
+constexpr size_t nFetchToStoreCallers = static_cast<size_t>(FetchToStoreCaller::Count);
+
+AtomicFetchToStoreStats fetchToStoreStats[nFetchToStoreCallers];
+
+thread_local FetchToStoreCaller currentFetchToStoreCaller = FetchToStoreCaller::Other;
+
+} // namespace
+
+std::string_view fetchToStoreCallerName(FetchToStoreCaller caller)
+{
+    switch (caller) {
+    case FetchToStoreCaller::CoercedPath:
+        return "coercedPath";
+    case FetchToStoreCaller::Devirtualize:
+        return "devirtualize";
+    case FetchToStoreCaller::BuiltinsPath:
+        return "builtinsPath";
+    case FetchToStoreCaller::TectonixZone:
+        return "tectonixZone";
+    case FetchToStoreCaller::TectonixTree:
+        return "tectonixTree";
+    default:
+        return "other";
+    }
+}
+
+FetchToStoreCallerScope::FetchToStoreCallerScope(FetchToStoreCaller caller)
+    : previous(currentFetchToStoreCaller)
+{
+    currentFetchToStoreCaller = caller;
+}
+
+FetchToStoreCallerScope::~FetchToStoreCallerScope()
+{
+    currentFetchToStoreCaller = previous;
+}
+
+std::vector<FetchToStoreStats> getFetchToStoreStats()
+{
+    std::vector<FetchToStoreStats> out(nFetchToStoreCallers);
+    for (size_t i = 0; i < nFetchToStoreCallers; ++i) {
+        auto & s = fetchToStoreStats[i];
+        out[i] = FetchToStoreStats{
+            .calls = s.calls.load(),
+            .memoryCacheHits = s.memoryCacheHits.load(),
+            .persistentCacheHits = s.persistentCacheHits.load(),
+            .ingestions = s.ingestions.load(),
+            .dryRunIngestions = s.dryRunIngestions.load(),
+            .filteredIngestions = s.filteredIngestions.load(),
+            .bytesCopied = s.bytesCopied.load(),
+            .secondsIngesting = static_cast<double>(s.nanosIngesting.load()) / 1e9,
+        };
+    }
+    return out;
 }
 
 StorePath fetchToStore(
@@ -56,14 +129,19 @@ std::pair<StorePath, Hash> fetchToStore2(
     // record the access: a cache hit absorbs the physical read, and skipping
     // recording here would silently drop the path from the dependency
     // closure of any tracked evaluation after the first.
+    auto & stats = fetchToStoreStats[static_cast<size_t>(currentFetchToStoreCaller)];
+    stats.calls++;
+
     auto [subpath, fingerprint] = path.accessor->getFingerprint(path.path);
 
     auto srcToStoreKey = std::make_tuple(path, method.raw, std::string(name));
 
     if (!filter) {
         auto dstPathCached = getConcurrent(settings.srcToStore->cache, srcToStoreKey);
-        if (dstPathCached && (mode == FetchMode::DryRun || std::get<2>(*dstPathCached) == FetchMode::Copy))
+        if (dstPathCached && (mode == FetchMode::DryRun || std::get<2>(*dstPathCached) == FetchMode::Copy)) {
+            stats.memoryCacheHits++;
             return std::make_pair(std::get<0>(*dstPathCached), std::get<1>(*dstPathCached));
+        }
     }
 
     std::optional<fetchers::Cache::Key> cacheKey;
@@ -89,6 +167,7 @@ std::pair<StorePath, Hash> fetchToStore2(
                     store.printStorePath(storePath),
                     hash.to_string(HashFormat::SRI, true));
                 settings.srcToStore->cache.insert_or_assign(srcToStoreKey, std::make_tuple(storePath, hash, mode));
+                stats.persistentCacheHits++;
                 return {storePath, hash};
             }
             debug("source path '%s' not in store", path);
@@ -110,6 +189,8 @@ std::pair<StorePath, Hash> fetchToStore2(
 
     auto filter2 = filter ? *filter : defaultPathFilter;
 
+    auto ingestStart = std::chrono::steady_clock::now();
+
     auto [storePath, hash] =
         mode == FetchMode::DryRun
             ? [&]() {
@@ -127,6 +208,7 @@ std::pair<StorePath, Hash> fetchToStore2(
                   // right away (like computeStorePath()).
                   auto storePath = store.addToStore(name, path, method, HashAlgorithm::SHA256, {}, filter2, repair);
                   auto info = store.queryPathInfo(storePath);
+                  stats.bytesCopied += info->narSize;
                   assert(info->references.empty());
                   auto hash = method == ContentAddressMethod::Raw::NixArchive ? info->narHash : ({
                       if (!info->ca || info->ca->method != method)
@@ -141,6 +223,14 @@ std::pair<StorePath, Hash> fetchToStore2(
                       hash.to_string(HashFormat::SRI, true));
                   return std::make_pair(storePath, hash);
               }();
+
+    stats.ingestions++;
+    if (mode == FetchMode::DryRun)
+        stats.dryRunIngestions++;
+    if (filter)
+        stats.filteredIngestions++;
+    stats.nanosIngesting += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ingestStart).count());
 
     if (cacheKey)
         settings.getCache()->upsert(*cacheKey, {{"hash", hash.to_string(HashFormat::SRI, true)}});

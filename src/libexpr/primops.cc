@@ -2969,6 +2969,7 @@ static void addPath(
                   }
                 : path2;
 
+            FetchToStoreCallerScope callerScope(FetchToStoreCaller::BuiltinsPath);
             auto dstPath = refs.empty() ? fetchToStore(
                                               state.fetchSettings,
                                               *state.store,
