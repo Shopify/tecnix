@@ -107,6 +107,106 @@ static RegisterPrimOp primop_worldManifestInverted({
     .impl = prim_worldManifestInverted,
 });
 
+// ============================================================================
+// builtins.tectonixManifestEntry zonePath
+// Returns null or { id = "W-xxxxxx" } for a single zone, recording only that
+// entry as a tracked dependency (synthetic path .meta/manifest.json#<zonePath>)
+// instead of the whole manifest file.
+// ============================================================================
+static void prim_tectonixManifestEntry(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zonePath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zonePath' argument to builtins.tectonixManifestEntry");
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(".meta/manifest.json#" + std::string(zonePath));
+    auto & manifest = getManifest(state);
+    auto it = manifest.find(std::string(zonePath));
+    if (it == manifest.end() || !it->is_object() || !it->contains("id") || !(*it).at("id").is_string()) {
+        v.mkNull();
+        return;
+    }
+    auto zoneAttrs = state.buildBindings(1);
+    zoneAttrs.alloc("id").mkString((*it).at("id").get<std::string>(), state.mem);
+    v.mkAttrs(zoneAttrs);
+}
+static RegisterPrimOp primop_tectonixManifestEntry({
+    .name = "__tectonixManifestEntry",
+    .args = {"zonePath"},
+    .doc = R"(
+      Get a single zone's manifest entry as a Nix attrset { id = "W-xxxxxx"; },
+      or null if the zone does not exist. Records only that entry as a Tecnix
+      tracked dependency (synthetic path .meta/manifest.json#<zonePath>), not
+      the whole manifest file.
+      Example: `builtins.tectonixManifestEntry "//areas/tools/dev"` returns `{ id = "W-123456"; }`.
+    )",
+    .impl = prim_tectonixManifestEntry,
+});
+// ============================================================================
+// builtins.tectonixManifestKeys
+// Returns the sorted list of zone paths (manifest keys), recording only the
+// key set as a tracked dependency (synthetic path .meta/manifest.json#keys).
+// ============================================================================
+static void prim_tectonixManifestKeys(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(".meta/manifest.json#keys");
+    auto & manifest = getManifest(state);
+    std::vector<std::string> keys;
+    keys.reserve(manifest.size());
+    for (auto & [path, value] : manifest.items())
+        keys.push_back(path);
+    std::sort(keys.begin(), keys.end());
+    auto list = state.buildList(keys.size());
+    for (size_t i = 0; i < keys.size(); i++) {
+        auto * val = state.allocValue();
+        val->mkString(keys[i], state.mem);
+        list[i] = val;
+    }
+    v.mkList(list);
+}
+static RegisterPrimOp primop_tectonixManifestKeys({
+    .name = "__tectonixManifestKeys",
+    .args = {},
+    .doc = R"(
+      Get the sorted list of zone paths (manifest keys). Records only the key
+      set as a Tecnix tracked dependency (synthetic path .meta/manifest.json#keys),
+      not the whole manifest file. Only world-wide folds that enumerate every
+      zone should use this; per-target resolution should use tectonixManifestEntry.
+    )",
+    .impl = prim_tectonixManifestKeys,
+});
+// ============================================================================
+// builtins.tectonixManifestIdToPath zoneId
+// Returns null or the zone path for a zone ID, recording only that id lookup
+// as a tracked dependency (synthetic path .meta/manifest.json#id/<zoneId>).
+// ============================================================================
+static void prim_tectonixManifestIdToPath(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zoneId = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zoneId' argument to builtins.tectonixManifestIdToPath");
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(".meta/manifest.json#id/" + std::string(zoneId));
+    auto & manifest = getManifest(state);
+    for (auto & [path, value] : manifest.items()) {
+        if (value.contains("id") && value.at("id").is_string() && value.at("id").get<std::string>() == zoneId) {
+            v.mkString(path, state.mem);
+            return;
+        }
+    }
+    v.mkNull();
+}
+static RegisterPrimOp primop_tectonixManifestIdToPath({
+    .name = "__tectonixManifestIdToPath",
+    .args = {"zoneId"},
+    .doc = R"(
+      Get the zone path for a zone ID, or null if not found. Records only that
+      id lookup as a Tecnix tracked dependency (synthetic path
+      .meta/manifest.json#id/<zoneId>), not the whole manifest file.
+      Example: `builtins.tectonixManifestIdToPath "W-123456"` returns `"//areas/tools/dev"`.
+    )",
+    .impl = prim_tectonixManifestIdToPath,
+});
+
 static std::string normalizeTrackedRepoPath(std::string_view path);
 
 // ============================================================================
