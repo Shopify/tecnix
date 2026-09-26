@@ -3,8 +3,8 @@
 # build it with a provider, and verify the output. Also verify that a
 # second build with an unchanged oid is a no-op (cache hit).
 #
-# Runs on macOS (sandbox off). Linux sandbox testing commands are in
-# the report.
+# The eval side (tests 1-6) runs everywhere; the builder side (7-10)
+# runs in a Linux sandbox with a chroot store, no root needed.
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -110,29 +110,32 @@ TOFILE_OUT=$(nix eval --raw "${evalOpts[@]}" \
 echo "$TOFILE_OUT" | grep -qi "world" && echo "PASS: toFile refused with World message" \
     || fail "toFile should refuse World input: $TOFILE_OUT"
 
-# -- Tests 7-9 exercise the builder-side provider, which materializes views
-#    at the canonical `/nix/var/tectonix/world/<oid>`. Without a sandbox that
-#    remaps a host view root onto the canonical path, that directory must be
-#    host-writable, i.e. this needs Linux + root (or a chroot store on the
-#    lab). Skip cleanly elsewhere; see the report for the Linux commands.
-if [[ "$(uname -s)" != "Linux" ]] || ! mkdir -p /nix/var/tectonix/world 2>/dev/null; then
-    echo "SKIP: builder-side tests (7-9) require Linux with a writable /nix/var/tectonix/world (root, or a chroot store). Eval-side tests 1-6 passed."
+# -- Builder side (tests 7-10). The drv always names the canonical
+#    `/nix/var/tectonix/world/<oid>`; the provider materializes the view under
+#    `tectonix-world-view-root` on the host, and the Linux sandbox bind-mounts
+#    it onto the canonical path. That needs no root: build in a chroot store
+#    with the sandbox on (the same setup as linux-sandbox.sh). Elsewhere the
+#    builder side is skipped and tests 1-6 stand.
+if [[ "$(uname -s)" != "Linux" ]] || ! canUseSandbox || [[ ! $SHELL =~ /nix/store ]]; then
+    echo "SKIP: builder-side tests (7-10) need the Linux sandbox and a \$SHELL from /nix/store. Eval-side tests 1-6 passed."
     echo "All World inputs tests passed! (builder-side skipped on this platform)"
     exit 0
 fi
+requiresUnprivilegedUserNamespaces
 
-# -- Test 7: Build with provider --
-echo "Testing build with provider..."
-
-# Create a provider script that materializes the tree using git objects
+# Provider: <oid> <dst>. Writes the tree from git objects, read-only, with an
+# atomic rename, and logs each call so tests can count them.
 PROVIDER="$TEST_ROOT/provider.sh"
-cat > "$PROVIDER" << 'EOF'
+PROVIDER_LOG="$TEST_ROOT/provider-calls"
+: > "$PROVIDER_LOG"
+cat > "$PROVIDER" << 'P'
 #!/usr/bin/env bash
 set -euo pipefail
 oid="$1"; dst="$2"; git_dir="${WORLD_INPUTS_GIT_DIR:?}"
+echo "$oid" >> "${WORLD_INPUTS_PROVIDER_LOG:?}"
 tmp="${dst}.tmp.$$"; mkdir -p "$tmp"
 git -C "$git_dir" ls-tree -r --full-tree -z "$oid" | while IFS=$'\t' read -r -d '' meta path; do
-    mode=$(printf '%s' "$meta" | awk '{print $1}'); type=$(printf '%s' "$meta" | awk '{print $2}'); blob=$(printf '%s' "$meta" | awk '{print $3}')
+    read -r mode _ blob <<< "$meta"
     mkdir -p "$tmp/$(dirname "$path")"
     case "$mode" in
         120000) ln -s "$(git -C "$git_dir" cat-file blob "$blob")" "$tmp/$path" ;;
@@ -141,51 +144,70 @@ git -C "$git_dir" ls-tree -r --full-tree -z "$oid" | while IFS=$'\t' read -r -d 
         *) git -C "$git_dir" cat-file blob "$blob" > "$tmp/$path" ;;
     esac
 done
-chmod -R a-w "$tmp" 2>/dev/null || true
+chmod -R a-w "$tmp"
 mv "$tmp" "$dst"
-EOF
+P
 chmod +x "$PROVIDER"
+export WORLD_INPUTS_GIT_DIR="$TEST_WORLD/.git" WORLD_INPUTS_PROVIDER_LOG="$PROVIDER_LOG"
 
-# Use a scratch store to avoid the system daemon (which lacks our builder changes)
-SCRATCH_STORE="$TEST_ROOT/store"
-mkdir -p "$SCRATCH_STORE"
+# Chroot store with a store dir other than /nix/store, so the host's
+# /nix/store (and $SHELL in it) can be bind-mounted into the sandbox.
+chmod -R u+w "$TEST_ROOT/store0" 2>/dev/null || true
+rm -rf "$TEST_ROOT/store0" "$TEST_ROOT/views"
+export NIX_STORE_DIR=/my/store NIX_REMOTE="$TEST_ROOT/store0"
+VIEW_ROOT="$TEST_ROOT/views"
 
-BUILD_OUT=$(nix build "$DRV_PATH" \
-    --extra-experimental-features 'nix-command world-inputs' \
-    --option world-inputs-provider "$PROVIDER" \
-    --store "local?root=$SCRATCH_STORE" \
-    --print-out-paths --no-link 2>&1) || {
-    echo "Build failed: $BUILD_OUT"
-    fail "Build with provider failed"
+# A builder that lists the view's files with bash builtins only.
+wiDrv() {
+    nix eval --raw "${evalOpts[@]}" --expr '
+      let src = builtins.tectonixWorldInput "//areas/tools/dev";
+      in (derivation {
+        name = "'"$1"'";
+        builder = builtins.getEnv "SHELL";
+        system = builtins.currentSystem;
+        args = [ "-c" "shopt -s globstar dotglob; for f in ${src}/**; do [[ -f $f ]] && echo \"\${f#${src}/}\"; done > $out" ];
+      }).drvPath'
 }
+buildOpts=(
+    --extra-experimental-features 'nix-command world-inputs'
+    --option sandbox true --option sandbox-paths /nix/store
+    --option system-features world-inputs
+    --option tectonix-world-view-root "$VIEW_ROOT"
+)
+calls() { wc -l < "$PROVIDER_LOG"; }
 
-OUT_PATH=$(echo "$BUILD_OUT" | tail -1)
-echo "Build output: $OUT_PATH"
-[[ -f "$OUT_PATH" ]] || fail "Output file missing"
-echo "Output:"; cat "$OUT_PATH"
+# -- Test 7: build with the provider in the sandbox --
+DRV_A=$(wiDrv wi-a)
+OUT_A=$(nix build "$DRV_A^out" "${buildOpts[@]}" --option world-inputs-provider "$PROVIDER" --print-out-paths --no-link)
+LIST_A=$(nix store cat "$OUT_A")
+grep -qx "zone.nix" <<< "$LIST_A" || fail "output should list zone.nix: $LIST_A"
+grep -qx "README.md" <<< "$LIST_A" || fail "output should list README.md: $LIST_A"
+[[ -d "$VIEW_ROOT/$TREE_OID" ]] || fail "view not materialized at $VIEW_ROOT/$TREE_OID"
+[[ $(calls) -eq 1 ]] || fail "expected 1 provider call, got $(calls)"
+[[ ! -w "$VIEW_ROOT/$TREE_OID" ]] || fail "view should be read-only"
+echo "PASS: sandboxed build sees the view at the canonical path"
 
-grep -q "zone.nix" "$OUT_PATH" || fail "Output should contain zone.nix"
-grep -q "README.md" "$OUT_PATH" || fail "Output should contain README.md"
-echo "PASS: build output contains expected view files"
-
-# -- Test 8: Second build is a no-op (cache hit) --
-SECOND=$(nix build "$DRV_PATH" \
-    --extra-experimental-features 'nix-command world-inputs' \
-    --option world-inputs-provider "$PROVIDER" \
-    --store "local?root=$SCRATCH_STORE" \
-    --print-out-paths --no-link 2>&1) || fail "Second build failed"
-SECOND_OUT=$(echo "$SECOND" | tail -1)
-[[ "$OUT_PATH" == "$SECOND_OUT" ]] || fail "Cache hit should give same path"
+# -- Test 8: second build is a no-op: same output, no provider call --
+OUT_A2=$(nix build "$DRV_A^out" "${buildOpts[@]}" --option world-inputs-provider "$PROVIDER" --print-out-paths --no-link)
+[[ "$OUT_A" == "$OUT_A2" ]] || fail "second build should give the same path"
+[[ $(calls) -eq 1 ]] || fail "second build should not call the provider (calls: $(calls))"
 echo "PASS: second build is a no-op"
 
-# -- Test 9: Build fails without provider --
-echo "Testing build without provider..."
-FAIL_OUT=$(nix build "$DRV_PATH" \
-    --extra-experimental-features 'nix-command world-inputs' \
-    --store "local?root=$SCRATCH_STORE" \
-    --print-out-paths --no-link 2>&1 || true)
-echo "$FAIL_OUT" | grep -qi "world-inputs-provider" \
-    && echo "PASS: build fails without provider" \
-    || fail "Build without provider should mention world-inputs-provider: $FAIL_OUT"
+# -- Test 9: derivations sharing an oid, in one build and after the view
+#    exists, all see it; the provider still ran only once for that oid --
+DRV_B=$(wiDrv wi-b); DRV_C=$(wiDrv wi-c)
+OUTS=$(nix build "$DRV_B^out" "$DRV_C^out" "${buildOpts[@]}" --option world-inputs-provider "$PROVIDER" --print-out-paths --no-link)
+for o in $OUTS; do
+    [[ "$(nix store cat "$o")" == "$LIST_A" ]] || fail "$o should list the same files as $OUT_A"
+done
+[[ $(calls) -eq 1 ]] || fail "an existing view should be reused, not re-provided (calls: $(calls))"
+echo "PASS: an existing view is mapped into every derivation that declares it"
+
+# -- Test 10: building without a provider fails with a clear message --
+DRV_D=$(wiDrv wi-d)
+FAIL_OUT=$(nix build "$DRV_D^out" "${buildOpts[@]}" --no-link 2>&1 || true)
+echo "$FAIL_OUT" | grep -q "world-inputs-provider" \
+    || fail "build without provider should mention world-inputs-provider: $FAIL_OUT"
+echo "PASS: build fails without provider"
 
 echo "All World inputs tests passed!"

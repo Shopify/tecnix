@@ -1008,35 +1008,36 @@ PathsInChroot DerivationBuilderImpl::getPathsInSandbox()
             auto hostDir = hostViewRoot + "/" + wi.oid;
             auto sandboxDir = canonicalViewRoot + "/" + wi.oid;
 
-            /* Skip if already materialized on the host (idempotent). */
-            if (maybeLstat(hostDir))
-                continue;
+            /* Views are immutable and named by oid, so an existing host
+               directory is reused: only a missing view calls the provider.
+               The sandbox mapping below is needed either way (another
+               derivation, or an earlier build, may have materialized it). */
+            if (!maybeLstat(hostDir)) {
+                std::filesystem::create_directories(hostViewRoot);
 
-            /* Ensure the host view root exists. */
-            std::filesystem::create_directories(hostViewRoot);
+                /* Invoke the provider: <program> <oid> <dst-dir> */
+                auto [status, output] = runProgram(
+                    RunOptions{
+                        .program = provider,
+                        .lookupPath = true,
+                        .args = {wi.oid, hostDir},
+                    });
+                if (!statusOk(status))
+                    throw ExecError(
+                        status,
+                        "world-inputs-provider '%s' failed for oid '%s' (exit %d): %s",
+                        provider,
+                        wi.oid,
+                        status,
+                        output);
 
-            /* Invoke the provider: <program> <oid> <dst-dir> */
-            auto [status, output] = runProgram(
-                RunOptions{
-                    .program = provider,
-                    .lookupPath = true,
-                    .args = {wi.oid, hostDir},
-                });
-            if (!statusOk(status))
-                throw ExecError(
-                    status,
-                    "world-inputs-provider '%s' failed for oid '%s' (exit %d): %s",
-                    provider,
-                    wi.oid,
-                    status,
-                    output);
-
-            if (!maybeLstat(hostDir))
-                throw Error(
-                    "world-inputs-provider '%s' did not create the expected directory '%s' for oid '%s'",
-                    provider,
-                    hostDir,
-                    wi.oid);
+                if (!maybeLstat(hostDir))
+                    throw Error(
+                        "world-inputs-provider '%s' did not create the expected directory '%s' for oid '%s'",
+                        provider,
+                        hostDir,
+                        wi.oid);
+            }
 
             /* Expose the materialized view in the sandbox at the canonical
                path. When the host view root differs from the canonical root,
