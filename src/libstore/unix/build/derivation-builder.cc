@@ -983,10 +983,15 @@ PathsInChroot DerivationBuilderImpl::getPathsInSandbox()
     }
 
     /* Materialize World input views via the configured provider.
-       Each __worldInputs entry declares a git tree oid. The provider
-       is invoked as `<program> <oid> <dst-dir>` and must leave a
-       read-only directory at <dst-dir> hashing to the oid. The view
-       is then exposed at the canonical path <view-root>/<oid>. */
+
+       Each __worldInputs entry declares a git tree oid plus the canonical
+       World path. The path recorded in the derivation (and thus visible
+       inside the sandbox) is always the canonical
+       `/nix/var/tectonix/world/<oid>`. The `tectonix-world-view-root` setting
+       only controls where the provider materializes the view on the *host*;
+       the builder then maps that host directory onto the canonical sandbox
+       path. At the default setting the two coincide (no remap). */
+    static const std::string canonicalViewRoot = "/nix/var/tectonix/world";
     if (!drvOptions.worldInputs.empty()) {
         auto provider = localSettings.worldInputsProvider.get();
         if (provider.empty())
@@ -996,27 +1001,26 @@ PathsInChroot DerivationBuilderImpl::getPathsInSandbox()
                 store.printStorePath(drvPath),
                 drvOptions.worldInputs.size());
 
-        /* Determine the view root. We use /nix/var/tectonix/world as the
-           canonical path on both Linux and macOS. On macOS without a sandbox,
-           the host path equals the build path (no bind remap). */
-        auto viewRoot = std::string("/nix/var/tectonix/world");
+        /* Where the provider writes views on the host. */
+        auto hostViewRoot = localSettings.tectonixWorldViewRoot.get();
 
         for (const auto & wi : drvOptions.worldInputs) {
-            auto dstDir = viewRoot + "/" + wi.oid;
+            auto hostDir = hostViewRoot + "/" + wi.oid;
+            auto sandboxDir = canonicalViewRoot + "/" + wi.oid;
 
-            /* Skip if already materialized (idempotent). */
-            if (maybeLstat(dstDir))
+            /* Skip if already materialized on the host (idempotent). */
+            if (maybeLstat(hostDir))
                 continue;
 
-            /* Ensure the view root exists. */
-            std::filesystem::create_directories(viewRoot);
+            /* Ensure the host view root exists. */
+            std::filesystem::create_directories(hostViewRoot);
 
             /* Invoke the provider: <program> <oid> <dst-dir> */
             auto [status, output] = runProgram(
                 RunOptions{
                     .program = provider,
                     .lookupPath = true,
-                    .args = {wi.oid, dstDir},
+                    .args = {wi.oid, hostDir},
                 });
             if (!statusOk(status))
                 throw ExecError(
@@ -1027,17 +1031,21 @@ PathsInChroot DerivationBuilderImpl::getPathsInSandbox()
                     status,
                     output);
 
-            if (!maybeLstat(dstDir))
+            if (!maybeLstat(hostDir))
                 throw Error(
                     "world-inputs-provider '%s' did not create the expected directory '%s' for oid '%s'",
                     provider,
-                    dstDir,
+                    hostDir,
                     wi.oid);
 
-            /* Expose the materialized view in the sandbox.
-               On Linux with sandbox: bind-mount host path to the same path.
-               On macOS without sandbox: the path is already visible on the host. */
-            pathsInChroot[dstDir] = {.source = dstDir};
+            /* Expose the materialized view in the sandbox at the canonical
+               path. When the host view root differs from the canonical root,
+               this bind-mounts the host directory onto the canonical path;
+               when they coincide (the default) it is a no-op remap. On macOS
+               without a sandbox the host path is already visible at the
+               canonical path only if they coincide; otherwise the darwin
+               sandbox profile / pathsInChroot exposes hostDir. */
+            pathsInChroot[sandboxDir] = {.source = hostDir};
         }
     }
 

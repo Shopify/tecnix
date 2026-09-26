@@ -15,10 +15,10 @@ HEAD_SHA=$(get_head_sha "$TEST_WORLD")
 
 # Common nix eval options for World inputs
 evalOpts=(
+    --no-pure-eval
     --extra-experimental-features 'nix-command world-inputs'
     --option tectonix-git-dir "$TEST_WORLD/.git"
     --option tectonix-git-sha "$HEAD_SHA"
-    --option tectonix-world-view-root "/nix/var/tectonix/world"
 )
 
 # -- Test 1: builtins.tectonixWorldInput returns the view path --
@@ -68,10 +68,10 @@ git -C "$TEST_WORLD" add -A && git -C "$TEST_WORLD" commit -m "Add file" --quiet
 NEW_SHA=$(get_head_sha "$TEST_WORLD")
 
 NEW_DRV=$(nix eval --raw \
+    --no-pure-eval \
     --extra-experimental-features 'nix-command world-inputs' \
     --option tectonix-git-dir "$TEST_WORLD/.git" \
     --option tectonix-git-sha "$NEW_SHA" \
-    --option tectonix-world-view-root "/nix/var/tectonix/world" \
     --expr "($evalExpr).drvPath")
 
 [[ "$DRV_PATH" != "$NEW_DRV" ]] || fail "drvPath should change when oid changes"
@@ -84,10 +84,10 @@ git -C "$TEST_WORLD" add -A && git -C "$TEST_WORLD" commit -m "Unrelated" --quie
 UNREL_SHA=$(get_head_sha "$TEST_WORLD")
 
 UNREL_DRV=$(nix eval --raw \
+    --no-pure-eval \
     --extra-experimental-features 'nix-command world-inputs' \
     --option tectonix-git-dir "$TEST_WORLD/.git" \
     --option tectonix-git-sha "$UNREL_SHA" \
-    --option tectonix-world-view-root "/nix/var/tectonix/world" \
     --expr "($evalExpr).drvPath")
 
 [[ "$DRV_PATH" == "$UNREL_DRV" ]] || fail "drvPath should not change for unrelated commit"
@@ -109,6 +109,17 @@ TOFILE_OUT=$(nix eval --raw "${evalOpts[@]}" \
     --expr 'let src = builtins.tectonixWorldInput "//areas/tools/dev"; in builtins.toFile "test" src' 2>&1 || true)
 echo "$TOFILE_OUT" | grep -qi "world" && echo "PASS: toFile refused with World message" \
     || fail "toFile should refuse World input: $TOFILE_OUT"
+
+# -- Tests 7-9 exercise the builder-side provider, which materializes views
+#    at the canonical `/nix/var/tectonix/world/<oid>`. Without a sandbox that
+#    remaps a host view root onto the canonical path, that directory must be
+#    host-writable, i.e. this needs Linux + root (or a chroot store on the
+#    lab). Skip cleanly elsewhere; see the report for the Linux commands.
+if [[ "$(uname -s)" != "Linux" ]] || ! mkdir -p /nix/var/tectonix/world 2>/dev/null; then
+    echo "SKIP: builder-side tests (7-9) require Linux with a writable /nix/var/tectonix/world (root, or a chroot store). Eval-side tests 1-6 passed."
+    echo "All World inputs tests passed! (builder-side skipped on this platform)"
+    exit 0
+fi
 
 # -- Test 7: Build with provider --
 echo "Testing build with provider..."

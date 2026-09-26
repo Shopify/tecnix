@@ -591,6 +591,22 @@ public:
           World inputs fail with a clear error.
         )"};
 
+    Setting<std::string> tectonixWorldViewRoot{
+        this,
+        "/nix/var/tectonix/world",
+        "tectonix-world-view-root",
+        R"(
+          Host directory where the World-inputs provider materializes tree
+          views before they are mapped into the build sandbox.
+
+          The path written into derivations (`__worldInputs`) is always the
+          canonical `/nix/var/tectonix/world/<oid>`, regardless of this
+          setting. This setting only controls where the provider creates the
+          view on the host; the builder then maps `<view-root>/<oid>` to the
+          canonical sandbox path. When left at the default, the host path and
+          the canonical sandbox path coincide (no remap needed).
+        )"};
+
 #ifdef __linux__
     Setting<bool> filterSyscalls{
         this,
