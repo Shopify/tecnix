@@ -31,6 +31,11 @@ struct Arbitrary<NixStringContextElem::Path>
 {
     static Gen<NixStringContextElem::Path> arbitrary();
 };
+template<>
+struct Arbitrary<NixStringContextElem::World>
+{
+    static Gen<NixStringContextElem::World> arbitrary();
+};
 
 template<>
 struct Arbitrary<NixStringContextElem>

@@ -51,6 +51,43 @@ static bool getBoolAttr(const StringMap & env, const StructuredAttrs * parsed, c
     return def;
 }
 
+static std::optional<std::vector<DerivationOptionsWorldInput>>
+getWorldInputsAttr(const StringMap & env, const StructuredAttrs * parsed, const std::string & name)
+{
+    auto parseJson = [&](const std::string & s) -> std::vector<DerivationOptionsWorldInput> {
+        auto j = nlohmann::json::parse(s);
+        std::vector<DerivationOptionsWorldInput> result;
+        for (auto & entry : j) {
+            result.push_back({
+                .path = entry.at("path").get<std::string>(),
+                .oid = entry.at("oid").get<std::string>(),
+            });
+        }
+        return result;
+    };
+    if (parsed) {
+        if (auto * i = get(parsed->structuredAttrs, name)) {
+            // In structured attrs, __worldInputs is a JSON array value.
+            try {
+                std::vector<DerivationOptionsWorldInput> result;
+                for (auto & entry : *i) {
+                    result.push_back({
+                        .path = entry.at("path").get<std::string>(),
+                        .oid = entry.at("oid").get<std::string>(),
+                    });
+                }
+                return result;
+            } catch (Error & e) {
+                e.addTrace({}, "while parsing attribute \"%s\"", name);
+                throw;
+            }
+        }
+    } else {
+        if (auto * i = get(env, name))
+            return parseJson(*i);
+    }
+    return {};
+}
 static std::optional<StringSet>
 getStringSetAttr(const StringMap & env, const StructuredAttrs * parsed, const std::string & name)
 {
@@ -337,6 +374,7 @@ DerivationOptions<SingleDerivedPath> derivationOptionsFromStructuredAttrs(
             getStringAttr(env, parsed, "__sandboxProfile").value_or(defaults.additionalSandboxProfile),
         .noChroot = getBoolAttr(env, parsed, "__noChroot", defaults.noChroot),
         .impureHostDeps = getStringSetAttr(env, parsed, "__impureHostDeps").value_or(defaults.impureHostDeps),
+        .worldInputs = getWorldInputsAttr(env, parsed, "__worldInputs").value_or(defaults.worldInputs),
         .impureEnvVars = getStringSetAttr(env, parsed, "impureEnvVars").value_or(defaults.impureEnvVars),
         .allowLocalNetworking = getBoolAttr(env, parsed, "__darwinAllowLocalNetworking", defaults.allowLocalNetworking),
         .requiredSystemFeatures =
@@ -508,6 +546,7 @@ std::optional<DerivationOptions<StorePath>> tryResolve(
         .additionalSandboxProfile = drvOptions.additionalSandboxProfile,
         .noChroot = drvOptions.noChroot,
         .impureHostDeps = drvOptions.impureHostDeps,
+        .worldInputs = drvOptions.worldInputs,
         .impureEnvVars = drvOptions.impureEnvVars,
         .allowLocalNetworking = drvOptions.allowLocalNetworking,
         .requiredSystemFeatures = drvOptions.requiredSystemFeatures,
@@ -552,6 +591,17 @@ DerivationOptions<SingleDerivedPath> adl_serializer<DerivationOptions<SingleDeri
         .additionalSandboxProfile = getString(valueAt(json, "additionalSandboxProfile")),
         .noChroot = getBoolean(valueAt(json, "noChroot")),
         .impureHostDeps = getStringSet(valueAt(json, "impureHostDeps")),
+        .worldInputs = [&]() {
+            auto & arr = valueAt(json, "worldInputs");
+            std::vector<DerivationOptionsWorldInput> result;
+            for (auto & entry : arr) {
+                result.push_back({
+                    .path = entry.at("path").get<std::string>(),
+                    .oid = entry.at("oid").get<std::string>(),
+                });
+            }
+            return result;
+        }(),
         .impureEnvVars = getStringSet(valueAt(json, "impureEnvVars")),
         .allowLocalNetworking = getBoolean(valueAt(json, "allowLocalNetworking")),
 
@@ -582,10 +632,15 @@ void adl_serializer<DerivationOptions<SingleDerivedPath>>::to_json(
     json["unsafeDiscardReferences"] = o.unsafeDiscardReferences;
     json["passAsFile"] = o.passAsFile;
     json["exportReferencesGraph"] = o.exportReferencesGraph;
-
     json["additionalSandboxProfile"] = o.additionalSandboxProfile;
     json["noChroot"] = o.noChroot;
     json["impureHostDeps"] = o.impureHostDeps;
+    {
+        auto arr = nlohmann::json::array();
+        for (const auto & wi : o.worldInputs)
+            arr.push_back({{"path", wi.path}, {"oid", wi.oid}});
+        json["worldInputs"] = arr;
+    }
     json["impureEnvVars"] = o.impureEnvVars;
     json["allowLocalNetworking"] = o.allowLocalNetworking;
 

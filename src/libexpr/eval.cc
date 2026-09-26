@@ -2766,6 +2766,14 @@ std::pair<SingleDerivedPath, std::string_view> EvalState::coerceToSingleDerivedP
             [&](NixStringContextElem::Path && p) -> SingleDerivedPath {
                 error<EvalError>("string '%s' has no context", s).withTrace(pos, errorCtx).debugThrow();
             },
+            [&](NixStringContextElem::World && w) -> SingleDerivedPath {
+                error<EvalError>(
+                    "string '%s' has a World input context (oid %s) which is not a store path. "
+                    "World inputs are only available inside derivations at build time.",
+                    s, w.oid.to_string(HashFormat::Base16, false))
+                    .withTrace(pos, errorCtx)
+                    .debugThrow();
+            },
         },
         ((NixStringContextElem &&) *context.begin()).raw);
     return {

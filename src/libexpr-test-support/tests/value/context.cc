@@ -24,6 +24,18 @@ Gen<NixStringContextElem::Path> Arbitrary<NixStringContextElem::Path>::arbitrary
         };
     });
 }
+Gen<NixStringContextElem::World> Arbitrary<NixStringContextElem::World>::arbitrary()
+{
+    // Generate a random 20-byte SHA1 hash as hex, plus a fixed path.
+    return gen::map(
+        gen::container<std::string>(40, gen::element<char>('a', 'b', 'c', 'd', 'e', 'f', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9')),
+        [](std::string oidHex) {
+            return NixStringContextElem::World{
+                .oid = Hash::parseNonSRIUnprefixed(oidHex, HashAlgorithm::SHA1),
+                .path = "//areas/test/zone",
+            };
+        });
+}
 
 Gen<NixStringContextElem> Arbitrary<NixStringContextElem>::arbitrary()
 {
@@ -42,6 +54,8 @@ Gen<NixStringContextElem> Arbitrary<NixStringContextElem>::arbitrary()
                     gen::arbitrary<NixStringContextElem::Built>(), [](NixStringContextElem a) { return a; });
             case 3:
                 return gen::map(gen::arbitrary<NixStringContextElem::Path>(), [](NixStringContextElem a) { return a; });
+            case 4:
+                return gen::map(gen::arbitrary<NixStringContextElem::World>(), [](NixStringContextElem a) { return a; });
             default:
                 assert(false);
             }

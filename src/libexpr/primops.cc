@@ -109,6 +109,17 @@ StringMap EvalState::realiseContext(const NixStringContext & context, StorePathS
                 [&](const NixStringContextElem::Path & p) {
                     // FIXME: do something?
                 },
+                [&](const NixStringContextElem::World & w) {
+                    // World inputs are not store paths; they are materialized
+                    // by a provider at build time. Refuse eval-time realisation.
+                    error<EvalError>(
+                        "cannot realise World input '%s' (oid %s) at evaluation time. "
+                        "World inputs are only available inside derivations at build time. "
+                        "For eval-time reads of zone source, use builtins.unsafeTectonixInternalZonePath or lazy zone paths instead.",
+                        w.path,
+                        w.oid.to_string(HashFormat::Base16, false))
+                        .debugThrow();
+                },
             },
             c.raw);
     }
@@ -1785,8 +1796,49 @@ static void derivationStrictInternal(
                             state.store->printStorePath(devirtualized));
                     }
                 },
+                [&](const NixStringContextElem::World & w) {
+                    // Collected after the loop into __worldInputs.
+                },
             },
             c.raw);
+    }
+    /* Collect World input context elements into __worldInputs. */
+    {
+        struct WorldInputEntry
+        {
+            std::string path;
+            std::string oid;
+            bool operator<(const WorldInputEntry & o) const
+            {
+                return std::tie(path, oid) < std::tie(o.path, o.oid);
+            }
+        };
+        std::set<WorldInputEntry> worldInputs;
+        for (auto & c : context) {
+            if (auto * w = std::get_if<NixStringContextElem::World>(&c.raw)) {
+                worldInputs.insert({
+                    w->path,
+                    w->oid.to_string(HashFormat::Base16, false),
+                });
+            }
+        }
+        if (!worldInputs.empty()) {
+            // Build a sorted JSON array: [{"path":"...","oid":"..."}, ...]
+            nlohmann::json j = nlohmann::json::array();
+            for (auto & wi : worldInputs) {
+                j.push_back({{"path", wi.path}, {"oid", wi.oid}});
+            }
+            drv.env["__worldInputs"] = j.dump();
+
+            // Add "world-inputs" to requiredSystemFeatures so schedulers
+            // never send such drvs to builders without a provider.
+            std::string & rsf = drv.env["requiredSystemFeatures"];
+            if (rsf.find("world-inputs") == std::string::npos) {
+                if (!rsf.empty())
+                    rsf += " ";
+                rsf += "world-inputs";
+            }
+        }
     }
 
     drv.applyRewrites(rewrites);
@@ -2775,7 +2827,17 @@ static void prim_toFile(EvalState & state, const PosIdx pos, Value ** args, Valu
                     name,
                     state.store->printStorePath(devirtualized));
             }
-        } else
+        } else if (auto w = std::get_if<NixStringContextElem::World>(&c.raw))
+            state
+                .error<EvalError>(
+                    "builtins.toFile cannot reference a World input (path '%s', oid %s). "
+                    "World inputs are only available inside derivations at build time; "
+                    "they cannot be embedded in a file created at eval time.",
+                    w->path,
+                    w->oid.to_string(HashFormat::Base16, false))
+                .atPos(pos)
+                .debugThrow();
+        else
             state
                 .error<EvalError>(
                     "files created by %1% may not reference derivations, but %2% references %3%",

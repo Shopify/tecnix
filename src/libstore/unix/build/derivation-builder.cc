@@ -982,6 +982,65 @@ PathsInChroot DerivationBuilderImpl::getPathsInSandbox()
         pathsInChroot[i] = {i, true};
     }
 
+    /* Materialize World input views via the configured provider.
+       Each __worldInputs entry declares a git tree oid. The provider
+       is invoked as `<program> <oid> <dst-dir>` and must leave a
+       read-only directory at <dst-dir> hashing to the oid. The view
+       is then exposed at the canonical path <view-root>/<oid>. */
+    if (!drvOptions.worldInputs.empty()) {
+        auto provider = localSettings.worldInputsProvider.get();
+        if (provider.empty())
+            throw Error(
+                "derivation '%s' declares %d World input(s) but no 'world-inputs-provider' is configured. "
+                "Set 'world-inputs-provider' in nix.conf to a program that materializes git tree oids.",
+                store.printStorePath(drvPath),
+                drvOptions.worldInputs.size());
+
+        /* Determine the view root. We use /nix/var/tectonix/world as the
+           canonical path on both Linux and macOS. On macOS without a sandbox,
+           the host path equals the build path (no bind remap). */
+        auto viewRoot = std::string("/nix/var/tectonix/world");
+
+        for (const auto & wi : drvOptions.worldInputs) {
+            auto dstDir = viewRoot + "/" + wi.oid;
+
+            /* Skip if already materialized (idempotent). */
+            if (maybeLstat(dstDir))
+                continue;
+
+            /* Ensure the view root exists. */
+            std::filesystem::create_directories(viewRoot);
+
+            /* Invoke the provider: <program> <oid> <dst-dir> */
+            auto [status, output] = runProgram(
+                RunOptions{
+                    .program = provider,
+                    .lookupPath = true,
+                    .args = {wi.oid, dstDir},
+                });
+            if (!statusOk(status))
+                throw ExecError(
+                    status,
+                    "world-inputs-provider '%s' failed for oid '%s' (exit %d): %s",
+                    provider,
+                    wi.oid,
+                    status,
+                    output);
+
+            if (!maybeLstat(dstDir))
+                throw Error(
+                    "world-inputs-provider '%s' did not create the expected directory '%s' for oid '%s'",
+                    provider,
+                    dstDir,
+                    wi.oid);
+
+            /* Expose the materialized view in the sandbox.
+               On Linux with sandbox: bind-mount host path to the same path.
+               On macOS without sandbox: the path is already visible on the host. */
+            pathsInChroot[dstDir] = {.source = dstDir};
+        }
+    }
+
     if (localSettings.preBuildHook != "") {
         printMsg(lvlChatty, "executing pre-build hook '%1%'", localSettings.preBuildHook);
 

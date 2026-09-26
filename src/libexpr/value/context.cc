@@ -1,4 +1,5 @@
 #include "nix/util/util.hh"
+#include "nix/util/hash.hh"
 #include "nix/expr/value/context.hh"
 #include "nix/store/store-dir-config.hh"
 
@@ -56,6 +57,19 @@ NixStringContextElem NixStringContextElem::parse(std::string_view s0, const Expe
             .storePath = StorePath{s.substr(1)},
         };
     }
+    case '~': {
+        // World input: ~<oid>:<path>
+        auto rest = s.substr(1);
+        auto colon = rest.find(':');
+        if (colon == std::string_view::npos)
+            throw BadNixStringContextElem(s0, "World input context element must contain ':' separating oid and path");
+        auto oidStr = rest.substr(0, colon);
+        auto pathStr = rest.substr(colon + 1);
+        return NixStringContextElem::World{
+            .oid = Hash::parseNonSRIUnprefixed(std::string(oidStr), HashAlgorithm::SHA1),
+            .path = std::string(pathStr),
+        };
+    }
     default: {
         // Ensure no '!'
         if (s.find("!") != std::string_view::npos) {
@@ -100,6 +114,12 @@ std::string NixStringContextElem::to_string() const
                 res += '@';
                 res += p.storePath.to_string();
             },
+            [&](const NixStringContextElem::World & w) {
+                res += '~';
+                res += w.oid.to_string(HashFormat::Base16, false);
+                res += ':';
+                res += w.path;
+            },
         },
         raw);
 
@@ -119,6 +139,9 @@ std::string NixStringContextElem::display(const StoreDirConfig & store) const
             [&](const NixStringContextElem::Built & b) -> std::string { return SingleDerivedPath{b}.to_string(store); },
             [&](const NixStringContextElem::Path & p) -> std::string {
                 return store.printStorePath(p.storePath) + " (untracked)";
+            },
+            [&](const NixStringContextElem::World & w) -> std::string {
+                return w.path + " (world input " + w.oid.to_string(HashFormat::Base16, false) + ")";
             },
         },
         raw);

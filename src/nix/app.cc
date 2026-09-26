@@ -96,6 +96,9 @@ UnresolvedApp InstallableValue::toApp(EvalState & state)
                         [&](const NixStringContextElem::Path & p) -> DerivedPath {
                             throw Error("'program' attribute of an 'app' output cannot have no context");
                         },
+                        [&](const NixStringContextElem::World & w) -> DerivedPath {
+                            throw Error("'program' attribute of an 'app' output cannot be a World input");
+                        },
                     },
                     c.raw));
         }

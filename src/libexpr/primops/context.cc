@@ -153,6 +153,14 @@ static void prim_addDrvOutputDependencies(EvalState & state, const PosIdx pos, V
                         .atPos(pos)
                         .debugThrow();
                 },
+                [&](const NixStringContextElem::World & w) -> NixStringContextElem::DrvDeep {
+                    state.error<EvalError>(
+                        "`addDrvOutputDependencies` does not work on a World input (oid %s). "
+                        "World inputs are not derivations.",
+                        w.oid.to_string(HashFormat::Base16, false))
+                        .atPos(pos)
+                        .debugThrow();
+                },
             },
             context.begin()->raw)}),
     };
@@ -222,6 +230,7 @@ static void prim_getContext(EvalState & state, const PosIdx pos, Value ** args, 
                 },
                 [&](NixStringContextElem::Opaque && o) { contextInfos[std::move(o.path)].path = true; },
                 [&](NixStringContextElem::Path && p) {},
+                [&](NixStringContextElem::World && w) {},
             },
             ((NixStringContextElem &&) i).raw);
     }

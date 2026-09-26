@@ -1,6 +1,7 @@
 #pragma once
 ///@file
 
+#include "nix/util/hash.hh"
 #include "nix/util/comparator.hh"
 #include "nix/store/derived-path.hh"
 #include "nix/util/variant-wrapper.hh"
@@ -87,8 +88,25 @@ struct NixStringContextElem
 
         GENERATE_CMP(Path, me->storePath);
     };
+    /**
+     * A World input: a git tree oid addressing source content that is
+     * materialized by a provider at build time, not copied into the store.
+     *
+     * The string value is the view mount path
+     * (`<view-root>/<oid>`). The context records the World path and oid
+     * so that `derivationStrict` can collect them into `__worldInputs`.
+     *
+     * Encoded in the form `~<oid>:<path>`.
+     */
+    struct World
+    {
+        Hash oid;
+        std::string path;
 
-    using Raw = std::variant<Opaque, DrvDeep, Built, Path>;
+        GENERATE_CMP(World, me->oid, me->path);
+    };
+
+    using Raw = std::variant<Opaque, DrvDeep, Built, Path, World>;
 
     Raw raw;
 
