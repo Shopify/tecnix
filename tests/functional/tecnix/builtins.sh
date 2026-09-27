@@ -452,6 +452,18 @@ assert_jq "$parallel_deps" '( ."//areas/app/web:beta" | has("areas/app/web/commo
 # Source-deps scopes must be target-local. These two targets intentionally use
 # the same scope key with different source files; mutable global replay would
 # leak owner-collision-b.txt into A or vice versa.
+echo "Testing tecnixTargets keepGoing records per-target errors..."
+kg_targets='targets = [ "//areas/app/web:alpha" "//areas/missing/zone:x" ];'
+for eval_fn in tecnix_eval_json_no_cache tecnix_eval_json_parallel_no_cache; do
+    kg=$($eval_fn "builtins.tecnixTargets (($base_args) // { $kg_targets includeDependencies = true; keepGoing = true; })")
+    assert_jq "$kg" 'length == 2 and .[0].target == "//areas/app/web:alpha" and .[0].value.name == "alpha" and (.[0].dependencies | has("areas/app/web/targets/alpha.nix"))' \
+        "keepGoing ($eval_fn) should still return the passing target's value and dependencies"
+    assert_jq "$kg" '.[1].target == "//areas/missing/zone:x" and (.[1].error | contains("/areas/missing/zone/targets.nix") and contains("does not exist")) and (.[1] | has("value") | not) and (.[1] | has("dependencies") | not)' \
+        "keepGoing ($eval_fn) should record the failing target's error and nothing else"
+done
+expect 1 tecnix_eval_json_no_cache "builtins.tecnixTargets (($base_args) // { $kg_targets includeDependencies = true; })" >/dev/null 2>&1
+expect 1 tecnix_eval_json_no_cache "builtins.tecnixTargets (($base_args) // { $kg_targets keepGoing = true; })" >/dev/null 2>&1
+
 echo "Testing source-deps scope isolation..."
 owner_collision_deps=$(tecnix_eval_json_parallel_no_cache "tecnixTargetDependencyPathSet (($base_args) // { targets = [ \"//areas/app/web:ownerCollisionA\" \"//areas/app/web:ownerCollisionB\" ]; })")
 assert_target_dependency_paths "$owner_collision_deps" "//areas/app/web:ownerCollisionA" "ownerCollisionA deps should not include ownerCollisionB files" <<'EOF'
