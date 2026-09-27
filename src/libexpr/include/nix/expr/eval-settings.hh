@@ -658,6 +658,17 @@ struct EvalSettings : Config
           socket remains the control plane for the mutable root checkout; committed
           Tecnix source bytes and manifest metadata are read directly from this filesystem.
         )"};
+
+    Setting<bool> tectonixRawZoneTrees{
+        this,
+        false,
+        "tectonix-raw-zone-trees",
+        R"(
+          Read zones as raw Git trees: no LFS smudging and no `export-ignore`, so the
+          bytes the evaluator sees are exactly the committed blobs and a zone's content
+          equals the Git tree its oid names. World inputs rely on that equality. With
+          this off (the default), zone accessors honor `.gitattributes` as before.
+        )"};
 };
 
 /**

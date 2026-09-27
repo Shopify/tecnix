@@ -8,6 +8,7 @@ suites += {
     'dirty-zones.sh',
     'memo.sh',
     'world-inputs.sh',
+    'raw-zone-trees.sh',
   ],
   'workdir' : meson.current_source_dir(),
 }
