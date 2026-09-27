@@ -3,6 +3,8 @@
 #include "nix/fetchers/filtering-source-accessor.hh"
 #include "nix/util/fs-sink.hh"
 
+#include <set>
+
 namespace nix {
 
 namespace fetchers {
@@ -131,6 +133,20 @@ struct GitRepo
 
     /** Get the SHA of a subtree entry within a tree object */
     virtual Hash getSubtreeSha(const Hash & treeSha, const std::string & entryName) = 0;
+
+    /**
+     * Write the part of tree `treeSha` that `include` selects, minus `exclude` and every entry whose
+     * name is in `excludeNames` (at any depth), and return the new tree's oid. `include` and
+     * `exclude` hold paths relative to the tree, each covering everything below it; an included path
+     * also keeps the directories leading to it, and an empty `include` selects the whole tree.
+     * Walks tree entries only (blobs are shared, never read); directories that end up empty are
+     * dropped. The new trees are written to this repository's object database.
+     */
+    virtual Hash filterTree(
+        const Hash & treeSha,
+        const std::vector<std::string> & include,
+        const std::vector<std::string> & exclude,
+        const std::set<std::string> & excludeNames) = 0;
 
     /** Get the SHA and git file mode of any entry by full relative path within a tree. */
     virtual std::optional<GitPathInfo> getPathInfo(const Hash & treeSha, const std::string & relPath) = 0;

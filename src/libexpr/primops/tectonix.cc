@@ -728,6 +728,97 @@ static void prim_tectonixWorldInput(EvalState & state, const PosIdx pos, Value *
     v.mkString(mountPath, context, state.mem);
 }
 
+// ============================================================================
+// builtins.tectonixFileset { root; include; excludeNames ? [ ]; }
+// A World input for a subset of a World tree: the tree is filtered by entry names
+// and paths (never by reading file contents), written to the World repository as
+// a new tree, and returned like tectonixWorldInput.
+// ============================================================================
+static void prim_tectonixFileset(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    state.forceAttrs(*args[0], pos, "while evaluating the argument to builtins.tectonixFileset");
+    auto & attrs = *args[0]->attrs();
+    auto get = [&](std::string_view name) { return attrs.get(state.symbols.create(name)); };
+
+    auto rootAttr = get("root");
+    if (!rootAttr)
+        state.error<EvalError>("builtins.tectonixFileset: 'root' (a World path) is required").atPos(pos).debugThrow();
+    auto root = std::string(state.forceStringNoCtx(
+        *rootAttr->value, pos, "while evaluating the 'root' argument to builtins.tectonixFileset"));
+
+    auto readStrings = [&](std::string_view name) {
+        std::vector<std::string> out;
+        if (auto attr = get(name)) {
+            state.forceList(*attr->value, pos, "while evaluating a list argument to builtins.tectonixFileset");
+            for (auto elem : attr->value->listView())
+                out.emplace_back(
+                    state.forceStringNoCtx(*elem, pos, "while evaluating a list element of builtins.tectonixFileset"));
+        }
+        return out;
+    };
+    auto relPaths = [&](std::string_view name) {
+        std::vector<std::string> out;
+        for (auto & p : readStrings(name)) {
+            auto components = tokenizeString<std::vector<std::string>>(p, "/");
+            bool escapes = std::any_of(components.begin(), components.end(), [](auto & c) { return c == ".."; });
+            CanonPath canon(p); // normalizes "./a/", "a//b"; the root itself is ""
+            std::string path(canon.rel());
+            if (path.empty() || escapes || hasPrefix(p, "/"))
+                state.error<EvalError>("builtins.tectonixFileset: %s path '%s' must be a path below the root", name, p)
+                    .atPos(pos)
+                    .debugThrow();
+            out.emplace_back(path);
+        }
+        return out;
+    };
+    auto include = relPaths("include");
+    auto exclude = relPaths("exclude");
+    auto excludeList = readStrings("excludeNames");
+    std::set<std::string> excludeNames(excludeList.begin(), excludeList.end());
+
+    // The result depends on the root's tree, which this records (as tectonixWorldInput does).
+    if (auto ctx = currentTecnixThreadState.trackingContext)
+        ctx->recordAccess(normalizeTrackedRepoPath(root));
+
+    auto repo = getWorldRepo(state);
+    auto sha = repo->filterTree(getWorldTreeSha(state, root), include, exclude, excludeNames);
+
+    NixStringContextElem::World world{
+        .oid = sha,
+        .path = root,
+    };
+    auto mountPath = world.viewPath();
+    CanonPath mountPoint(mountPath);
+    if (!state.storeFS->getMount(mountPoint)) {
+        GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+        state.storeFS->mount(mountPoint, repo->getAccessor(sha, opts, "world-fileset"));
+    }
+    state.allowPathLegacy(mountPath);
+
+    NixStringContext context;
+    context.insert(std::move(world));
+    v.mkString(mountPath, context, state.mem);
+}
+
+static RegisterPrimOp primop_tectonixFileset({
+    .name = "__tectonixFileset",
+    .args = {"attrs"},
+    .doc = R"(
+      A World input for part of a World tree:
+      `{ root = "//zone"; include = [ "src" "Cargo.toml" ]; exclude = [ "src/gen" ]; excludeNames = [ "target" ]; }`.
+
+      `include` lists paths relative to `root`; each is kept with everything
+      below it, plus the directories leading to it (omitted: the whole tree).
+      `exclude` paths are dropped with everything below them, and entries
+      named in `excludeNames` are dropped at any depth. Filtering reads tree entries
+      only, never file contents, and writes the resulting tree to the World
+      repository, so the result is a git tree oid like any other World input:
+      readable during evaluation, materialized by the provider at build time,
+      never copied into the store.
+    )",
+    .impl = prim_tectonixFileset,
+});
+
 static RegisterPrimOp primop_tectonixWorldInput({
     .name = "__tectonixWorldInput",
     .args = {"worldPath"},

@@ -116,6 +116,41 @@ done
 [[ "$(store_paths)" == "$STORE_BEFORE" ]] || fail "eval-time reads of a World input must not write to the store"
 echo "PASS: eval-time reads are served from git, pure and impure, with no store writes"
 
+# -- Test 5b: a fileset is a World input for part of a tree, filtered by entries only --
+echo "Testing tectonixFileset..."
+mkdir -p "$TEST_WORLD/areas/tools/dev/src/nested" "$TEST_WORLD/areas/tools/dev/src/target"
+echo "keep" > "$TEST_WORLD/areas/tools/dev/src/nested/keep.txt"
+echo "drop" > "$TEST_WORLD/areas/tools/dev/src/target/drop.txt"
+echo "other" > "$TEST_WORLD/areas/tools/dev/other.txt"
+git -C "$TEST_WORLD" add -A && git -C "$TEST_WORLD" commit -q -m "fileset fixture"
+FS_SHA=$(get_head_sha "$TEST_WORLD")
+fsOpts=(--no-pure-eval --extra-experimental-features 'nix-command world-inputs'
+    --option tectonix-git-dir "$TEST_WORLD/.git" --option tectonix-git-sha "$FS_SHA")
+fsExpr='builtins.tectonixFileset { root = "//areas/tools/dev"; include = [ "README.md" "src" ]; excludeNames = [ "target" ]; }'
+FS_VIEW=$(nix eval --raw "${fsOpts[@]}" --expr "$fsExpr")
+FS_OID=$(basename "$FS_VIEW")
+# The expected tree: README.md and src/nested/keep.txt only, built with git itself.
+expected=$(cd "$TEST_ROOT" && rm -rf fs-expected && mkdir fs-expected && cd fs-expected && git init -q . \
+    && mkdir -p src/nested && git -C "$TEST_WORLD" show "$FS_SHA:areas/tools/dev/README.md" > README.md \
+    && echo keep > src/nested/keep.txt && git add -A && git write-tree)
+[[ "$FS_OID" == "$expected" ]] || fail "tectonixFileset oid $FS_OID should equal the filtered tree $expected"
+git -C "$TEST_WORLD" cat-file -e "$FS_OID^{tree}" || fail "the fileset's tree should be in the World repository"
+READS=$(nix eval --json "${fsOpts[@]}" --expr "let fs = $fsExpr; in { root = builtins.attrNames (builtins.readDir fs); keep = builtins.readFile \"\${fs}/src/nested/keep.txt\"; }")
+echo "$READS" | jq -e '.root == ["README.md", "src"] and .keep == "keep\n"' > /dev/null \
+    || fail "a fileset should be readable at eval time with only the selected entries: $READS"
+FS_WI=$(nix eval --raw "${fsOpts[@]}" --expr "(derivation { name = \"fs\"; system = builtins.currentSystem; builder = \"/bin/sh\"; src = $fsExpr; }).drvPath" \
+    | xargs nix derivation show "${fsOpts[@]}" | jq -r '.. | .__worldInputs? // empty' | head -1)
+echo "$FS_WI" | jq -e --arg oid "$FS_OID" '.[0].oid == $oid and .[0].path == "//areas/tools/dev"' > /dev/null \
+    || fail "a derivation using a fileset should declare it in __worldInputs: $FS_WI"
+# exclude alone: the whole tree minus one path.
+FS_ALL=$(nix eval --json "${fsOpts[@]}" --expr 'let fs = builtins.tectonixFileset { root = "//areas/tools/dev"; exclude = [ "src/target" "other.txt" ]; }; in { top = builtins.attrNames (builtins.readDir fs); src = builtins.attrNames (builtins.readDir "${fs}/src"); }')
+echo "$FS_ALL" | jq -e '(.top | index("other.txt") | not) and (.top | index("README.md")) and .src == ["nested"]' > /dev/null \
+    || fail "tectonixFileset exclude should drop exactly the listed paths: $FS_ALL"
+expectStderr 1 nix eval --raw "${fsOpts[@]}" --expr 'builtins.tectonixFileset { root = "//areas/tools/dev"; include = [ "../platform" ]; }' \
+    | grepQuiet "must be a path below the root"
+git -C "$TEST_WORLD" reset -q --hard "$HEAD_SHA"
+echo "PASS: tectonixFileset filters by entries, is readable, and becomes a World input"
+
 # -- Test 6: toFile with World input is refused --
 echo "Testing toFile refusal..."
 TOFILE_OUT=$(nix eval --raw "${evalOpts[@]}" \
