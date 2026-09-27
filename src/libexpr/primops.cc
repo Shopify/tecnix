@@ -110,8 +110,12 @@ StringMap EvalState::realiseContext(const NixStringContext & context, StorePathS
                     // FIXME: do something?
                 },
                 [&](const NixStringContextElem::World & w) {
-                    // World inputs are not store paths; they are materialized
-                    // by a provider at build time. Refuse eval-time realisation.
+                    // World inputs are not store paths; a provider materializes them at
+                    // build time. `tectonixWorldInput` mounts the view for eval-time reads
+                    // (served from git), so there is nothing to realise. Without that mount
+                    // (a context forged with `appendContext`), refuse.
+                    if (storeFS->getMount(CanonPath(w.viewPath())))
+                        return;
                     error<EvalError>(
                         "cannot realise World input '%s' (oid %s) at evaluation time. "
                         "World inputs are only available inside derivations at build time. "

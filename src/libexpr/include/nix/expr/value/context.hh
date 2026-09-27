@@ -104,6 +104,15 @@ struct NixStringContextElem
         std::string path;
 
         GENERATE_CMP(World, me->oid, me->path);
+
+        /**
+         * The view path the string names: `/nix/var/tectonix/world/<oid>`, the canonical
+         * view root on every platform (builders map it to their host view root).
+         */
+        std::string viewPath() const
+        {
+            return "/nix/var/tectonix/world/" + oid.gitRev();
+        }
     };
 
     using Raw = std::variant<Opaque, DrvDeep, Built, Path, World>;

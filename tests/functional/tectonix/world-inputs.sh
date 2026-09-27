@@ -96,12 +96,25 @@ echo "PASS: drvPath unchanged for unrelated commit"
 # Reset to original HEAD
 git -C "$TEST_WORLD" reset --hard "$HEAD_SHA" --quiet
 
-# -- Test 5: readFile of World input is refused --
-echo "Testing readFile refusal..."
-READFILE_OUT=$(nix eval --raw "${evalOpts[@]}" \
-    --expr 'let src = builtins.tectonixWorldInput "//areas/tools/dev"; in builtins.readFile src' 2>&1 || true)
-echo "$READFILE_OUT" | grep -qi "world" && echo "PASS: readFile refused with World message" \
-    || fail "readFile should refuse World input with clear message: $READFILE_OUT"
+# -- Test 5: eval-time reads of a World input come from the git tree, not the store --
+echo "Testing eval-time reads of a World input..."
+store_paths() { nix path-info --extra-experimental-features nix-command --all | sort; }
+STORE_BEFORE=$(store_paths)
+readExpr='let src = builtins.tectonixWorldInput "//areas/tools/dev"; in {
+  readme = builtins.readFile "${src}/README.md";
+  exists = builtins.pathExists "${src}/README.md";
+  missing = builtins.pathExists "${src}/missing";
+  entries = builtins.attrNames (builtins.readDir src);
+}'
+for pure in false true; do
+    READS=$(nix eval --json "${evalOpts[@]}" --option pure-eval "$pure" --expr "$readExpr")
+    [[ $(echo "$READS" | jq -r .readme) == "$(git -C "$TEST_WORLD" show "$HEAD_SHA:areas/tools/dev/README.md")" ]] \
+        || fail "pure-eval=$pure: readFile of a World input should return the committed file: $READS"
+    echo "$READS" | jq -e '.exists and (.missing | not) and (.entries | index("README.md"))' > /dev/null \
+        || fail "pure-eval=$pure: pathExists/readDir of a World input should see the committed tree: $READS"
+done
+[[ "$(store_paths)" == "$STORE_BEFORE" ]] || fail "eval-time reads of a World input must not write to the store"
+echo "PASS: eval-time reads are served from git, pure and impure, with no store writes"
 
 # -- Test 6: toFile with World input is refused --
 echo "Testing toFile refusal..."

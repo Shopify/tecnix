@@ -703,20 +703,27 @@ static void prim_tectonixWorldInput(EvalState & state, const PosIdx pos, Value *
 
     // Get the tree oid for this world path.
     auto sha = getWorldTreeSha(state, worldPath);
-    auto oidStr = sha.gitRev();
 
-    // Build the view mount path: <view-root>/<oid>
-    // The view root is /nix/var/tectonix/world (canonical on both Linux and macOS).
-    // On macOS without a sandbox, the host path equals the build path.
-    static constexpr const char * viewRoot = "/nix/var/tectonix/world";
-    auto mountPath = std::string(viewRoot) + "/" + oidStr;
-
-    // Create World string context element.
-    NixStringContext context;
-    context.insert(NixStringContextElem::World{
+    NixStringContextElem::World world{
         .oid = sha,
         .path = std::string(worldPath),
-    });
+    };
+    auto mountPath = world.viewPath();
+
+    // Eval-time reads of the view (`readFile "${src}/Cargo.toml"`, `import`, `pathExists`,
+    // `readDir`, or the string coerced back to a path) are served from the git tree by oid:
+    // the bytes the provider materializes at build time (raw tree: no LFS smudge, no
+    // export-ignore), and nothing is written to the store. The oid pins the content, and the
+    // access above already records the tree in the target's closure.
+    CanonPath mountPoint(mountPath);
+    if (!state.storeFS->getMount(mountPoint)) {
+        GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+        state.storeFS->mount(mountPoint, getWorldRepo(state)->getAccessor(sha, opts, "world-input"));
+    }
+    state.allowPathLegacy(mountPath);
+
+    NixStringContext context;
+    context.insert(std::move(world));
 
     v.mkString(mountPath, context, state.mem);
 }
@@ -731,7 +738,9 @@ static RegisterPrimOp primop_tectonixWorldInput({
       The path is NOT copied into the Nix store. Instead, the oid and path
       are recorded in the string context, and `derivationStrict` collects
       them into the `__worldInputs` derivation attribute. A provider
-      materializes the tree at build time.
+      materializes the tree at build time. During evaluation the same path
+      is readable (`readFile`, `import`, `pathExists`, `readDir`) straight
+      from the git tree, still without a store copy.
 
       Example:
       ```nix
