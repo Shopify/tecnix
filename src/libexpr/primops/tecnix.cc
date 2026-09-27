@@ -174,7 +174,7 @@ struct TecnixArgs
 /** The persistent-cache row family these arguments address. */
 static TecnixCacheScope cacheScope(const TecnixArgs & args)
 {
-    return {args.gitDir, args.resolver, args.argsKey};
+    return {args.resolver, args.argsKey};
 }
 
 static const Bindings & forceTecnixBuiltinAttrs(EvalState & state, const PosIdx pos, Value ** args)

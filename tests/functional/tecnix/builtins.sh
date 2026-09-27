@@ -1147,6 +1147,69 @@ assert_json_equal "$(jq '[.[].value]' <<< "$warm_drv_records")" "$(jq '[.alpha.o
 assert_jq "$warm_drv_records" '(.[0].dependencies | has("deps/alpha.txt")) and (.[1].dependencies | has("deps/beta.txt"))' \
     "cached dependency records should retain each target's source dependencies"
 
+# The cache is keyed by resolver and arguments, never by where the repository
+# lives, so a cache warmed from one clone serves another clone, or a copy at
+# any path. Sharing is sound because a hit is proven against the evaluated
+# tree: a changed file still invalidates, and a dirty checkout is fingerprinted
+# by its content.
+echo "Testing that the eval cache is shared across clones of a repository..."
+CLONE_CACHE_HOME="$TEST_ROOT/tecnix-clone-cache-home"
+clone_drvs() {
+    local gitDir="$1" rev="$2" checkout="${3:-}" checkoutAttr=""
+    if [[ -n "$checkout" ]]; then checkoutAttr="checkoutPath = \"$checkout\";"; fi
+    XDG_CACHE_HOME="$CLONE_CACHE_HOME" nix eval --json -v \
+        --extra-experimental-features 'nix-command' \
+        --option lazy-trees true \
+        --option tecnix-eval-cache true \
+        --pure-eval \
+        --expr "builtins.mapAttrs (id: t: t.drvPath) (builtins.tecnixTargets { gitDir = \"$gitDir\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; }; rev = \"$rev\"; $checkoutAttr targets = [ \"alpha\" \"beta\" ]; })"
+}
+clone_commit() {
+    git -C "$1" -c user.email=test@example.com -c user.name=Test commit -q -am "$2"
+}
+
+original_drvs=$(clone_drvs "$DRV_WORLD/.git" "$DRV_HEAD" 2> "$TEST_ROOT/clone-original.err")
+grepQuiet "tecnixTargets dependencies: dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/clone-original.err"
+assert_json_equal "$original_drvs" "$cold_drv_values" "the original repository's cold evaluation should give the same drvPaths"
+
+DRV_CLONE="$TEST_ROOT/tecnix-drv-world-clone"
+git clone -q "$DRV_WORLD" "$DRV_CLONE"
+clone_drvs "$DRV_CLONE/.git" "$DRV_HEAD" > "$TEST_ROOT/clone-values.json" 2> "$TEST_ROOT/clone-hit.err"
+grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/clone-hit.err"
+grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/clone-hit.err"
+assert_json_equal "$(cat "$TEST_ROOT/clone-values.json")" "$cold_drv_values" "a clone should be served the original's cached drvPaths"
+
+DRV_COPY="$TEST_ROOT/tecnix-drv-world-copy"
+cp -R "$DRV_WORLD" "$DRV_COPY"
+clone_drvs "$DRV_COPY/.git" "$DRV_HEAD" > "$TEST_ROOT/copy-values.json" 2> "$TEST_ROOT/copy-hit.err"
+grepQuiet "tecnixTargets: 2 target value(s) served from the cache" "$TEST_ROOT/copy-hit.err"
+grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/copy-hit.err"
+assert_json_equal "$(cat "$TEST_ROOT/copy-values.json")" "$cold_drv_values" "a copy at another path should be served the original's cached drvPaths"
+
+echo "Testing that a changed file still invalidates across clones..."
+echo "echo alpha changed" > "$DRV_CLONE/deps/alpha.txt"
+clone_commit "$DRV_CLONE" "change alpha"
+CLONE_CHANGED_HEAD=$(get_head_sha "$DRV_CLONE")
+changed_drvs=$(clone_drvs "$DRV_CLONE/.git" "$CLONE_CHANGED_HEAD" 2> "$TEST_ROOT/clone-changed.err")
+grepQuiet "tecnixTargets dependencies: dependency cache miss, evaluating 'alpha'" "$TEST_ROOT/clone-changed.err"
+grepQuiet "tecnixTargets dependencies: dependency cache hit for 'beta'" "$TEST_ROOT/clone-changed.err"
+assert_jq "$changed_drvs" ".alpha != $(jq '.alpha' <<< "$cold_drv_values") and .beta == $(jq '.beta' <<< "$cold_drv_values")" \
+    "only the target that read the changed file should get a new drvPath"
+# The original's closure is still a candidate: both clones keep hitting.
+original_again=$(clone_drvs "$DRV_WORLD/.git" "$DRV_HEAD" 2> "$TEST_ROOT/clone-original-again.err")
+grepQuiet "tecnixTargets dependencies: dependency cache hit for 'alpha'" "$TEST_ROOT/clone-original-again.err"
+assert_json_equal "$original_again" "$cold_drv_values" "the original should still hit its own candidate after a clone learned another"
+
+echo "Testing that a dirty checkout does not borrow a clean candidate..."
+echo "echo beta dirty" > "$DRV_CLONE/deps/beta.txt"
+dirty_drvs=$(clone_drvs "$DRV_CLONE/.git" "$CLONE_CHANGED_HEAD" "$DRV_CLONE" 2> "$TEST_ROOT/clone-dirty.err")
+grepQuiet "tecnixTargets dependencies: dependency cache hit for 'alpha'" "$TEST_ROOT/clone-dirty.err"
+grepQuiet "tecnixTargets dependencies: dependency cache miss, evaluating 'beta'" "$TEST_ROOT/clone-dirty.err"
+assert_jq "$dirty_drvs" ".beta != $(jq '.beta' <<< "$cold_drv_values")" "a dirty file should change the target that read it"
+git -C "$DRV_CLONE" checkout -q -- deps/beta.txt
+clone_drvs "$DRV_CLONE/.git" "$CLONE_CHANGED_HEAD" "$DRV_CLONE" > /dev/null 2> "$TEST_ROOT/clone-clean-again.err"
+grepQuiet "tecnixTargets dependencies: dependency cache hit for 'beta'" "$TEST_ROOT/clone-clean-again.err"
+
 # A garbage-collected drv must not serve a cached value: that hit is an
 # ordinary miss, and re-evaluation re-instantiates the drv for the next run.
 echo "Testing cached target value fallback after drv deletion..."
