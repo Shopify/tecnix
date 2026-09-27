@@ -510,4 +510,20 @@ TEST_JSON_OPTIONS(CaDerivationAdvancedAttrsTest, structuredAttrs_all_set, struct
 
 #undef TEST_JSON_OPTIONS
 
+TEST(DerivationOptionsWorldInputs, jsonOmitsThemWhenEmptyAndRoundTripsThem)
+{
+    DerivationOptions<SingleDerivedPath> none;
+    nlohmann::json noneJson = none;
+    ASSERT_FALSE(noneJson.contains("worldInputs"));
+    ASSERT_EQ(noneJson.get<DerivationOptions<SingleDerivedPath>>(), none);
+
+    DerivationOptions<SingleDerivedPath> some;
+    some.worldInputs = {{.path = "//areas/tools/dev", .oid = "e04118be8a3b0d6a0a4bb5bdc5ea55bd4a0a2a0e"}};
+    nlohmann::json someJson = some;
+    ASSERT_EQ(
+        someJson.at("worldInputs"),
+        nlohmann::json::parse(R"([{"path":"//areas/tools/dev","oid":"e04118be8a3b0d6a0a4bb5bdc5ea55bd4a0a2a0e"}])"));
+    ASSERT_EQ(someJson.get<DerivationOptions<SingleDerivedPath>>(), some);
+}
+
 } // namespace nix

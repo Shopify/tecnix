@@ -592,9 +592,12 @@ DerivationOptions<SingleDerivedPath> adl_serializer<DerivationOptions<SingleDeri
         .noChroot = getBoolean(valueAt(json, "noChroot")),
         .impureHostDeps = getStringSet(valueAt(json, "impureHostDeps")),
         .worldInputs = [&]() {
-            auto & arr = valueAt(json, "worldInputs");
+            // Absent in derivations without World inputs (and in every JSON written before them).
             std::vector<DerivationOptionsWorldInput> result;
-            for (auto & entry : arr) {
+            auto i = json.find("worldInputs");
+            if (i == json.end())
+                return result;
+            for (auto & entry : i->second) {
                 result.push_back({
                     .path = entry.at("path").get<std::string>(),
                     .oid = entry.at("oid").get<std::string>(),
@@ -635,7 +638,8 @@ void adl_serializer<DerivationOptions<SingleDerivedPath>>::to_json(
     json["additionalSandboxProfile"] = o.additionalSandboxProfile;
     json["noChroot"] = o.noChroot;
     json["impureHostDeps"] = o.impureHostDeps;
-    {
+    // Only when present, so a derivation without World inputs serializes exactly as upstream's.
+    if (!o.worldInputs.empty()) {
         auto arr = nlohmann::json::array();
         for (const auto & wi : o.worldInputs)
             arr.push_back({{"path", wi.path}, {"oid", wi.oid}});
