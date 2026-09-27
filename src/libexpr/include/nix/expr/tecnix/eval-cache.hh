@@ -59,7 +59,9 @@ constexpr std::string_view tecnixTargetNamesCacheKey = "__tecnixTargetNames";
 /** The (gitDir, resolver, argsKey) row family a lookup or upsert addresses. */
 struct TecnixCacheScope
 {
-    std::string_view gitDir;
+    /** The repository: `tecnix-eval-cache-repo-id` when set, else the `gitDir` argument.
+        Stored in the `gitDir` column. */
+    std::string_view repo;
     std::string_view resolver;
     std::string_view argsKey;
 };

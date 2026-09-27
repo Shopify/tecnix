@@ -561,6 +561,27 @@ struct EvalSettings : Config
           at `128`, ~1.1 GB at `1024` for a dense shard).
         )"};
 
+    Setting<std::string> tecnixEvalCacheRepoId{
+        this,
+        "",
+        "tecnix-eval-cache-repo-id",
+        R"(
+          A name for the repository that keys the Tecnix evaluation cache in
+          place of the `gitDir` passed to the Tecnix builtins (for World,
+          `shop/world`). With it, a cache written against one clone serves
+          another clone of the same repository, on the same machine or after
+          the cache file is copied to a different one.
+
+          This is sound because a cached result is only reused after every
+          path in its recorded source closure matches the evaluated commit by
+          content fingerprint (git oid). A target-value hit additionally needs
+          its `.drv` to be valid in the local store; copy the derivations
+          along with the cache (`nix copy --derivation`) or the target is
+          re-evaluated.
+
+          Empty (the default) keys the cache by `gitDir`.
+        )"};
+
     Setting<bool> tecnixParallelDependencies{
         this,
         true,

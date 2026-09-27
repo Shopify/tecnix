@@ -162,6 +162,9 @@ resolveRev(EvalState & state, const PosIdx pos, const Bindings & attrs, const st
 struct TecnixArgs
 {
     std::string gitDir;
+    /** What keys the persistent eval cache: `repo-id:<id>` under `tecnix-eval-cache-repo-id`,
+        else `gitDir`. */
+    std::string cacheRepo;
     std::string resolver;
     std::string rev;
     std::string checkoutPath;
@@ -179,7 +182,7 @@ struct TecnixArgs
 /** The persistent-cache row family these arguments address. */
 static TecnixCacheScope cacheScope(const TecnixArgs & args)
 {
-    return {args.gitDir, args.resolver, args.argsKey};
+    return {args.cacheRepo, args.resolver, args.argsKey};
 }
 
 static const Bindings & forceTecnixBuiltinAttrs(EvalState & state, const PosIdx pos, Value ** args)
@@ -195,6 +198,8 @@ static void parseTecnixRepoArgs(EvalState & state, const PosIdx pos, const Bindi
         state.error<EvalError>("'gitDir' attribute required").atPos(pos).debugThrow();
     result.gitDir =
         std::string(state.forceStringNoCtx(*gitDirAttr->value, pos, "while evaluating the 'gitDir' argument"));
+    auto & repoId = state.settings.tecnixEvalCacheRepoId.get();
+    result.cacheRepo = repoId.empty() ? result.gitDir : "repo-id:" + repoId;
 
     auto resolverAttr = attrs.get(state.symbols.create("resolver"));
     if (!resolverAttr)

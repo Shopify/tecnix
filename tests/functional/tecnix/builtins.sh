@@ -1068,6 +1068,30 @@ warm_names=$(tecnix_eval_json_cache "builtins.tecnixTargetNames ($cache_args)" 2
 assert_json_equal "$warm_names" "$cold_names" "warm discovery should equal cold"
 grepQuiet "discovery cache hit" "$TEST_ROOT/cache-warm-names.err"
 
+echo "Testing tecnix-eval-cache-repo-id shares the eval cache across clones..."
+PORTABLE_CACHE_HOME="$TEST_ROOT/tecnix-portable-cache-home"
+CACHE_WORLD_CLONE="$TEST_ROOT/tecnix-cache-world-clone"
+git clone -q "$CACHE_WORLD" "$CACHE_WORLD_CLONE"
+portable_deps() {
+    local gitDir="$1" repoId="$2" expr
+    expr=$(rewrite_tecnix_test_expr "tecnixTargetDependencyPathSet { gitDir = \"$gitDir\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; }; rev = \"$CACHE_HEAD\"; targets = [ \"alpha\" ]; }")
+    XDG_CACHE_HOME="$PORTABLE_CACHE_HOME" nix eval --json -v \
+        --extra-experimental-features 'nix-command' \
+        --option lazy-trees true \
+        --option tecnix-eval-cache true \
+        --option tecnix-eval-cache-repo-id "$repoId" \
+        --pure-eval \
+        --expr "$expr"
+}
+portable_deps "$CACHE_WORLD/.git" "" > /dev/null 2>&1
+portable_deps "$CACHE_WORLD_CLONE/.git" "" > /dev/null 2> "$TEST_ROOT/portable-no-id.err"
+grepQuietInverse "dependency cache hit" "$TEST_ROOT/portable-no-id.err"
+portable_cold=$(portable_deps "$CACHE_WORLD/.git" "test/cache-world" 2> "$TEST_ROOT/portable-cold.err")
+grepQuietInverse "dependency cache hit" "$TEST_ROOT/portable-cold.err"
+portable_warm=$(portable_deps "$CACHE_WORLD_CLONE/.git" "test/cache-world" 2> "$TEST_ROOT/portable-warm.err")
+grepQuiet "dependency cache hit for 'alpha'" "$TEST_ROOT/portable-warm.err"
+assert_json_equal "$portable_warm" "$portable_cold" "a clone's hit under the repo id should equal the original's evaluation"
+
 # This fixture's drvPaths are placeholder strings, not valid store paths, so
 # proven closure candidates must never serve cached target values: when values
 # are wanted, such a hit is an ordinary miss and the target is re-evaluated.

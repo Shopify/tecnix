@@ -1116,7 +1116,7 @@ struct TecnixEvalCache
      */
     static bool readShardRow(State & state, const TecnixCacheScope & scope, uint32_t shard, std::string & row)
     {
-        auto stmt(state.lookupShard.use().apply(scope.gitDir).apply(scope.resolver).apply(scope.argsKey).apply(shard));
+        auto stmt(state.lookupShard.use().apply(scope.repo).apply(scope.resolver).apply(scope.argsKey).apply(shard));
         if (!stmt.next())
             return false;
         auto blob = stmt.getBlob(0);
@@ -1160,7 +1160,7 @@ struct TecnixEvalCache
                         existingBlob = existing;
                     auto outcome = mergedShardRow(existingBlob, updates, historyLimit, state->maxRowBytes, blob);
                     state->upsertShard.use()
-                        .apply(scope.gitDir)
+                        .apply(scope.repo)
                         .apply(scope.resolver)
                         .apply(scope.argsKey)
                         .apply(shard)
