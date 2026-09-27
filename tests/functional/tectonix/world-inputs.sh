@@ -141,8 +141,9 @@ requiresUnprivilegedUserNamespaces
 PROVIDER="$TEST_ROOT/provider.sh"
 PROVIDER_LOG="$TEST_ROOT/provider-calls"
 : > "$PROVIDER_LOG"
-cat > "$PROVIDER" << 'P'
-#!/usr/bin/env bash
+# $SHELL, not /usr/bin/env: the provider also runs inside Nix build sandboxes (the packaged test suite).
+echo "#!$SHELL" > "$PROVIDER"
+cat >> "$PROVIDER" << 'P'
 set -euo pipefail
 oid="$1"; dst="$2"; git_dir="${WORLD_INPUTS_GIT_DIR:?}"
 echo "$oid" >> "${WORLD_INPUTS_PROVIDER_LOG:?}"
