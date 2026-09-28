@@ -16,6 +16,7 @@
 #include "nix/util/executable-path.hh"
 #include "nix/util/deleter.hh"
 
+#include <mutex>
 #include <git2/attr.h>
 #include <git2/blob.h>
 #include <git2/branch.h>
@@ -289,6 +290,14 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
      * Owned by `repo`.
      */
     git_odb_backend * packBackend = nullptr;
+
+    /**
+     * Serializes the tree writers below (`filterTree`, `filterTreeWith`, `wrapInTree`): each
+     * writes into the shared mempack and then `flush()`es it, and a concurrent flush (parallel
+     * evaluation) would pack and reset the mempack under another writer, losing its objects
+     * ("object not found" when that writer flushes). Nix code never runs under this lock.
+     */
+    std::mutex treeWriteMutex;
 
     GitRepoImpl(std::filesystem::path _path, Options _options)
         : path(std::move(_path))
@@ -672,6 +681,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         const std::vector<std::string> & exclude,
         const std::set<std::string> & excludeNames) override
     {
+        std::lock_guard lock(treeWriteMutex);
         auto covers = [](const std::vector<std::string> & paths, const std::string & rel) {
             return std::any_of(paths.begin(), paths.end(), [&](const std::string & p) {
                 return rel == p || hasPrefix(rel, p + "/");
@@ -745,6 +755,28 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
     {
         git_repository * gitRepo = *this;
 
+        // Phase 1, no lock: ask `keep` about every entry it can see (it may evaluate Nix code,
+        // which must not run under `treeWriteMutex`), without writing anything.
+        std::set<std::string> rejected;
+        auto decide = [&](this const auto & self, const git_oid & treeOid, const std::string & prefix) -> void {
+            checkInterrupt();
+            Tree tree;
+            if (git_tree_lookup(Setter(tree), gitRepo, &treeOid))
+                throw Error("looking up tree %s: %s", toHash(treeOid).gitRev(), git_error_last()->message);
+            for (size_t i = 0, n = git_tree_entrycount(tree.get()); i < n; i++) {
+                auto entry = git_tree_entry_byindex(tree.get(), i);
+                auto rel = prefix.empty() ? std::string(git_tree_entry_name(entry))
+                                          : prefix + "/" + git_tree_entry_name(entry);
+                if (!keep(rel))
+                    rejected.insert(rel);
+                else if (git_tree_entry_type(entry) == GIT_OBJECT_TREE)
+                    self(*git_tree_entry_id(entry), rel);
+            }
+        };
+        decide(hashToOID(treeSha), "");
+
+        // Phase 2, locked: write the kept trees and flush.
+        std::lock_guard lock(treeWriteMutex);
         auto filter = [&](this const auto & self, const git_oid & treeOid, const std::string & prefix)
             -> std::optional<git_oid> {
             checkInterrupt();
@@ -762,7 +794,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
                 auto entry = git_tree_entry_byindex(tree.get(), i);
                 std::string name = git_tree_entry_name(entry);
                 auto rel = prefix.empty() ? name : prefix + "/" + name;
-                if (!keep(rel))
+                if (rejected.count(rel))
                     continue;
                 git_oid oid = *git_tree_entry_id(entry);
                 if (git_tree_entry_type(entry) == GIT_OBJECT_TREE) {
@@ -791,6 +823,7 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
 
     Hash wrapInTree(const std::string & name, const Hash & oid, uint32_t mode) override
     {
+        std::lock_guard lock(treeWriteMutex);
         git_treebuilder * b;
         if (git_treebuilder_new(&b, *this, nullptr))
             throw GitError("creating a tree builder");
