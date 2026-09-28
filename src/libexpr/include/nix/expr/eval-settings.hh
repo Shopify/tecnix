@@ -690,6 +690,23 @@ struct EvalSettings : Config
           equals the Git tree its oid names. World inputs rely on that equality. With
           this off (the default), zone accessors honor `.gitattributes` as before.
         )"};
+
+    Setting<bool> tectonixWorldInputPaths{
+        this,
+        false,
+        "tectonix-world-input-paths",
+        R"(
+          Treat committed World content as World inputs where Nix would copy it into
+          the store: a World path interpolated into a string (`"${./.}"`, `src = ./.;`)
+          and `builtins.path` / `builtins.filterSource` over a World path (so also
+          `lib.cleanSourceWith`, `lib.sourceByRegex` and `lib.fileset.toSource`).
+          Instead of a store path the result is `<view>/<name>`, where `<view>` is the
+          World input for a one-entry tree holding the file or (filtered) directory
+          under its name. Filters see each entry's path and type, as with a store copy,
+          and never read contents. Uncommitted (dirty) content and anything outside
+          World are still copied. Derivations that use the result declare it in
+          `__worldInputs`, and their outputs must not refer to it.
+        )"};
 };
 
 /**

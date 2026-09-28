@@ -30,6 +30,7 @@
 #include "nix/store/async-path-writer.hh"
 #include "nix/expr/parallel-eval.hh"
 #include "nix/expr/ingestion-stats.hh"
+#include "nix/expr/tecnix/source-accessors.hh"
 
 #include "parser-tab.hh"
 
@@ -2513,6 +2514,12 @@ BackedStringView EvalState::coerceToString(
             // slash, as in /foo/${x}.
             return v.pathStrView();
         } else if (copyToStore) {
+            if (settings.tectonixWorldInputPaths) {
+                auto path = v.path();
+                if (auto s = tecnixWorldInputForPath(
+                        *this, path, path.baseName(), nullptr, v.determinePos(pos), {}, context))
+                    return std::move(*s);
+            }
             return store->printStorePath(copyPathToStore(context, v.path(), v.determinePos(pos)));
         } else {
             auto path = v.path();

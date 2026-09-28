@@ -3,6 +3,7 @@
 #include "nix/fetchers/filtering-source-accessor.hh"
 #include "nix/util/fs-sink.hh"
 
+#include <functional>
 #include <set>
 
 namespace nix {
@@ -147,6 +148,20 @@ struct GitRepo
         const std::vector<std::string> & include,
         const std::vector<std::string> & exclude,
         const std::set<std::string> & excludeNames) = 0;
+
+    /**
+     * Like `filterTree`, but `keep` decides for each entry, given its path relative to the tree.
+     * A rejected directory is not descended into; directories that end up empty are dropped.
+     * Tree entries only: blobs are never read. Used for `builtins.path { filter; }` over World
+     * content, where `keep` calls the Nix filter function.
+     */
+    virtual Hash filterTreeWith(const Hash & treeSha, const std::function<bool(const std::string & rel)> & keep) = 0;
+
+    /**
+     * Write a tree holding the single entry `name` → (`oid`, `mode`) and return its oid. A World
+     * input for one file or directory is such a tree, so its view path ends in the entry's name.
+     */
+    virtual Hash wrapInTree(const std::string & name, const Hash & oid, uint32_t mode) = 0;
 
     /** Get the SHA and git file mode of any entry by full relative path within a tree. */
     virtual std::optional<GitPathInfo> getPathInfo(const Hash & treeSha, const std::string & relPath) = 0;

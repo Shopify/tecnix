@@ -24,6 +24,7 @@
 #include "nix/store/provenance.hh"
 
 #include <nlohmann/json.hpp>
+#include <fstream>
 
 #include <sys/un.h>
 #include <fcntl.h>
@@ -1559,6 +1560,41 @@ void DerivationBuilderImpl::execBuilder(const Strings & args, const Strings & en
     execve(drv.builder.c_str(), stringsToCharPtrs(args).data(), stringsToCharPtrs(envStrs).data());
 }
 
+/**
+ * World inputs exist only while a derivation builds. A store copy of a source stays alive through
+ * the output's references; a view has nothing like that, so an output naming one would dangle at
+ * runtime. Returns the first file (or symlink) under `root` that mentions a view path.
+ */
+static std::optional<std::filesystem::path> findWorldViewReference(const std::filesystem::path & root)
+{
+    static constexpr std::string_view needle = "/nix/var/tectonix/world/";
+    auto mentions = [&](const std::filesystem::path & p, const std::filesystem::file_status & st) {
+        if (std::filesystem::is_symlink(st))
+            return std::filesystem::read_symlink(p).string().find(needle) != std::string::npos;
+        if (!std::filesystem::is_regular_file(st))
+            return false;
+        std::ifstream in(p, std::ios::binary);
+        std::string window;
+        std::vector<char> buf(1 << 16);
+        while (in.read(buf.data(), buf.size()) || in.gcount() > 0) {
+            window.append(buf.data(), in.gcount());
+            if (window.find(needle) != std::string::npos)
+                return true;
+            // Keep enough of the tail to catch a match that straddles two reads.
+            window.erase(0, window.size() - std::min(window.size(), needle.size() - 1));
+        }
+        return false;
+    };
+    auto st = std::filesystem::symlink_status(root);
+    if (mentions(root, st))
+        return root;
+    if (std::filesystem::is_directory(st))
+        for (auto & entry : std::filesystem::recursive_directory_iterator(root))
+            if (mentions(entry.path(), entry.symlink_status()))
+                return entry.path();
+    return std::nullopt;
+}
+
 SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 {
     std::map<std::string, ValidPathInfo> infos;
@@ -1663,6 +1699,17 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 #endif
                 NIX_WHEN_SUPPORT_ACLS(localSettings.ignoredAcls)},
             inodesSeen);
+
+        if (!drvOptions.worldInputs.empty())
+            if (auto file = findWorldViewReference(actualPath))
+                throw BuildError(
+                    BuildResult::Failure::OutputRejected,
+                    "output '%s' of '%s' refers to a World input view (under /nix/var/tectonix/world/) in %s; "
+                    "views exist only while a derivation builds, so the output would dangle at runtime. "
+                    "Copy what the output needs at runtime into it instead",
+                    outputName,
+                    store.printStorePath(drvPath),
+                    PathFmt(*file));
 
         bool discardReferences = false;
         if (auto udr = get(drvOptions.unsafeDiscardReferences, outputName)) {

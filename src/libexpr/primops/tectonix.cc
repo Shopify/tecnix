@@ -800,6 +800,136 @@ static void prim_tectonixFileset(EvalState & state, const PosIdx pos, Value ** a
     v.mkString(mountPath, context, state.mem);
 }
 
+// ============================================================================
+// tectonix-world-input-paths: World paths and builtins.path as World inputs
+// ============================================================================
+
+/** Parse a clean git fingerprint, `git:<oid>;mode=<octal>`. Anything else (a dirty overlay's
+ * `;dirty=` suffix, "absent", a non-git backend) is not committed World content. */
+static std::optional<std::pair<Hash, uint32_t>> parseCleanGitFingerprint(std::string_view fp)
+{
+    static constexpr std::string_view gitPrefix = "git:", modeInfix = ";mode=";
+    if (!hasPrefix(fp, gitPrefix) || fp.size() != gitPrefix.size() + 40 + modeInfix.size() + 6)
+        return std::nullopt;
+    auto hex = fp.substr(gitPrefix.size(), 40);
+    if (fp.substr(gitPrefix.size() + 40, modeInfix.size()) != modeInfix)
+        return std::nullopt;
+    auto modeStr = fp.substr(gitPrefix.size() + 40 + modeInfix.size());
+    uint32_t mode = 0;
+    for (char c : modeStr) {
+        if (c < '0' || c > '7')
+            return std::nullopt;
+        mode = mode * 8 + (c - '0');
+    }
+    try {
+        return std::pair{Hash::parseNonSRIUnprefixed(hex, HashAlgorithm::SHA1), mode};
+    } catch (BadHash &) {
+        return std::nullopt;
+    }
+}
+
+static bool isValidTreeEntryName(std::string_view name)
+{
+    return !name.empty() && name != "." && name != ".." && name.find('/') == std::string_view::npos
+           && name.find('\0') == std::string_view::npos;
+}
+
+std::optional<std::string> tecnixWorldInputForPath(
+    EvalState & state,
+    const SourcePath & path0,
+    std::string_view name,
+    Value * filterFun,
+    PosIdx pos,
+    const NixStringContext & inContext,
+    NixStringContext & outContext)
+{
+    // A worldtree sandbox has no local object database to write the new trees to.
+    if (!state.settings.tectonixWorldtreeSocket.get().empty())
+        return std::nullopt;
+    if (&*path0.accessor != &*state.rootFS && &*path0.accessor != &*state.storeFS)
+        return std::nullopt;
+    if (!isValidTreeEntryName(name))
+        return std::nullopt;
+
+    auto path = path0.resolveSymlinks(SymlinkResolution::Ancestors);
+    std::string abs(path.path.abs());
+
+    std::string worldPath;
+    Hash oid(HashAlgorithm::SHA1);
+    uint32_t mode;
+
+    static constexpr std::string_view viewRoot = "/nix/var/tectonix/world/";
+    auto storePrefix = state.store->storeDir + "/";
+    if (hasPrefix(abs, storePrefix)) {
+        // The repo-wide World mount is `<store>/<hash>-world-repo`; nothing else is World content.
+        auto rest = std::string_view(abs).substr(storePrefix.size());
+        auto slash = rest.find('/');
+        auto first = rest.substr(0, slash);
+        if (!hasSuffix(first, "-world-repo") || slash == std::string_view::npos)
+            return std::nullopt;
+        if (state.store->printStorePath(mountTecnixRepoAccessor(state)) != storePrefix + std::string(first))
+            return std::nullopt;
+        auto rel = std::string(rest.substr(slash + 1));
+        if (rel.empty())
+            return std::nullopt;
+        // The clean fingerprint is the committed object; it also records the access, as a copy would.
+        auto clean = parseCleanGitFingerprint(
+            getTecnixRepoAccessor(state)->getFingerprint(CanonPath(rel)).second.value_or(""));
+        if (!clean)
+            return std::nullopt;
+        std::tie(oid, mode) = *clean;
+        worldPath = "//" + rel;
+    } else if (hasPrefix(abs, viewRoot)) {
+        // Inside a World input view: the element that names the view must come with the string.
+        auto rest = std::string_view(abs).substr(viewRoot.size());
+        auto slash = rest.find('/');
+        auto viewOid = rest.substr(0, slash);
+        const NixStringContextElem::World * elem = nullptr;
+        for (auto & c : inContext)
+            if (auto w = std::get_if<NixStringContextElem::World>(&c.raw); w && w->oid.gitRev() == viewOid)
+                elem = w;
+        if (!elem)
+            return std::nullopt;
+        worldPath = elem->path;
+        if (slash == std::string_view::npos) {
+            oid = elem->oid;
+            mode = 0040000;
+        } else {
+            auto info = getWorldRepo(state)->getPathInfo(elem->oid, std::string(rest.substr(slash + 1)));
+            if (!info)
+                return std::nullopt;
+            oid = info->oid;
+            mode = info->mode;
+        }
+    } else
+        return std::nullopt;
+
+    auto repo = getWorldRepo(state);
+    if (!repo->hasObject(oid))
+        return std::nullopt;
+
+    // Filter a directory the way a filtered store copy would: the filter sees each entry's path
+    // (under `path`) and type, never its contents; rejected directories are not descended into.
+    if (filterFun && mode == 0040000)
+        oid = repo->filterTreeWith(oid, [&](const std::string & rel) {
+            return state.callPathFilter(filterFun, SourcePath{path.accessor, path.path / CanonPath(rel)}, pos);
+        });
+
+    NixStringContextElem::World world{
+        .oid = repo->wrapInTree(std::string(name), oid, mode),
+        .path = std::move(worldPath),
+    };
+    auto mountPath = world.viewPath();
+    CanonPath mountPoint(mountPath);
+    if (!state.storeFS->getMount(mountPoint)) {
+        GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+        state.storeFS->mount(mountPoint, repo->getAccessor(world.oid, opts, "world-path"));
+    }
+    state.allowPathLegacy(mountPath);
+    outContext.insert(std::move(world));
+    return mountPath + "/" + std::string(name);
+}
+
 static RegisterPrimOp primop_tectonixFileset({
     .name = "__tectonixFileset",
     .args = {"attrs"},

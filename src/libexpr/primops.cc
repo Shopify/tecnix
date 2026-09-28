@@ -21,6 +21,7 @@
 #include "nix/util/sort.hh"
 #include "nix/util/mounted-source-accessor.hh"
 #include "nix/expr/provenance.hh"
+#include "nix/expr/tecnix/source-accessors.hh"
 #include "nix/util/override-provenance-source-accessor.hh"
 
 #include <boost/container/small_vector.hpp>
@@ -2997,6 +2998,15 @@ static void addPath(
 {
     try {
         StorePathSet refs;
+
+        if (state.settings.tectonixWorldInputPaths && method == ContentAddressMethod::Raw::NixArchive
+            && !expectedHash) {
+            NixStringContext worldContext;
+            if (auto s = tecnixWorldInputForPath(state, path, name, filterFun, pos, context, worldContext)) {
+                v.mkString(*s, worldContext, state.mem);
+                return;
+            }
+        }
 
         if (path.accessor == state.rootFS && state.store->isInStore(path.path.abs()) && !context.empty()) {
             // FIXME: handle CA derivation outputs (where path needs to

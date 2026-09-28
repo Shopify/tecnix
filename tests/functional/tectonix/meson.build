@@ -9,6 +9,7 @@ suites += {
     'memo.sh',
     'world-inputs.sh',
     'raw-zone-trees.sh',
+    'world-paths.sh',
   ],
   'workdir' : meson.current_source_dir(),
 }

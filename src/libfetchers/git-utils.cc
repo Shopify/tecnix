@@ -741,6 +741,70 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
         return toHash(*result);
     }
 
+    Hash filterTreeWith(const Hash & treeSha, const std::function<bool(const std::string & rel)> & keep) override
+    {
+        git_repository * gitRepo = *this;
+
+        auto filter = [&](this const auto & self, const git_oid & treeOid, const std::string & prefix)
+            -> std::optional<git_oid> {
+            checkInterrupt();
+            Tree tree;
+            if (git_tree_lookup(Setter(tree), gitRepo, &treeOid))
+                throw Error("looking up tree %s: %s", toHash(treeOid).gitRev(), git_error_last()->message);
+
+            git_treebuilder * b;
+            if (git_treebuilder_new(&b, gitRepo, nullptr))
+                throw GitError("creating a tree builder");
+            TreeBuilder builder(b);
+            size_t kept = 0;
+
+            for (size_t i = 0, n = git_tree_entrycount(tree.get()); i < n; i++) {
+                auto entry = git_tree_entry_byindex(tree.get(), i);
+                std::string name = git_tree_entry_name(entry);
+                auto rel = prefix.empty() ? name : prefix + "/" + name;
+                if (!keep(rel))
+                    continue;
+                git_oid oid = *git_tree_entry_id(entry);
+                if (git_tree_entry_type(entry) == GIT_OBJECT_TREE) {
+                    auto sub = self(oid, rel);
+                    if (!sub)
+                        continue;
+                    oid = *sub;
+                }
+                if (git_treebuilder_insert(nullptr, builder.get(), name.c_str(), &oid, git_tree_entry_filemode(entry)))
+                    throw GitError("adding an entry to a tree builder");
+                kept++;
+            }
+
+            if (!kept && !prefix.empty())
+                return std::nullopt;
+            git_oid out;
+            if (git_treebuilder_write(&out, builder.get()))
+                throw GitError("creating a tree object");
+            return out;
+        };
+
+        auto result = filter(hashToOID(treeSha), "");
+        flush();
+        return toHash(*result);
+    }
+
+    Hash wrapInTree(const std::string & name, const Hash & oid, uint32_t mode) override
+    {
+        git_treebuilder * b;
+        if (git_treebuilder_new(&b, *this, nullptr))
+            throw GitError("creating a tree builder");
+        TreeBuilder builder(b);
+        auto entryOid = hashToOID(oid);
+        if (git_treebuilder_insert(nullptr, builder.get(), name.c_str(), &entryOid, (git_filemode_t) mode))
+            throw GitError("adding '%s' to a tree builder", name);
+        git_oid out;
+        if (git_treebuilder_write(&out, builder.get()))
+            throw GitError("creating a tree object");
+        flush();
+        return toHash(out);
+    }
+
     Hash getCommitTree(const Hash & commitSha) override
     {
         auto oid = hashToOID(commitSha);
