@@ -1,0 +1,39 @@
+name: "Build profile"
+
+# A separate workflow, so that scheduled runs don't share (and cancel) the CI concurrency
+# group of pushes to main.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      catfood:
+        description: 'Use catfood Nix build'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  profile_build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - uses: ./.github/actions/install-nix-action
+      with:
+        github_token: ${{ github.token }}
+        catfood: ${{ github.event_name == 'workflow_dispatch' && inputs.catfood || github.event_name != 'workflow_dispatch' }}
+        extra_nix_config: |
+          experimental-features = flakes nix-command ca-derivations impure-derivations
+          max-jobs = 1
+    - run: |
+        nix build -L --file ./ci/gha/profile-build buildTimeReport --out-link build-time-report.md
+        cat build-time-report.md >> $GITHUB_STEP_SUMMARY

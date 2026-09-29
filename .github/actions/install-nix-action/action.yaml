@@ -7,15 +7,15 @@ inputs:
   extra_nix_config:
     description: "Gets appended to `/etc/nix/nix.conf` if passed."
   install_url:
-    description: "URL of the Nix installer"
+    description: "URL of the Nix installer. Also used when the catfood installer can't be downloaded."
     required: false
     default: "https://releases.nixos.org/nix/nix-2.32.1/install"
   github_token:
     description: "Github token"
     required: true
   use_cache:
-    description: "Whether to setup github actions cache (not implemented currently)"
-    default: false
+    description: "Whether to cache built store paths in the GitHub Actions cache (Magic Nix Cache)"
+    default: true
     required: false
 runs:
   using: "composite"
@@ -25,10 +25,6 @@ runs:
       id: download-nix-installer
       if: inputs.catfood == 'true'
       run: |
-        DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' "$CATFOOD_REPO")"
-
-        RUN_ID=$(gh run list --repo "$CATFOOD_REPO" --workflow ci.yml --branch "$DEFAULT_BRANCH" --status success --json databaseId --jq ".[0].databaseId")
-
         if [ "$RUNNER_OS" == "Linux" ]; then
           INSTALLER_ARTIFACT="installer-linux"
         elif [ "$RUNNER_OS" == "macOS" ]; then
@@ -39,18 +35,48 @@ runs:
         fi
 
         INSTALLER_DOWNLOAD_DIR="$GITHUB_WORKSPACE/$INSTALLER_ARTIFACT"
-        mkdir -p "$INSTALLER_DOWNLOAD_DIR"
 
-        gh run download "$RUN_ID" --repo "$CATFOOD_REPO" -n "$INSTALLER_ARTIFACT" -D "$INSTALLER_DOWNLOAD_DIR"
-        echo "installer-path=file://$INSTALLER_DOWNLOAD_DIR" >> "$GITHUB_OUTPUT"
+        # Returns non-zero instead of exiting, so that callers can retry.
+        download_installer() {
+          local default_branch run_id
+          rm -rf "$INSTALLER_DOWNLOAD_DIR"
+          mkdir -p "$INSTALLER_DOWNLOAD_DIR" || return 1
+          default_branch="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' "$CATFOOD_REPO")" || return 1
+          run_id="$(gh run list --repo "$CATFOOD_REPO" --workflow ci.yml --branch "$default_branch" --status success --json databaseId --jq ".[0].databaseId")" || return 1
+          if [ -z "$run_id" ] || [ "$run_id" == "null" ]; then
+            echo "No successful $default_branch run found in $CATFOOD_REPO"
+            return 1
+          fi
+          gh run download "$run_id" --repo "$CATFOOD_REPO" -n "$INSTALLER_ARTIFACT" -D "$INSTALLER_DOWNLOAD_DIR" || return 1
+          echo "::notice ::Catfooding Nix installer from $default_branch (https://github.com/$CATFOOD_REPO/actions/runs/$run_id)"
+        }
 
-        echo "::notice ::Catfooding Nix installer from $DEFAULT_BRANCH (https://github.com/$CATFOOD_REPO/actions/runs/$RUN_ID)"
+        # The GitHub API calls above sometimes fail from runner IPs because of the
+        # organization's IP allow list. Retry, then fall back to `install_url`.
+        for attempt in 1 2 3; do
+          if download_installer; then
+            echo "installer-path=file://$INSTALLER_DOWNLOAD_DIR" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sleep $((attempt * 5))
+        done
+        echo "::warning ::Could not download the catfood Nix installer from $CATFOOD_REPO; installing from $FALLBACK_INSTALL_URL instead"
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         CATFOOD_REPO: ${{ github.repository }}
+        FALLBACK_INSTALL_URL: ${{ inputs.install_url }}
     - uses: cachix/install-nix-action@c134e4c9e34bac6cab09cf239815f9339aaaf84e # v31.5.1
       with:
         # Ternary operator in GHA: https://www.github.com/actions/runner/issues/409#issuecomment-752775072
-        install_url: ${{ inputs.catfood == 'true' && format('{0}/install', steps.download-nix-installer.outputs.installer-path) || inputs.install_url }}
-        install_options: ${{ inputs.catfood == 'true' && format('--tarball-url-prefix {0}', steps.download-nix-installer.outputs.installer-path) || '' }}
+        install_url: ${{ steps.download-nix-installer.outputs.installer-path != '' && format('{0}/install', steps.download-nix-installer.outputs.installer-path) || inputs.install_url }}
+        install_options: ${{ steps.download-nix-installer.outputs.installer-path != '' && format('--tarball-url-prefix {0}', steps.download-nix-installer.outputs.installer-path) || '' }}
         extra_nix_config: ${{ inputs.extra_nix_config }}
+    # Serves previously built store paths from the GitHub Actions cache and uploads
+    # newly built ones. Pull requests can read the default branch's entries; their own
+    # uploads are scoped to the pull request.
+    - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      if: inputs.use_cache == 'true'
+      with:
+        use-flakehub: false
+        use-gha-cache: true
+        diagnostic-endpoint: ""

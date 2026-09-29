@@ -59,8 +59,10 @@ jobs:
         run: |
           exit 1
 
+  # Pull requests run the component (unit + functional) tests. VM tests, flake checks, the
+  # installer tarball, installer tests, flake regressions and code coverage run on pushes
+  # to main, merge queue runs and manual dispatches.
   tests:
-    needs: basic-checks
     strategy:
       fail-fast: false
       matrix:
@@ -68,24 +70,26 @@ jobs:
           - scenario: on ubuntu
             runs-on: ubuntu-24.04
             os: linux
-            instrumented: false
+            sanitizers: false
             primary: true
             stdenv: stdenv
           - scenario: on macos
             runs-on: macos-14
             os: darwin
-            instrumented: false
+            sanitizers: false
             primary: true
             stdenv: stdenv
+          # The scenario name is a required status check; coverage now runs in the
+          # `coverage` job.
           - scenario: on ubuntu (with sanitizers / coverage)
             runs-on: ubuntu-24.04
             os: linux
-            instrumented: true
+            sanitizers: true
             primary: false
             stdenv: clangStdenv
     name: tests ${{ matrix.scenario }}
     runs-on: ${{ matrix.runs-on }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
     - uses: actions/checkout@v7
       with:
@@ -103,39 +107,55 @@ jobs:
     - name: Run component tests
       run: |
         nix build --file ci/gha/tests/wrapper.nix componentTests -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
+          --arg withSanitizers ${{ matrix.sanitizers }} \
+          --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
     - name: Run VM tests
       run: |
         nix build --file ci/gha/tests/wrapper.nix vmTests -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
+          --arg withSanitizers ${{ matrix.sanitizers }} \
+          --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
-      if: ${{ matrix.os == 'linux' }}
+      if: ${{ matrix.os == 'linux' && github.event_name != 'pull_request' }}
     - name: Run flake checks and prepare the installer tarball
       run: |
         ci/gha/tests/build-checks
         ci/gha/tests/prepare-installer-for-github-actions
-      if: ${{ matrix.primary }}
-    - name: Collect code coverage
-      run: |
-        nix build --file ci/gha/tests/wrapper.nix codeCoverage.coverageReports -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
-          --argstr stdenv "${{ matrix.stdenv }}" \
-          --out-link coverage-reports
-        cat coverage-reports/index.txt >> $GITHUB_STEP_SUMMARY
-      if: ${{ matrix.instrumented }}
-    - name: Upload coverage reports
-      uses: actions/upload-artifact@v7
-      with:
-        name: coverage-reports
-        path: coverage-reports/
-      if: ${{ matrix.instrumented }}
+      if: ${{ matrix.primary && github.event_name != 'pull_request' }}
     - name: Upload installer tarball
       uses: actions/upload-artifact@v7
       with:
         name: installer-${{matrix.os}}
         path: out/*
-      if: ${{ matrix.primary }}
+      if: ${{ matrix.primary && github.event_name != 'pull_request' }}
+
+  coverage:
+    name: code coverage
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - uses: ./.github/actions/install-nix-action
+      with:
+        github_token: ${{ github.token }}
+        catfood: ${{ github.event_name == 'workflow_dispatch' && inputs.catfood || github.event_name != 'workflow_dispatch' }}
+        extra_nix_config: "sandbox = true"
+    - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+    - name: Collect code coverage
+      run: |
+        nix build --file ci/gha/tests/wrapper.nix codeCoverage.coverageReports -L \
+          --arg withInstrumentation true \
+          --argstr stdenv clangStdenv \
+          --out-link coverage-reports
+        cat coverage-reports/index.txt >> $GITHUB_STEP_SUMMARY
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v7
+      with:
+        name: coverage-reports
+        path: coverage-reports/
 
   installer_test:
     needs: [tests]
@@ -161,41 +181,55 @@ jobs:
             rust-installer: true
     name: installer test ${{ matrix.scenario }}
     runs-on: ${{ matrix.runs-on }}
+    # Pull requests don't build the installer tarball. The conditions are on the steps rather
+    # than the job: a skipped matrix job reports as `installer test ${{ matrix.scenario }}`,
+    # so the required `installer test on ...` checks would never report.
     steps:
     - uses: actions/checkout@v7
+      if: github.event_name != 'pull_request'
     - name: Download installer tarball
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      if: github.event_name != 'pull_request'
       with:
         name: installer-${{matrix.os}}
         path: out
     - name: Looking up the installer tarball URL
       id: installer-tarball-url
+      if: github.event_name != 'pull_request'
       run: echo "installer-url=file://$GITHUB_WORKSPACE/out" >> "$GITHUB_OUTPUT"
     - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      if: ${{ !matrix.rust-installer }}
+      if: ${{ github.event_name != 'pull_request' && !matrix.rust-installer }}
       with:
         install_url: ${{ format('{0}/install', steps.installer-tarball-url.outputs.installer-url) }}
         install_options: ${{ format('--tarball-url-prefix {0}', steps.installer-tarball-url.outputs.installer-url) }}
     - name: Run rust installer
-      if: ${{ matrix.rust-installer }}
+      if: ${{ github.event_name != 'pull_request' && matrix.rust-installer }}
       run: |
         chmod +x out/nix-installer
         ./out/nix-installer install --no-confirm
       env:
         RUST_BACKTRACE: full
     - run: sudo apt install fish zsh
-      if: matrix.os == 'linux'
+      if: ${{ github.event_name != 'pull_request' && matrix.os == 'linux' }}
     - run: brew install fish
-      if: matrix.os == 'darwin'
+      if: ${{ github.event_name != 'pull_request' && matrix.os == 'darwin' }}
     - run: exec bash -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec sh -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec zsh -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec fish -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec bash -c "nix-channel --add https://releases.nixos.org/nixos/unstable/nixos-23.05pre466020.60c1d71f2ba nixpkgs"
+      if: github.event_name != 'pull_request'
     - run: exec bash -c "nix-channel --update && nix-env -iA nixpkgs.hello && hello"
+      if: github.event_name != 'pull_request'
 
   flake_regressions:
     needs: tests
+    # Not a matrix job, so a skipped run still reports the required `flake_regressions` check.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout nix
@@ -225,25 +259,3 @@ jobs:
           install_options: ${{ format('--tarball-url-prefix {0}', steps.installer-tarball-url.outputs.installer-url) }}
       - name: Run flake regressions tests
         run: MAX_FLAKES=25 flake-regressions/eval-all.sh
-
-  profile_build:
-    needs: tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    if: >-
-      github.event_name == 'push' &&
-      github.ref_name == 'main'
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-    - uses: ./.github/actions/install-nix-action
-      with:
-        github_token: ${{ github.token }}
-        catfood: ${{ github.event_name == 'workflow_dispatch' && inputs.catfood || github.event_name != 'workflow_dispatch' }}
-        extra_nix_config: |
-          experimental-features = flakes nix-command ca-derivations impure-derivations
-          max-jobs = 1
-    - run: |
-        nix build -L --file ./ci/gha/profile-build buildTimeReport --out-link build-time-report.md
-        cat build-time-report.md >> $GITHUB_STEP_SUMMARY
