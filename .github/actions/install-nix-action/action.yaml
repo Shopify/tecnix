@@ -14,8 +14,8 @@ inputs:
     description: "Github token"
     required: true
   use_cache:
-    description: "Whether to cache built store paths in the GitHub Actions cache (Magic Nix Cache)"
-    default: true
+    description: "Whether to setup github actions cache (not implemented currently)"
+    default: false
     required: false
 runs:
   using: "composite"
@@ -71,12 +71,3 @@ runs:
         install_url: ${{ steps.download-nix-installer.outputs.installer-path != '' && format('{0}/install', steps.download-nix-installer.outputs.installer-path) || inputs.install_url }}
         install_options: ${{ steps.download-nix-installer.outputs.installer-path != '' && format('--tarball-url-prefix {0}', steps.download-nix-installer.outputs.installer-path) || '' }}
         extra_nix_config: ${{ inputs.extra_nix_config }}
-    # Serves previously built store paths from the GitHub Actions cache and uploads
-    # newly built ones. Pull requests can read the default branch's entries; their own
-    # uploads are scoped to the pull request.
-    - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
-      if: inputs.use_cache == 'true'
-      with:
-        use-flakehub: false
-        use-gha-cache: true
-        diagnostic-endpoint: ""
