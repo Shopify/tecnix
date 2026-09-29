@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -15,6 +16,7 @@
 namespace nix {
 
 class EvalState;
+struct TraceRoot;
 struct Value;
 
 using EvalSourceAccessId = uint32_t;
@@ -119,9 +121,21 @@ struct TrackingContext
     std::vector<EvalSourceAccessId> frameAccessStack;
     std::vector<EvalSourceAccessSetId> frameChildStack;
     TrackedSourceDepsFrame rootFrame;
+    /**
+     * Tracing state (one root per context) when `tecnix-trace` is on and a
+     * session exists; null otherwise. The hot paths test this pointer once.
+     */
+    std::unique_ptr<TraceRoot> trace;
 
-    // Always captures the EvalState-owned source-access graph; no foreign graph constructor exists.
-    explicit TrackingContext(EvalState & state);
+    /**
+     * Always captures the EvalState-owned source-access graph; no foreign
+     * graph constructor exists. `traceRootName` names the root in a trace
+     * (the target, `resolver`, or `discovery`).
+     */
+    explicit TrackingContext(EvalState & state, std::string_view traceRootName = "anonymous");
+    TrackingContext(const TrackingContext &) = delete;
+    TrackingContext & operator=(const TrackingContext &) = delete;
+    ~TrackingContext();
 
     void recordAccess(std::string_view path);
 };

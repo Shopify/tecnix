@@ -10,6 +10,7 @@ namespace nix {
 
 static void prim_fetchMercurial(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    TecnixTraceIoScope traceIo(pos, TraceRecord::Fetch);
     std::string url;
     std::optional<Hash> rev;
     std::optional<std::string> ref;

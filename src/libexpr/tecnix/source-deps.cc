@@ -1,5 +1,6 @@
 #include "nix/expr/eval.hh"
 #include "nix/expr/tecnix/access-set-graph.hh"
+#include "nix/expr/tecnix/trace.hh"
 #include "tecnix/eval-data.hh"
 #include "nix/util/strings-inline.hh"
 #include "nix/util/util.hh"
@@ -609,6 +610,14 @@ void publishTrackedValueDependencies(const void * value)
     if (!frame || frame->published)
         return;
 
+    /* The tracer's slot is written here and nowhere else: `finish` runs this
+       hook before the cell reads as finished, so any thread that sees the
+       value sees its record. Every value frame under a tracing context is a
+       TracedSourceDepsFrame (see force-value.hh). Before the tracker's early
+       return below: a value without dependencies still has a producer. */
+    if (auto * trace = frame->trackingCtx.trace.get())
+        tracePublish(*trace, static_cast<TracedSourceDepsFrame &>(*frame));
+
     auto directAccesses = frame->directSourceAccessSetAccesses();
     auto children = frame->childSourceAccessSets();
 
@@ -645,6 +654,13 @@ void copyTrackedValueDependencies(void * dst, const void * src)
     if (!currentValueFrame)
         return;
 
+    /* The frame's value is a copy: it keeps the source's identity (an alias
+       of `lib.foo` *is* `lib.foo`), and using the source is a reuse if
+       another root produced it. */
+    if (auto * trace = trackingCtx->trace.get())
+        traceCopyIntoFrame(
+            *trace, static_cast<TracedSourceDepsFrame &>(*currentValueFrame), *static_cast<const Value *>(src));
+
     auto accessSet = static_cast<const Value *>(src)->trackedSourceAccessSet();
     if (accessSet == emptyEvalSourceAccessSetId)
         return;
@@ -661,6 +677,10 @@ void publishCopiedValueDependencies(void * dst, const void * src)
     auto * currentValueFrame = currentTrackedValueForceFrame(dst);
     if (currentValueFrame)
         return;
+
+    // The copy keeps the source's producer whether or not it carries a label.
+    if (trackingCtx->trace)
+        traceCopy(*static_cast<const Value *>(dst), *static_cast<const Value *>(src));
 
     auto accessSet = static_cast<const Value *>(src)->trackedSourceAccessSet();
     if (accessSet == emptyEvalSourceAccessSetId)
@@ -705,7 +725,7 @@ TrackedSourceDepsFrame::TrackedSourceDepsFrame(
 {
 }
 
-TrackingContext::TrackingContext(EvalState & evalState)
+TrackingContext::TrackingContext(EvalState & evalState, std::string_view traceRootName)
     : sourceAccessSetGraph(trackedSourceAccessSetGraph(evalState))
     , rootFrame(*this)
 {
@@ -718,7 +738,13 @@ TrackingContext::TrackingContext(EvalState & evalState)
     // Establish the invariant every hot path relies on: a live TrackingContext
     // implies an enabled graph, so forcing and the value hooks never re-check.
     sourceAccessSetGraph->enable();
+
+    // One trace root per context: opened here, closed by the destructor.
+    if (auto * session = tecnixTraceSession(evalState))
+        trace = std::make_unique<TraceRoot>(*session, traceRootName);
 }
+
+TrackingContext::~TrackingContext() = default;
 
 void TrackingContext::recordAccess(std::string_view path)
 {

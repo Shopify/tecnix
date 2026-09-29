@@ -191,6 +191,7 @@ sources = files(
   'tecnix/repo-accessor.cc',
   'tecnix/source-accessors.cc',
   'tecnix/source-deps.cc',
+  'tecnix/trace.cc',
   'value-to-json.cc',
   'value-to-xml.cc',
   'value.cc',

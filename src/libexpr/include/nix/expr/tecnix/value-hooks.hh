@@ -81,6 +81,68 @@ tecnixValueLabelStore(const void * value, uint32_t accessSet, std::memory_order 
         slot.store(0, std::memory_order_relaxed);
 }
 
+/**
+ * The tracer's side table: the same directory structure as the label table
+ * with an 8-byte slot per 16-byte cell, holding `(record id << 24) | root`
+ * for the record that produced the cell's current value (see tecnix/trace.hh).
+ * Written exactly once per finished value, at publish; cleared by the finish
+ * hook like the label. Chunks are 2 GiB sparse mappings covering 4 GiB of
+ * address space each, installed on the first store in their region.
+ */
+extern std::atomic<uint64_t *> tecnixValueTraceDir[tecnixValueLabelDirSize];
+
+/**
+ * Set when the first tracing session is created in this process and never
+ * cleared: slots may outlive the call that wrote them, so the finish hook
+ * must keep clearing them. Off means the hook pays one predicted branch.
+ */
+extern std::atomic<bool> tecnixTraceEverEnabled;
+
+uint64_t * tecnixInstallValueTraceChunk(size_t dirIndex);
+
+[[gnu::always_inline]] inline uint64_t tecnixValueTraceLoad(const void * value, std::memory_order order) noexcept
+{
+    auto addr = reinterpret_cast<uintptr_t>(value);
+    auto dirIndex = addr >> 32;
+    if (dirIndex >= tecnixValueLabelDirSize) [[unlikely]]
+        return 0;
+    auto * chunk = tecnixValueTraceDir[dirIndex].load(std::memory_order_relaxed);
+    if (!chunk)
+        return 0;
+    return std::atomic_ref<uint64_t>(chunk[(addr & 0xffffffff) >> 4]).load(order);
+}
+
+/** Store a nonzero slot (clearing is `tecnixValueTraceClear`). */
+[[gnu::always_inline]] inline void
+tecnixValueTraceStore(const void * value, uint64_t slot, std::memory_order order) noexcept
+{
+    auto addr = reinterpret_cast<uintptr_t>(value);
+    auto dirIndex = addr >> 32;
+    if (dirIndex >= tecnixValueLabelDirSize) [[unlikely]] {
+        tecnixValueLabelOutOfRange(value);
+        return;
+    }
+    auto * chunk = tecnixValueTraceDir[dirIndex].load(std::memory_order_relaxed);
+    if (!chunk)
+        chunk = tecnixInstallValueTraceChunk(dirIndex);
+    std::atomic_ref<uint64_t>(chunk[(addr & 0xffffffff) >> 4]).store(slot, order);
+}
+
+/** Clear-if-set, for the same reason as `tecnixValueLabelClear`. */
+[[gnu::always_inline]] inline void tecnixValueTraceClear(const void * value) noexcept
+{
+    auto addr = reinterpret_cast<uintptr_t>(value);
+    auto dirIndex = addr >> 32;
+    if (dirIndex >= tecnixValueLabelDirSize) [[unlikely]]
+        return;
+    auto * chunk = tecnixValueTraceDir[dirIndex].load(std::memory_order_relaxed);
+    if (!chunk)
+        return;
+    auto slot = std::atomic_ref<uint64_t>(chunk[(addr & 0xffffffff) >> 4]);
+    if (slot.load(std::memory_order_relaxed) != 0)
+        slot.store(0, std::memory_order_relaxed);
+}
+
 void publishTrackedValueDependencies(const void * value);
 void copyTrackedValueDependencies(void * dst, const void * src);
 void publishCopiedValueDependencies(void * dst, const void * src);
@@ -91,11 +153,14 @@ void publishCopiedValueDependencies(void * dst, const void * src);
  * guarantees a label is never stale: whatever the slot held for a previous
  * occupant of this address (a reused GC cell, a reused stack slot), the
  * finished value starts empty and receives its label from the publish that
- * follows, ordered before the cell is observable as finished.
+ * follows, ordered before the cell is observable as finished. The tracer's
+ * slot follows the same rule.
  */
 inline void tecnixValueFinishHook(const void * value)
 {
     tecnixValueLabelClear(value);
+    if (tecnixTraceEverEnabled.load(std::memory_order_relaxed)) [[unlikely]]
+        tecnixValueTraceClear(value);
     if (currentTecnixThreadState.valueDependencyPublishValue == value)
         publishTrackedValueDependencies(value);
 }

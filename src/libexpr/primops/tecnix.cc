@@ -14,6 +14,7 @@
 #include "nix/expr/tecnix/eval-cache.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
 #include "nix/store/store-api.hh"
+#include "tecnix/trace-session.hh"
 #include "nix/util/strings.hh"
 #include "nix/util/util.hh"
 
@@ -169,6 +170,8 @@ struct TecnixArgs
     /** The caller asked for the tracked source closure (`includeDependencies`),
         so it must be computed even when the eval cache would not need it. */
     bool requireDependencies = false;
+    /** The tracing call this builtin invocation is, for `phases`; 0 when not tracing. */
+    uint32_t traceCall = 0;
 };
 
 /** The persistent-cache row family these arguments address. */
@@ -354,8 +357,19 @@ static void configureTecnixRepoContext(EvalState & state, const TecnixArgs & arg
  * every force, interning the sets and fingerprinting the paths is pure
  * overhead. Gating here also makes "not tracking" a whole-evaluation property,
  * which is what lets the resolver module be shared in that mode.
+ *
+ * Tracing (`tecnix-trace`) rides on the tracker's frames, so asking for a
+ * trace turns tracking on: a cold run with the cache disabled is the usual
+ * thing to trace, and it would otherwise record nothing.
  */
 static bool tecnixSourceTrackingEnabled(const EvalState & state, const TecnixArgs & tArgs)
+{
+    return tArgs.requireDependencies || (state.settings.pureEval && state.settings.tecnixEvalCache)
+           || !state.settings.tecnixTrace.get().empty();
+}
+
+/** Whether a call needs the fingerprinted closure: to return it, or to cache it. */
+static bool tecnixClosureNeeded(const EvalState & state, const TecnixArgs & tArgs)
 {
     return tArgs.requireDependencies || (state.settings.pureEval && state.settings.tecnixEvalCache);
 }
@@ -561,6 +575,7 @@ static TecnixDiscoveryResult discoverTecnixTargetNames(
 
     std::string cacheKey{tecnixTargetNamesCacheKey};
     if (useCache) {
+        TecnixTracePhase phase(state, tArgs.traceCall, "cache-lookup");
         std::optional<TecnixDiscoveryResult> cached;
         lookupCachedDependencies(
             state,
@@ -591,20 +606,25 @@ static TecnixDiscoveryResult discoverTecnixTargetNames(
     printTalkative("tecnixTargetNames: discovery cache miss, evaluating");
     std::optional<TrackingContext> trackingCtx;
     std::vector<std::string> targetNames;
-    if (track) {
-        trackingCtx.emplace(state);
-        ActiveTrackingContext activeTrackingCtx(*trackingCtx);
-        targetNames = evalTargetNamesOnly(state, pos, tArgs);
-    } else {
-        targetNames = evalTargetNamesOnly(state, pos, tArgs);
+    {
+        TecnixTracePhase phase(state, tArgs.traceCall, "discovery");
+        if (track) {
+            trackingCtx.emplace(state, "discovery");
+            ActiveTrackingContext activeTrackingCtx(*trackingCtx);
+            targetNames = evalTargetNamesOnly(state, pos, tArgs);
+        } else {
+            targetNames = evalTargetNamesOnly(state, pos, tArgs);
+        }
     }
     DependencyClosure dependencies;
-    if (trackingCtx) {
+    if (trackingCtx && tecnixClosureNeeded(state, tArgs)) {
+        TecnixTracePhase phase(state, tArgs.traceCall, "fingerprint");
         auto trackedPaths = collectSourceAccessSetTrackedPaths(*trackingCtx);
         dependencies = dependencyFingerprints(getTecnixRepoAccessor(state), trackedPaths, fingerprintCache);
     }
 
     if (useCache && !dependencies.empty()) {
+        TecnixTracePhase phase(state, tArgs.traceCall, "cache-upsert");
         std::vector<TecnixDependencyUpsert> upserts;
         upserts.push_back({cacheKey, &dependencies, nlohmann::json(targetNames).dump()});
         upsertDependencyClosures(cacheScope(tArgs), upserts, state.settings.tecnixEvalCacheHistory);
@@ -710,9 +730,14 @@ static void prim_tecnixTargetsCached(EvalState & state, const PosIdx pos, Value 
 
 static void prim_tecnixTargets(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    // First statement: destroyed last, so the trace dump (outermost call only)
+    // runs after every tracking context below has closed its root record.
+    TecnixTraceCall traceCall(state);
     auto tArgs = parseTecnixArgs(state, pos, args, true);
     requireTecnixTargets(state, pos, tArgs);
     configureTecnixRepoContext(state, tArgs);
+    traceCall.noteArgs(tArgs.gitDir, tArgs.rev, tArgs.checkoutPath, tArgs.resolver);
+    tArgs.traceCall = traceCall.call;
 
     auto includeDependencies = getTecnixBoolAttr(
         state,
@@ -734,7 +759,7 @@ static void prim_tecnixTargets(EvalState & state, const PosIdx pos, Value ** arg
         return;
     }
 
-    if (state.settings.pureEval && state.settings.tecnixEvalCache) {
+    if (tecnixSourceTrackingEnabled(state, tArgs)) {
         prim_tecnixTargetsCached(state, pos, v, tArgs);
         return;
     }
@@ -857,7 +882,7 @@ prepareTrackedResolveFunction(EvalState & state, const PosIdx pos, const TecnixA
             .sourceDeps = emptyEvalSourceAccessSetId,
         };
 
-    TrackingContext trackingCtx(state);
+    TrackingContext trackingCtx(state, "resolver");
     ActiveTrackingContext activeTrackingCtx(trackingCtx);
 
     TrackedSourceDepsScope sourceDepsScope(trackingCtx);
@@ -887,7 +912,7 @@ static TargetDependencyResult evalTargetDependencies(
 
     std::optional<TrackingContext> trackingCtx;
     if (track) {
-        trackingCtx.emplace(state);
+        trackingCtx.emplace(state, target);
         if (resolveSourceDeps != emptyEvalSourceAccessSetId)
             recordTrackedSourceAccessSetDependency(*trackingCtx, resolveSourceDeps);
     }
@@ -1056,6 +1081,7 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
     size_t cacheHits = 0;
 
     if (useCache) {
+        TecnixTracePhase phase(state, args.traceCall, "cache-lookup");
         // Each hit is copied out of its cache row while the row is loaded:
         // the dependency attrs if the caller wants them, and the parsed target
         // payload if target values are wanted. `results` is GC-scanned, so the
@@ -1112,6 +1138,8 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
         allowParallelDependencies ? " in parallel" : " sequentially");
 
     if (!misses.empty()) {
+        std::optional<TecnixTracePhase> phase;
+        phase.emplace(state, args.traceCall, "evaluate");
         auto preparedResolve = prepareTrackedResolveFunction(state, pos, args);
 
         auto evalMiss = [&](size_t i) {
@@ -1129,9 +1157,13 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
         };
 
         evalTecnixIndices(state, misses, evalMiss, allowParallelDependencies);
-        finalizeSourceAccessSetDependencies(state, results, fingerprintCache);
+        if (tecnixClosureNeeded(state, args)) {
+            phase.emplace(state, args.traceCall, "fingerprint");
+            finalizeSourceAccessSetDependencies(state, results, fingerprintCache);
+        }
 
         if (useCache) {
+            phase.emplace(state, args.traceCall, "cache-upsert");
             std::vector<TecnixDependencyUpsert> upserts;
             upserts.reserve(misses.size());
             for (auto i : misses) {
@@ -1147,9 +1179,10 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
 }
 
 /**
- * The cached form of plain `builtins.tecnixTargets`: prove stored source
+ * The tracked form of plain `builtins.tecnixTargets`: prove stored source
  * closures, answer proven targets from their selected-output payloads, and
- * evaluate (and cache) the rest.
+ * evaluate (and cache) the rest. Also the form a traced call takes with the
+ * cache off: every target is then a miss, evaluated under its own root.
  */
 static void prim_tecnixTargetsCached(EvalState & state, const PosIdx pos, Value & v, const TecnixArgs & tArgs)
 {
@@ -1201,8 +1234,11 @@ static void prim_tecnixTargetsWithDependencies(
 // ============================================================================
 static void prim_tecnixTargetNames(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    TecnixTraceCall traceCall(state); // first statement; see prim_tecnixTargets
     auto dArgs = parseTecnixArgs(state, pos, args, false);
     configureTecnixRepoContext(state, dArgs);
+    traceCall.noteArgs(dArgs.gitDir, dArgs.rev, dArgs.checkoutPath, dArgs.resolver);
+    dArgs.traceCall = traceCall.call;
 
     auto includeDependencies = getTecnixBoolAttr(
         state,
