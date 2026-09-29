@@ -5,6 +5,7 @@ suites += {
     'base-env.sh',
     'builtins.sh',
     'gc.sh',
+    'manifest-tracking.sh',
   ],
   'workdir' : meson.current_source_dir(),
 }
