@@ -246,8 +246,6 @@ static Symbol getName(const AttrName & name, EvalState & state, Env & env)
     }
 }
 
-static constexpr size_t BASE_ENV_SIZE = 140;
-
 EvalMemory::EvalMemory()
 {
     assertGCInitialized();
@@ -335,10 +333,10 @@ EvalState::EvalState(
     , regexCache(makeRegexCache())
     , tecnixData(std::make_unique<TecnixEvalData>())
 #if NIX_USE_BOEHMGC
-    , baseEnvP(std::allocate_shared<Env *>(traceable_allocator<Env *>(), &mem.allocEnv(BASE_ENV_SIZE)))
+    , baseEnvP(std::allocate_shared<Env *>(traceable_allocator<Env *>(), &mem.allocEnv(baseEnvCapacity)))
     , baseEnv(**baseEnvP)
 #else
-    , baseEnv(mem.allocEnv(BASE_ENV_SIZE))
+    , baseEnv(mem.allocEnv(baseEnvCapacity))
 #endif
     , staticBaseEnv{std::make_shared<StaticEnv>(nullptr, nullptr)}
     , countCalls(getEnv("NIX_COUNT_CALLS").value_or("0") != "0")
@@ -497,6 +495,15 @@ void EvalState::checkURI(const std::string & uri0)
     throw RestrictedPathError("access to URI '%s' is forbidden in restricted mode", uri0);
 }
 
+void EvalState::checkBaseEnvHasRoom(std::string_view name) const
+{
+    if (baseEnvDispl >= baseEnvCapacity)
+        throw Error(
+            "cannot register the builtin '%s': the base environment has only %d slots; increase baseEnvCapacity in eval.hh",
+            name,
+            baseEnvCapacity);
+}
+
 Value * EvalState::addConstant(const std::string & name, Value & v, Constant info)
 {
     Value * v2 = allocValue();
@@ -526,6 +533,7 @@ void EvalState::addConstant(const std::string & name, Value * v, Constant info)
         }
 
         /* Install value the base environment. */
+        checkBaseEnvHasRoom(name);
         staticBaseEnv->vars.emplace_back(symbols.create(name), baseEnvDispl);
         baseEnv.values[baseEnvDispl++] = v;
         const_cast<Bindings *>(getBuiltins().attrs())->push_back(Attr(symbols.create(name2), v));
@@ -595,6 +603,7 @@ Value * EvalState::addPrimOp(PrimOp && primOp)
     if (primOp.internal)
         internalPrimOps.emplace(primOp.name, RootValue(v));
     else {
+        checkBaseEnvHasRoom(primOp.name);
         staticBaseEnv->vars.emplace_back(envName, baseEnvDispl);
         baseEnv.values[baseEnvDispl++] = v;
         const_cast<Bindings *>(getBuiltins().attrs())->push_back(Attr(symbols.create(primOp.name), v));
