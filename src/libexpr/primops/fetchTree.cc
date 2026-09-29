@@ -86,6 +86,7 @@ struct FetchTreeParams
 static void fetchTree(
     EvalState & state, const PosIdx pos, Value ** args, Value & v, const FetchTreeParams & params = FetchTreeParams{})
 {
+    TecnixTraceIoScope traceIo(pos, TraceRecord::Fetch);
     fetchers::Input input{};
     NixStringContext context;
     std::optional<std::string> type;
@@ -356,6 +357,7 @@ static void fetch(
     bool unpack,
     std::string name)
 {
+    TecnixTraceIoScope traceIo(pos, TraceRecord::Fetch);
     std::optional<std::string> url;
     std::optional<Hash> expectedHash;
 

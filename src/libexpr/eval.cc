@@ -1209,6 +1209,8 @@ void EvalState::evalFile(const SourcePath & path, Value & v, bool mustBeTrivial)
         Value * v2 = nullptr;
         activeFileEvalCache.cvisit(resolvedEntry->resolvedPath, [&](auto & i) { v2 = *i.second; });
         if (v2) {
+            if (trackingCtx)
+                tecnixTraceNoteImport(*trackingCtx, resolvedEntry->resolvedPath);
             forceValue(*v2, noPos);
             v = *v2;
             return;
@@ -1228,6 +1230,9 @@ void EvalState::evalFile(const SourcePath & path, Value & v, bool mustBeTrivial)
             *i.second = vExpr;
         },
         [&](auto & i) { vExpr = *i.second; });
+
+    if (trackingCtx)
+        tecnixTraceNoteImport(*trackingCtx, resolvedEntry->resolvedPath);
 
     if (useTrackedFileEvalCache && trackingCtx) {
         TrackedSourceDepsScope sourceDepsScope(*trackingCtx);
@@ -2603,6 +2608,7 @@ StorePath EvalState::copyPathToStore(NixStringContext & context, const SourcePat
     if (nix::isDerivation(path.path.abs()))
         error<EvalError>("file names are not allowed to end in '%1%'", drvExtension).debugThrow();
 
+    TecnixTraceIoScope traceIo(pos, TraceRecord::Store);
     auto dstPath = fetchToStore(
         fetchSettings,
         *store,

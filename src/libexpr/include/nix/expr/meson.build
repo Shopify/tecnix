@@ -44,6 +44,7 @@ headers = [ config_pub_h ] + files(
   'tecnix/source-accessors.hh',
   'tecnix/source-deps.hh',
   'tecnix/thread-state.hh',
+  'tecnix/trace.hh',
   'tecnix/value-hooks.hh',
   'tecnix/value-layout-tripwire.hh',
   'tecnix/value-methods.hh',

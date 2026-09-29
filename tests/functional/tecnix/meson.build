@@ -4,6 +4,7 @@ suites += {
   'tests' : [
     'builtins.sh',
     'gc.sh',
+    'tracing.sh',
   ],
   'workdir' : meson.current_source_dir(),
 }

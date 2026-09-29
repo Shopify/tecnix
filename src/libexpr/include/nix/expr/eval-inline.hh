@@ -23,6 +23,7 @@ inline void * EvalMemory::allocBytes(size_t n)
 #endif
     if (!p)
         throw std::bad_alloc();
+    currentTecnixThreadState.bytesAllocated += n;
     return p;
 }
 
@@ -50,6 +51,7 @@ Value * EvalMemory::allocValue()
     void * p = *valueAllocCache;
     *valueAllocCache = GC_NEXT(p);
     GC_NEXT(p) = nullptr;
+    currentTecnixThreadState.bytesAllocated += sizeof(Value);
 #else
     void * p = allocBytes(sizeof(Value));
 #endif
@@ -82,6 +84,7 @@ Env & EvalMemory::allocEnv(size_t size)
         void * p = *env1AllocCache;
         *env1AllocCache = GC_NEXT(p);
         GC_NEXT(p) = nullptr;
+        currentTecnixThreadState.bytesAllocated += sizeof(Env) + sizeof(Value *);
         env = (Env *) p;
     } else
 #endif

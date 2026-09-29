@@ -132,6 +132,7 @@ typedef std::optional<StorePath> StorePathOrGap;
 
 static void prim_fetchClosure(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    TecnixTraceIoScope traceIo(pos, TraceRecord::Fetch);
     state.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.fetchClosure");
 
     std::optional<std::string> fromStoreUrl;

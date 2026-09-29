@@ -561,6 +561,27 @@ struct EvalSettings : Config
           at `128`, ~1.1 GB at `1024` for a dense shard).
         )"};
 
+    Setting<std::string> tecnixTrace{
+        this,
+        "",
+        "tecnix-trace",
+        R"(
+          Directory to write a Tecnix evaluation trace into, as
+          `tecnix-trace-<pid>.sqlite`. Empty (the default) disables tracing.
+
+          Tracing records tracked Tecnix evaluation (`builtins.tecnixTargets`
+          with `includeDependencies = true` or the eval cache enabled, and
+          `builtins.tecnixTargetNames`): every value computed, which target
+          computed it, which record needed it first, how long it took, how
+          many GC-heap bytes it allocated, and which other targets later
+          reused it. The file is written when the outermost tracked call
+          returns, including when it fails with an evaluation error; nothing
+          is written during evaluation. The trace is held in memory until
+          then, at roughly 70 bytes per value computed.
+
+          See `plans/tecnix-tracing/usage.md` for the tables and views.
+        )"};
+
     Setting<bool> tecnixParallelDependencies{
         this,
         true,

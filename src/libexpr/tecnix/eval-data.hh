@@ -4,6 +4,7 @@
 #include "nix/expr/eval.hh"
 #include "nix/expr/root-value.hh"
 #include "nix/expr/tecnix/access-set-graph.hh"
+#include "tecnix/trace-session.hh"
 
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
@@ -137,6 +138,13 @@ struct EvalState::TecnixEvalData
      * force in another context picks that label up via `forceValueTracked`.
      */
     const ref<EvalTecnixModuleCache> tecnixModuleCache = make_ref<EvalTecnixModuleCache>();
+
+    /**
+     * The evaluation trace (`tecnix-trace`), created by the first public
+     * Tecnix builtin call when the setting is non-empty and kept for the
+     * state's lifetime; null when tracing is off.
+     */
+    std::unique_ptr<TraceSession> traceSession;
 
     /** Lazy-initialized set of zone IDs in sparse checkout (thread-safe via once_flag) */
     mutable std::once_flag tectonixSparseCheckoutRootsFlag;
