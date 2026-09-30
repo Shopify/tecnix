@@ -57,9 +57,20 @@ struct FetchToStoreStats
     uint64_t ingestions = 0;
     uint64_t dryRunIngestions = 0;
     uint64_t filteredIngestions = 0;
-    /** NAR bytes of copied paths. Dry-run hashing does not report a size. */
-    uint64_t bytesCopied = 0;
+    /**
+     * NAR size of the paths passed to `addToStore`, whether or not the store
+     * already held them: it depends only on content, so it is comparable
+     * across evaluations and across warm and cold stores. Dry-run hashing
+     * does not report a size, so it adds nothing here.
+     */
+    uint64_t bytesIngested = 0;
+    /** Wall time hashing or copying, excluding time spent in a path filter. */
     double secondsIngesting = 0;
+    /**
+     * Wall time spent inside the path filter callback (for `builtins.path`
+     * this is Nix evaluation), including anything the filter itself evaluates.
+     */
+    double secondsFiltering = 0;
 };
 
 /**
@@ -76,11 +87,18 @@ std::vector<FetchToStoreStats> getFetchToStoreStats();
 struct FetchToStoreThreadTotals
 {
     uint64_t ingestions = 0;
-    uint64_t bytesCopied = 0;
+    uint64_t bytesIngested = 0;
     uint64_t nanosIngesting = 0;
 };
 
 FetchToStoreThreadTotals getFetchToStoreThreadTotals();
+
+/**
+ * Whether `NIX_SHOW_STATS` is set. Until it is, none of the counters above are
+ * maintained (same gate as `Counter::enabled`), so the `fetchToStore` hot path
+ * pays one predictable branch.
+ */
+bool fetchToStoreStatsEnabled();
 
 /**
  * Copy the `path` to the Nix store.

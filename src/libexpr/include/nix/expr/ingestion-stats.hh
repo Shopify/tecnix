@@ -14,9 +14,15 @@ namespace nix {
  * target evaluated on this thread and to the Nix expression position that
  * caused it.
  *
- * Attribution is first-toucher: a source path shared by several targets is
- * charged to whichever target's evaluation forced it first; later targets hit
- * the in-memory cache.
+ * The per-target figures are the work done while a target was being evaluated,
+ * not the size of its source dependencies. A source path shared by several
+ * targets is charged to whichever target's evaluation forced it first; the
+ * others hit the in-memory cache and are charged nothing. Under parallel
+ * evaluation "first" is a race, so a shared path can move between targets
+ * from run to run. The dependency tracer, by contrast, records every target
+ * that touched a path; use it, not these figures, to ask what a target
+ * depends on. Per-site figures behave the same way; per-caller totals count
+ * every ingestion exactly once and are not affected.
  */
 
 /**

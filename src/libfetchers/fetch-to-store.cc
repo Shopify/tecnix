@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <new>
 
 namespace nix {
 
@@ -33,7 +34,11 @@ makeSourcePathToHashCacheKey(std::string_view fingerprint, ContentAddressMethod 
 
 namespace {
 
-struct AtomicFetchToStoreStats
+/**
+ * Per-caller counters. Aligned to a cache line so callers do not contend with
+ * each other, and only touched when `NIX_SHOW_STATS` is set.
+ */
+struct alignas(std::hardware_destructive_interference_size) AtomicFetchToStoreStats
 {
     std::atomic<uint64_t> calls{0};
     std::atomic<uint64_t> memoryCacheHits{0};
@@ -41,19 +46,40 @@ struct AtomicFetchToStoreStats
     std::atomic<uint64_t> ingestions{0};
     std::atomic<uint64_t> dryRunIngestions{0};
     std::atomic<uint64_t> filteredIngestions{0};
-    std::atomic<uint64_t> bytesCopied{0};
+    std::atomic<uint64_t> bytesIngested{0};
     std::atomic<uint64_t> nanosIngesting{0};
+    std::atomic<uint64_t> nanosFiltering{0};
 };
 
 constexpr size_t nFetchToStoreCallers = static_cast<size_t>(FetchToStoreCaller::Count);
 
 AtomicFetchToStoreStats fetchToStoreStats[nFetchToStoreCallers];
 
+/** Same gate as `Counter::enabled` in libexpr, which libfetchers cannot reach. */
+const bool statsEnabled = getEnv("NIX_SHOW_STATS").value_or("0") != "0";
+
+/** Increment a statistics counter. Callers check `statsEnabled` first. */
+void bump(std::atomic<uint64_t> & counter, uint64_t n = 1)
+{
+    counter.fetch_add(n, std::memory_order_relaxed);
+}
+
+uint64_t nanosSince(std::chrono::steady_clock::time_point start)
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+}
+
 thread_local FetchToStoreCaller currentFetchToStoreCaller = FetchToStoreCaller::Other;
 
 thread_local FetchToStoreThreadTotals fetchToStoreThreadTotals;
 
 } // namespace
+
+bool fetchToStoreStatsEnabled()
+{
+    return statsEnabled;
+}
 
 std::string_view fetchToStoreCallerName(FetchToStoreCaller caller)
 {
@@ -92,14 +118,15 @@ std::vector<FetchToStoreStats> getFetchToStoreStats()
     for (size_t i = 0; i < nFetchToStoreCallers; ++i) {
         auto & s = fetchToStoreStats[i];
         out[i] = FetchToStoreStats{
-            .calls = s.calls.load(),
-            .memoryCacheHits = s.memoryCacheHits.load(),
-            .persistentCacheHits = s.persistentCacheHits.load(),
-            .ingestions = s.ingestions.load(),
-            .dryRunIngestions = s.dryRunIngestions.load(),
-            .filteredIngestions = s.filteredIngestions.load(),
-            .bytesCopied = s.bytesCopied.load(),
-            .secondsIngesting = static_cast<double>(s.nanosIngesting.load()) / 1e9,
+            .calls = s.calls.load(std::memory_order_relaxed),
+            .memoryCacheHits = s.memoryCacheHits.load(std::memory_order_relaxed),
+            .persistentCacheHits = s.persistentCacheHits.load(std::memory_order_relaxed),
+            .ingestions = s.ingestions.load(std::memory_order_relaxed),
+            .dryRunIngestions = s.dryRunIngestions.load(std::memory_order_relaxed),
+            .filteredIngestions = s.filteredIngestions.load(std::memory_order_relaxed),
+            .bytesIngested = s.bytesIngested.load(std::memory_order_relaxed),
+            .secondsIngesting = static_cast<double>(s.nanosIngesting.load(std::memory_order_relaxed)) / 1e9,
+            .secondsFiltering = static_cast<double>(s.nanosFiltering.load(std::memory_order_relaxed)) / 1e9,
         };
     }
     return out;
@@ -139,7 +166,8 @@ std::pair<StorePath, Hash> fetchToStore2(
     // recording here would silently drop the path from the dependency
     // closure of any tracked evaluation after the first.
     auto & stats = fetchToStoreStats[static_cast<size_t>(currentFetchToStoreCaller)];
-    stats.calls++;
+    if (statsEnabled)
+        bump(stats.calls);
 
     auto [subpath, fingerprint] = path.accessor->getFingerprint(path.path);
 
@@ -148,7 +176,8 @@ std::pair<StorePath, Hash> fetchToStore2(
     if (!filter) {
         auto dstPathCached = getConcurrent(settings.srcToStore->cache, srcToStoreKey);
         if (dstPathCached && (mode == FetchMode::DryRun || std::get<2>(*dstPathCached) == FetchMode::Copy)) {
-            stats.memoryCacheHits++;
+            if (statsEnabled)
+                bump(stats.memoryCacheHits);
             return std::make_pair(std::get<0>(*dstPathCached), std::get<1>(*dstPathCached));
         }
     }
@@ -176,7 +205,8 @@ std::pair<StorePath, Hash> fetchToStore2(
                     store.printStorePath(storePath),
                     hash.to_string(HashFormat::SRI, true));
                 settings.srcToStore->cache.insert_or_assign(srcToStoreKey, std::make_tuple(storePath, hash, mode));
-                stats.persistentCacheHits++;
+                if (statsEnabled)
+                    bump(stats.persistentCacheHits);
                 return {storePath, hash};
             }
             debug("source path '%s' not in store", path);
@@ -196,9 +226,20 @@ std::pair<StorePath, Hash> fetchToStore2(
         actUnknown,
         fmt(mode == FetchMode::DryRun ? "hashing '%s'" : "copying '%s' to the store", path));
 
-    auto filter2 = filter ? *filter : defaultPathFilter;
+    PathFilter filter2 = filter ? *filter : defaultPathFilter;
 
-    auto ingestStart = std::chrono::steady_clock::now();
+    // Time the filter callback separately: for `builtins.path` it is Nix
+    // evaluation (and may itself ingest), not hashing or copying.
+    uint64_t filterNanos = 0;
+    if (statsEnabled && filter)
+        filter2 = [&, inner = std::move(filter2)](const std::string & p) {
+            auto filterStart = std::chrono::steady_clock::now();
+            bool keep = inner(p);
+            filterNanos += nanosSince(filterStart);
+            return keep;
+        };
+
+    auto ingestStart = statsEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
     auto [storePath, hash] =
         mode == FetchMode::DryRun
@@ -217,8 +258,10 @@ std::pair<StorePath, Hash> fetchToStore2(
                   // right away (like computeStorePath()).
                   auto storePath = store.addToStore(name, path, method, HashAlgorithm::SHA256, {}, filter2, repair);
                   auto info = store.queryPathInfo(storePath);
-                  stats.bytesCopied += info->narSize;
-                  fetchToStoreThreadTotals.bytesCopied += info->narSize;
+                  if (statsEnabled) {
+                      bump(stats.bytesIngested, info->narSize);
+                      fetchToStoreThreadTotals.bytesIngested += info->narSize;
+                  }
                   assert(info->references.empty());
                   auto hash = method == ContentAddressMethod::Raw::NixArchive ? info->narHash : ({
                       if (!info->ca || info->ca->method != method)
@@ -234,16 +277,19 @@ std::pair<StorePath, Hash> fetchToStore2(
                   return std::make_pair(storePath, hash);
               }();
 
-    stats.ingestions++;
-    if (mode == FetchMode::DryRun)
-        stats.dryRunIngestions++;
-    if (filter)
-        stats.filteredIngestions++;
-    auto nanos = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ingestStart).count());
-    stats.nanosIngesting += nanos;
-    fetchToStoreThreadTotals.ingestions++;
-    fetchToStoreThreadTotals.nanosIngesting += nanos;
+    if (statsEnabled) {
+        bump(stats.ingestions);
+        if (mode == FetchMode::DryRun)
+            bump(stats.dryRunIngestions);
+        if (filter)
+            bump(stats.filteredIngestions);
+        // The filter ran inside the window measured above: report it on its own.
+        auto nanos = nanosSince(ingestStart) - filterNanos;
+        bump(stats.nanosIngesting, nanos);
+        bump(stats.nanosFiltering, filterNanos);
+        fetchToStoreThreadTotals.ingestions++;
+        fetchToStoreThreadTotals.nanosIngesting += nanos;
+    }
 
     if (cacheKey)
         settings.getCache()->upsert(*cacheKey, {{"hash", hash.to_string(HashFormat::SRI, true)}});

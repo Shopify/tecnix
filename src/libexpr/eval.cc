@@ -2642,7 +2642,7 @@ IngestionSiteScope::IngestionSiteScope(PosIdx pos)
 {
     auto totals = getFetchToStoreThreadTotals();
     ingestions = totals.ingestions;
-    bytes = totals.bytesCopied;
+    bytes = totals.bytesIngested;
     nanos = totals.nanosIngesting;
     innerIngestions = ingestionChargedByScopes.ingestions;
     innerBytes = ingestionChargedByScopes.bytes;
@@ -2654,7 +2654,7 @@ IngestionSiteScope::~IngestionSiteScope()
     auto totals = getFetchToStoreThreadTotals();
     IngestionCounts own{
         .ingestions = (totals.ingestions - ingestions) - (ingestionChargedByScopes.ingestions - innerIngestions),
-        .bytes = (totals.bytesCopied - bytes) - (ingestionChargedByScopes.bytes - innerBytes),
+        .bytes = (totals.bytesIngested - bytes) - (ingestionChargedByScopes.bytes - innerBytes),
         .nanos = (totals.nanosIngesting - nanos) - (ingestionChargedByScopes.nanos - innerNanos),
     };
     if (own.ingestions == 0)
@@ -3232,8 +3232,9 @@ void EvalState::printStatistics()
                 {"ingestions", s.ingestions},
                 {"dryRunIngestions", s.dryRunIngestions},
                 {"filteredIngestions", s.filteredIngestions},
-                {"bytesCopied", s.bytesCopied},
+                {"bytesIngested", s.bytesIngested},
                 {"secondsIngesting", s.secondsIngesting},
+                {"secondsFiltering", s.secondsFiltering},
             };
         }
     }
@@ -3257,16 +3258,16 @@ void EvalState::printStatistics()
                 obj["column"] = p.column;
             }
             obj["ingestions"] = counts.ingestions;
-            obj["bytesCopied"] = counts.bytes;
+            obj["bytesIngested"] = counts.bytes;
             obj["secondsIngesting"] = static_cast<double>(counts.nanos) / 1e9;
             siteList.push_back(std::move(obj));
         }
-        auto & targetObj = topObj["fetchToStoreByTarget"];
+        auto & targetObj = topObj["fetchToStoreWorkByTarget"];
         targetObj = json::object();
         for (const auto & [target, counts] : ingestionAttribution.byTarget)
             targetObj[target] = {
                 {"ingestions", counts.ingestions},
-                {"bytesCopied", counts.bytes},
+                {"bytesIngested", counts.bytes},
                 {"secondsIngesting", static_cast<double>(counts.nanos) / 1e9},
             };
     }

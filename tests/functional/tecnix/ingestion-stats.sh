@@ -60,19 +60,19 @@ plain=$(eval_targets)
 echo "Testing fetchToStore counters by caller..."
 assert_jq "$stats" '.fetchToStore | keys == ["builtinsPath", "coercedPath", "devirtualize", "other", "tectonixTree", "tectonixZone"]' \
     "fetchToStore should report one entry per caller"
-assert_jq "$stats" '.fetchToStore.coercedPath | .ingestions == 1 and .bytesCopied > 0 and .filteredIngestions == 0' \
+assert_jq "$stats" '.fetchToStore.coercedPath | .ingestions == 1 and .bytesIngested > 0 and .filteredIngestions == 0' \
     "the coerced path (srcdir) should be one unfiltered ingestion"
-assert_jq "$stats" '.fetchToStore.builtinsPath | .ingestions == 1 and .bytesCopied > 0 and .filteredIngestions == 1' \
+assert_jq "$stats" '.fetchToStore.builtinsPath | .ingestions == 1 and .bytesIngested > 0 and .filteredIngestions == 1' \
     "builtins.path with a filter (filteredSrc) should be one filtered ingestion"
 assert_jq "$stats" '.fetchToStore.other.calls == 0 and .fetchToStore.tectonixZone.calls == 0' \
     "no ingestion should be charged to callers that did not run"
 
 echo "Testing fetchToStore attribution by target..."
-assert_jq "$stats" '.fetchToStoreByTarget | keys == ["//areas/app/web:filteredSrc", "//areas/app/web:srcdir"]' \
+assert_jq "$stats" '.fetchToStoreWorkByTarget | keys == ["//areas/app/web:filteredSrc", "//areas/app/web:srcdir"]' \
     "only targets that caused ingestion should be listed"
-assert_jq "$stats" '.fetchToStoreByTarget["//areas/app/web:srcdir"].bytesCopied == .fetchToStore.coercedPath.bytesCopied' \
+assert_jq "$stats" '.fetchToStoreWorkByTarget["//areas/app/web:srcdir"].bytesIngested == .fetchToStore.coercedPath.bytesIngested' \
     "srcdir should be charged the coerced path's bytes"
-assert_jq "$stats" '.fetchToStoreByTarget["//areas/app/web:filteredSrc"].bytesCopied == .fetchToStore.builtinsPath.bytesCopied' \
+assert_jq "$stats" '.fetchToStoreWorkByTarget["//areas/app/web:filteredSrc"].bytesIngested == .fetchToStore.builtinsPath.bytesIngested' \
     "filteredSrc should be charged builtins.path's bytes"
 
 echo "Testing that a warm evaluation counts cache hits, not ingestions..."
@@ -84,8 +84,14 @@ assert_jq "$warm" '.fetchToStore.coercedPath | .calls == 1 and .ingestions == 0 
 # A filtered ingestion bypasses both caches, so filteredSrc still pays every run.
 assert_jq "$warm" '.fetchToStore.builtinsPath | .calls == 1 and .ingestions == 1 and .persistentCacheHits == 0' \
     "a filtered builtins.path should ingest again"
-assert_jq "$warm" '.fetchToStoreByTarget | keys == ["//areas/app/web:filteredSrc"]' \
+assert_jq "$warm" '.fetchToStoreWorkByTarget | keys == ["//areas/app/web:filteredSrc"]' \
     "only the target that ingested again should be charged"
+# bytesIngested is the NAR size of what was passed to addToStore, even though
+# the store already held it, so it is comparable between cold and warm runs.
+assert_jq "$(jq -n --argjson cold "$stats" --argjson warm "$warm" \
+    '{cold: $cold.fetchToStore.builtinsPath.bytesIngested, warm: $warm.fetchToStore.builtinsPath.bytesIngested}')" \
+    '.cold > 0 and .cold == .warm' \
+    "bytesIngested should not depend on whether the store already held the path"
 
 echo "Testing fetchToStore attribution by expression position..."
 SITE_STATS_FILE="$TEST_ROOT/site-stats.json"
@@ -101,17 +107,34 @@ in a + b" >/dev/null
 sites=$(cat "$SITE_STATS_FILE")
 assert_jq "$sites" '.fetchToStoreBySite | length == 2 and (map(.line) == [2, 3])' \
     "each interpolation should be its own site, largest first"
-assert_jq "$sites" '.fetchToStoreBySite | all(.ingestions == 1 and .bytesCopied > 0) and .[0].bytesCopied > .[1].bytesCopied' \
+assert_jq "$sites" '.fetchToStoreBySite | all(.ingestions == 1 and .bytesIngested > 0) and .[0].bytesIngested > .[1].bytesIngested' \
     "sites should be ordered by bytes ingested"
-assert_jq "$sites" '.fetchToStoreByTarget | keys == ["(no target)"] and .["(no target)"].ingestions == 2' \
+assert_jq "$sites" '.fetchToStoreWorkByTarget | keys == ["(no target)"] and .["(no target)"].ingestions == 2' \
     "ingestion outside tecnixTargets should be charged to '(no target)'"
+
+echo "Testing that time spent in a path filter is not reported as ingestion..."
+FILTER_STATS_FILE="$TEST_ROOT/filter-stats.json"
+# The filter burns CPU on every entry; hashing and copying a directory this
+# small takes a few milliseconds, so the time must show up as filtering.
+NIX_SHOW_STATS=1 NIX_SHOW_STATS_PATH="$FILTER_STATS_FILE" nix eval --raw --impure \
+    --extra-experimental-features 'nix-command' \
+    --expr "builtins.path {
+  path = $small;
+  name = \"slow-filter\";
+  filter = p: t: builtins.length (builtins.genList (x: x) 1000000) > 0;
+}" >/dev/null
+filtered=$(cat "$FILTER_STATS_FILE")
+assert_jq "$filtered" '.fetchToStore.builtinsPath | .ingestions == 1 and .filteredIngestions == 1 and .secondsFiltering > .secondsIngesting' \
+    "evaluating a slow filter should be reported as filtering, not ingestion"
+assert_jq "$filtered" '.fetchToStore.coercedPath.secondsFiltering == 0' \
+    "a path coerced without a filter should report no filtering time"
 
 echo "Testing that an evaluation without source ingestion reports none..."
 NONE_STATS_FILE="$TEST_ROOT/none-stats.json"
 NIX_SHOW_STATS=1 NIX_SHOW_STATS_PATH="$NONE_STATS_FILE" nix eval --raw --impure \
     --extra-experimental-features 'nix-command' \
     --expr '"no paths here"' >/dev/null
-assert_jq "$(cat "$NONE_STATS_FILE")" '.fetchToStoreBySite == [] and .fetchToStoreByTarget == {} and .fetchToStore.coercedPath.calls == 0' \
+assert_jq "$(cat "$NONE_STATS_FILE")" '.fetchToStoreBySite == [] and .fetchToStoreWorkByTarget == {} and .fetchToStore.coercedPath.calls == 0' \
     "an evaluation that ingests nothing should report empty attribution"
 
 echo "All ingestion statistics tests passed!"
