@@ -33,7 +33,6 @@ jobs:
         extra_nix_config:
           experimental-features = nix-command flakes
         github_token: ${{ github.token }}
-        use_cache: false
     - run: nix flake show --all-systems --json
 
   pre-commit-checks:
@@ -72,21 +71,28 @@ jobs:
             instrumented: false
             primary: true
             stdenv: stdenv
+            cache: ubuntu-gcc
           - scenario: on macos
             runs-on: macos-14
             os: darwin
             instrumented: false
             primary: true
             stdenv: stdenv
+            cache: macos
           - scenario: on ubuntu (with sanitizers / coverage)
             runs-on: ubuntu-24.04
             os: linux
             instrumented: true
             primary: false
             stdenv: clangStdenv
+            cache: ubuntu-clang
     name: tests ${{ matrix.scenario }}
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 90
+    permissions:
+      contents: read
+      # Read the catfood installer's run, and delete superseded Nix store caches.
+      actions: write
     steps:
     - uses: actions/checkout@v7
       with:
@@ -101,11 +107,44 @@ jobs:
     # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces
     - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       if: matrix.os == 'linux'
+    # The Nix store is cached as one snapshot per variant in the GitHub Actions
+    # cache. Most of a run is rebuilding third-party dependencies that Tecnix
+    # overrides (wasmtime, boost, libgit2, ...); they only change with flake.lock
+    # and packaging/dependencies.nix, so the key starts with a hash of those.
+    # Restoring the newest snapshot with that prefix also brings in the previous
+    # run's component builds. A pull request restores its own latest snapshot,
+    # then the base branch's. Failures here only cost the cache.
+    - name: Compute the Nix store cache key
+      id: nix-cache-key
+      run: echo "prefix=nix-store-${{ matrix.cache }}-${{ hashFiles('flake.lock', 'packaging/dependencies.nix') }}-" >> "$GITHUB_OUTPUT"
+    - name: Restore the Nix store
+      id: nix-cache
+      uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      continue-on-error: true
+      timeout-minutes: 20
+      with:
+        primary-key: ${{ steps.nix-cache-key.outputs.prefix }}${{ github.sha }}
+        restore-prefixes-first-match: ${{ steps.nix-cache-key.outputs.prefix }}
     - name: Run component tests
       run: |
         nix build --file ci/gha/tests/wrapper.nix componentTests -L \
           --arg withInstrumentation ${{ matrix.instrumented }} \
           --argstr stdenv "${{ matrix.stdenv }}"
+    # Saved before the heavy later steps (VM tests, flake checks), so the
+    # snapshot holds the dependencies and components, not their closures. Not
+    # saved from forks or merge queue refs, to keep the 10 GB repository quota
+    # for main and for pull requests of this repository.
+    - name: Save the Nix store
+      if: ${{ !cancelled() && github.event_name != 'merge_group' && !github.event.pull_request.head.repo.fork && steps.nix-cache.outputs.hit-primary-key != 'true' }}
+      uses: nix-community/cache-nix-action/save@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      continue-on-error: true
+      timeout-minutes: 20
+      with:
+        primary-key: ${{ steps.nix-cache-key.outputs.prefix }}${{ github.sha }}
+        purge: true
+        purge-prefixes: nix-store-${{ matrix.cache }}-
+        purge-created: 0
+        purge-primary-key: never
     - name: Run VM tests
       run: |
         nix build --file ci/gha/tests/wrapper.nix vmTests -L \

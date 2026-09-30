@@ -13,10 +13,6 @@ inputs:
   github_token:
     description: "Github token"
     required: true
-  use_cache:
-    description: "Whether to setup github actions cache (not implemented currently)"
-    default: false
-    required: false
 runs:
   using: "composite"
   steps:
