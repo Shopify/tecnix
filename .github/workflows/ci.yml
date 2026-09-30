@@ -134,7 +134,7 @@ jobs:
         restore-prefixes-first-match: ${{ steps.nix-cache-key.outputs.prefix }}
     - name: Run component tests
       run: |
-        nix build --file ci/gha/tests/wrapper.nix componentTests -L \
+        nix build --file ci/gha/tests/wrapper.nix componentTests -L --no-link \
           --arg withSanitizers ${{ matrix.sanitizers }} \
           --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
@@ -153,13 +153,16 @@ jobs:
         purge-prefixes: nix-store-${{ matrix.cache }}-
         purge-created: 0
         purge-primary-key: never
+    # Through the flake, whose source is the git-tracked files: packaging-overriding
+    # compares the source tree with the patched one, and the workspace also
+    # holds untracked files (.git, the catfood installer download).
     - name: Run the cheap flake checks
       run: |
-        nix build --file ci/gha/tests/wrapper.nix \
-          topLevel.rl-next topLevel.packaging-overriding topLevel.repl-completion -L \
-          --arg withSanitizers ${{ matrix.sanitizers }} \
-          --arg withCoverage false \
-          --argstr stdenv "${{ matrix.stdenv }}"
+        system=$(nix eval --raw --impure --expr builtins.currentSystem)
+        nix build -L --no-link \
+          ".#checks.$system.rl-next" \
+          ".#checks.$system.packaging-overriding" \
+          ".#checks.$system.repl-completion"
       if: ${{ matrix.primary && github.event_name == 'pull_request' }}
     - name: Run VM tests
       run: |
