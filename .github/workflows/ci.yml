@@ -58,6 +58,11 @@ jobs:
         run: |
           exit 1
 
+  # Pull requests run the component tests (unit + functional) and the cheap flake
+  # checks. VM tests, the remaining flake checks, the installer tarball, the
+  # installer tests and flake regressions run on pushes to main, merge queue runs
+  # and manual dispatches.
+  #
   # The test legs do not wait for the basic checks: a lint failure is reported by
   # `aggregate basic checks` without holding up the (much longer) test legs.
   tests:
@@ -145,17 +150,24 @@ jobs:
         purge-prefixes: nix-store-${{ matrix.cache }}-
         purge-created: 0
         purge-primary-key: never
+    - name: Run the cheap flake checks
+      run: |
+        nix build --file ci/gha/tests/wrapper.nix \
+          topLevel.rl-next topLevel.packaging-overriding -L \
+          --arg withInstrumentation ${{ matrix.instrumented }} \
+          --argstr stdenv "${{ matrix.stdenv }}"
+      if: ${{ matrix.primary && github.event_name == 'pull_request' }}
     - name: Run VM tests
       run: |
         nix build --file ci/gha/tests/wrapper.nix vmTests -L \
           --arg withInstrumentation ${{ matrix.instrumented }} \
           --argstr stdenv "${{ matrix.stdenv }}"
-      if: ${{ matrix.os == 'linux' }}
+      if: ${{ matrix.os == 'linux' && github.event_name != 'pull_request' }}
     - name: Run flake checks and prepare the installer tarball
       run: |
         ci/gha/tests/build-checks
         ci/gha/tests/prepare-installer-for-github-actions
-      if: ${{ matrix.primary }}
+      if: ${{ matrix.primary && github.event_name != 'pull_request' }}
     - name: Collect code coverage
       run: |
         nix build --file ci/gha/tests/wrapper.nix codeCoverage.coverageReports -L \
@@ -175,7 +187,7 @@ jobs:
       with:
         name: installer-${{matrix.os}}
         path: out/*
-      if: ${{ matrix.primary }}
+      if: ${{ matrix.primary && github.event_name != 'pull_request' }}
 
   installer_test:
     needs: [tests]
@@ -201,41 +213,57 @@ jobs:
             rust-installer: true
     name: installer test ${{ matrix.scenario }}
     runs-on: ${{ matrix.runs-on }}
+    # Pull requests don't build the installer tarball, so every step is skipped
+    # there. The condition is on the steps rather than the job: a skipped matrix
+    # job reports under the unexpanded name `installer test ${{ matrix.scenario }}`,
+    # so the required `installer test on ...` checks would never report.
     steps:
     - uses: actions/checkout@v7
+      if: github.event_name != 'pull_request'
     - name: Download installer tarball
+      if: github.event_name != 'pull_request'
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         name: installer-${{matrix.os}}
         path: out
     - name: Looking up the installer tarball URL
+      if: github.event_name != 'pull_request'
       id: installer-tarball-url
       run: echo "installer-url=file://$GITHUB_WORKSPACE/out" >> "$GITHUB_OUTPUT"
     - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      if: ${{ !matrix.rust-installer }}
+      if: ${{ github.event_name != 'pull_request' && (!matrix.rust-installer) }}
       with:
         install_url: ${{ format('{0}/install', steps.installer-tarball-url.outputs.installer-url) }}
         install_options: ${{ format('--tarball-url-prefix {0}', steps.installer-tarball-url.outputs.installer-url) }}
     - name: Run rust installer
-      if: ${{ matrix.rust-installer }}
+      if: ${{ github.event_name != 'pull_request' && (matrix.rust-installer) }}
       run: |
         chmod +x out/nix-installer
         ./out/nix-installer install --no-confirm
       env:
         RUST_BACKTRACE: full
     - run: sudo apt install fish zsh
-      if: matrix.os == 'linux'
+      if: ${{ github.event_name != 'pull_request' && (matrix.os == 'linux') }}
     - run: brew install fish
-      if: matrix.os == 'darwin'
+      if: ${{ github.event_name != 'pull_request' && (matrix.os == 'darwin') }}
     - run: exec bash -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec sh -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec zsh -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec fish -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec bash -c "nix-channel --add https://releases.nixos.org/nixos/unstable/nixos-23.05pre466020.60c1d71f2ba nixpkgs"
+      if: github.event_name != 'pull_request'
     - run: exec bash -c "nix-channel --update && nix-env -iA nixpkgs.hello && hello"
+      if: github.event_name != 'pull_request'
 
   flake_regressions:
     needs: tests
+    # Not a matrix job, so a job-level condition reports the required check as
+    # skipped, which satisfies it.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout nix
