@@ -176,6 +176,11 @@ struct EvalState::TecnixEvalData
     mutable std::once_flag tecnixRepoAccessorFlag;
     mutable std::optional<ref<SourceAccessor>> tecnixRepoAccessor;
 
+    /** `.meta/manifest.json` as `tecnixRepoAccessor` serves it, parsed
+        (thread-safe via once_flag). */
+    mutable std::once_flag tecnixManifestJsonFlag;
+    mutable std::unique_ptr<nlohmann::json> tecnixManifestJson;
+
     /**
      * Virtual store path where the Tecnix repo-wide accessor is lazily mounted.
      * All repo subtree store paths are subpaths of this mount.

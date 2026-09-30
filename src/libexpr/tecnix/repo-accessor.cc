@@ -324,6 +324,13 @@ struct TecnixSourceAccessor : SourceAccessor
         return (isDirty(path) ? disk : clean)->readFile(path, sink, sizeCallback);
     }
 
+    /** `readFile` without recording the access, for a caller that records
+        its own, finer-grained observation of the file instead. */
+    std::string readFileUnrecorded(const CanonPath & path)
+    {
+        return (isDirty(path) ? disk : clean)->readFile(path);
+    }
+
     std::string readLink(const CanonPath & path) override
     {
         if (dumpPathDepth == 0)
@@ -760,6 +767,22 @@ ref<SourceAccessor> getTecnixRepoAccessor(EvalState & state)
         debug("created Tecnix repo-wide accessor");
     });
     return *tecnixData(state)->tecnixRepoAccessor;
+}
+
+const nlohmann::json & getTecnixManifestJson(EvalState & state)
+{
+    std::call_once(tecnixData(state)->tecnixManifestJsonFlag, [&state]() {
+        // getTecnixRepoAccessor always builds a TecnixSourceAccessor.
+        auto & accessor = static_cast<TecnixSourceAccessor &>(*getTecnixRepoAccessor(state));
+        auto content = accessor.readFileUnrecorded(CanonPath(".meta/manifest.json"));
+        try {
+            tecnixData(state)->tecnixManifestJson = std::make_unique<nlohmann::json>(nlohmann::json::parse(content));
+        } catch (nlohmann::json::parse_error & e) {
+            throw Error(
+                "cannot parse '.meta/manifest.json' at commit '%s': %s", requireTectonixGitSha(state), e.what());
+        }
+    });
+    return *tecnixData(state)->tecnixManifestJson;
 }
 
 StorePath mountTecnixRepoAccessor(EvalState & state)

@@ -57,7 +57,7 @@ let
   zoneRecord = builtins.tecnixMemoize (name: { id = (entry name).id; });
 in
 {
-  allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" "peek" "fill-record" "prefilled" "record-field" ];
+  allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" "peek" "fill-record" "prefilled" "record-field" "agree" ];
   resolve = name:
     if name == "whole" then drv name (toString (builtins.length (builtins.attrNames builtins.unsafeTectonixInternalManifest)))
     else if name == "keys" then drv name (toString (builtins.length (builtins.tectonixManifestKeys)))
@@ -71,6 +71,18 @@ in
     # Fills the memoized record without forcing its field.
     else if name == "fill-record" then builtins.seq (zoneRecord "a") (drv name "record")
     else if name == "record-field" then drv name (zoneRecord "a").id
+    # What the manifest builtins report about zone a, beside what reading
+    # .meta/manifest.json itself shows.
+    else if name == "agree" then
+      let
+        manifest = builtins.fromJSON (builtins.readFile ./.meta/manifest.json);
+        id = manifest."//zones/a".id;
+      in drv name "agree" // {
+        seen = {
+          builtins = { inherit (entry "a") id; keys = builtins.tectonixManifestKeys; path = builtins.tectonixManifestIdToPath id; };
+          file = { inherit id; keys = builtins.attrNames manifest; path = "//zones/a"; };
+        };
+      }
     else drv name (entry name).id;
 }
 EOF
@@ -237,5 +249,19 @@ REV7=$(commit_world "renumber a again")
 XDG_CACHE_HOME="$PREFILL_CACHE_HOME" prefill_deps_at "$REV7" --option tecnix-eval-cache true --pure-eval \
     > /dev/null 2> "$TEST_ROOT/prefill-warm.err"
 misses "$TEST_ROOT/prefill-warm.err" prefilled record-field
+
+# The manifest builtins read .meta/manifest.json through the repo accessor,
+# like every file the resolver reads and like the fingerprints of their
+# dependency keys. So evaluating an older rev from a checkout whose HEAD has
+# moved on shows them that rev's manifest, not the working tree's.
+echo "Testing the manifest builtins at an older rev of a checkout..."
+seen=$(nix eval --json \
+    --extra-experimental-features 'nix-command' \
+    --option lazy-trees true \
+    --option tecnix-eval-cache false \
+    --expr "(builtins.tecnixTargets { gitDir = \"$WORLD/.git\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; };
+      rev = \"$REV1\"; checkoutPath = \"$WORLD\"; targets = [ \"agree\" ]; }).agree.seen")
+assert_jq "$seen" '.file.id == "W-000001"' "the resolver should read the evaluated rev's manifest"
+assert_jq "$seen" '.builtins == .file' "the manifest builtins should see the manifest the resolver reads"
 
 echo "All manifest tracking tests passed!"
