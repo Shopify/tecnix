@@ -4,13 +4,15 @@
   pkgs ? nixFlake.inputs.nixpkgs.legacyPackages.${system},
   stdenv ? "stdenv",
   componentTestsPrefix ? "",
+  # Shorthand for enabling both sanitizers and coverage.
   withInstrumentation ? false,
+  withSanitizers ? withInstrumentation,
+  withCoverage ? withInstrumentation,
 }@args:
 import ./. (
   args
   // {
     getStdenv = p: p.${stdenv};
-    withSanitizers = withInstrumentation;
-    withCoverage = withInstrumentation;
+    inherit withSanitizers withCoverage;
   }
 )

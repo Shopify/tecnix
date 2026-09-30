@@ -73,21 +73,23 @@ jobs:
           - scenario: on ubuntu
             runs-on: ubuntu-24.04
             os: linux
-            instrumented: false
+            sanitizers: false
             primary: true
             stdenv: stdenv
             cache: ubuntu-gcc
           - scenario: on macos
             runs-on: macos-14
             os: darwin
-            instrumented: false
+            sanitizers: false
             primary: true
             stdenv: stdenv
             cache: macos
+          # The name is a required status check, so it stays although coverage
+          # is collected in the `coverage` job.
           - scenario: on ubuntu (with sanitizers / coverage)
             runs-on: ubuntu-24.04
             os: linux
-            instrumented: true
+            sanitizers: true
             primary: false
             stdenv: clangStdenv
             cache: ubuntu-clang
@@ -133,7 +135,8 @@ jobs:
     - name: Run component tests
       run: |
         nix build --file ci/gha/tests/wrapper.nix componentTests -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
+          --arg withSanitizers ${{ matrix.sanitizers }} \
+          --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
     # Saved before the heavy later steps (VM tests, flake checks), so the
     # snapshot holds the dependencies and components, not their closures. Not
@@ -154,13 +157,15 @@ jobs:
       run: |
         nix build --file ci/gha/tests/wrapper.nix \
           topLevel.rl-next topLevel.packaging-overriding -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
+          --arg withSanitizers ${{ matrix.sanitizers }} \
+          --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
       if: ${{ matrix.primary && github.event_name == 'pull_request' }}
     - name: Run VM tests
       run: |
         nix build --file ci/gha/tests/wrapper.nix vmTests -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
+          --arg withSanitizers ${{ matrix.sanitizers }} \
+          --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
       if: ${{ matrix.os == 'linux' && github.event_name != 'pull_request' }}
     - name: Run flake checks and prepare the installer tarball
@@ -168,26 +173,52 @@ jobs:
         ci/gha/tests/build-checks
         ci/gha/tests/prepare-installer-for-github-actions
       if: ${{ matrix.primary && github.event_name != 'pull_request' }}
-    - name: Collect code coverage
-      run: |
-        nix build --file ci/gha/tests/wrapper.nix codeCoverage.coverageReports -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
-          --argstr stdenv "${{ matrix.stdenv }}" \
-          --out-link coverage-reports
-        cat coverage-reports/index.txt >> $GITHUB_STEP_SUMMARY
-      if: ${{ matrix.instrumented }}
-    - name: Upload coverage reports
-      uses: actions/upload-artifact@v7
-      with:
-        name: coverage-reports
-        path: coverage-reports/
-      if: ${{ matrix.instrumented }}
     - name: Upload installer tarball
       uses: actions/upload-artifact@v7
       with:
         name: installer-${{matrix.os}}
         path: out/*
       if: ${{ matrix.primary && github.event_name != 'pull_request' }}
+
+  # Coverage needs sanitizers and coverage instrumentation together and a build of
+  # every component with it, so it has its own job, and runs when it is not on the
+  # critical path of a pull request. It restores the sanitizer leg's Nix store
+  # snapshot for the dependencies, which are not instrumented.
+  coverage:
+    name: code coverage
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - uses: ./.github/actions/install-nix-action
+      with:
+        github_token: ${{ github.token }}
+        catfood: ${{ github.event_name == 'workflow_dispatch' && inputs.catfood || github.event_name != 'workflow_dispatch' }}
+        extra_nix_config: "sandbox = true"
+    - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+    - name: Restore the Nix store
+      uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      continue-on-error: true
+      timeout-minutes: 20
+      with:
+        primary-key: nix-store-ubuntu-clang-${{ hashFiles('flake.lock', 'packaging/dependencies.nix') }}-${{ github.sha }}
+        restore-prefixes-first-match: nix-store-ubuntu-clang-${{ hashFiles('flake.lock', 'packaging/dependencies.nix') }}-
+        save: false
+    - name: Collect code coverage
+      run: |
+        nix build --file ci/gha/tests/wrapper.nix codeCoverage.coverageReports -L \
+          --arg withInstrumentation true \
+          --argstr stdenv clangStdenv \
+          --out-link coverage-reports
+        cat coverage-reports/index.txt >> $GITHUB_STEP_SUMMARY
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v7
+      with:
+        name: coverage-reports
+        path: coverage-reports/
 
   installer_test:
     needs: [tests]
