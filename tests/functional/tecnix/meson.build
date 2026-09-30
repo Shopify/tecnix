@@ -7,6 +7,7 @@ suites += {
     'gc.sh',
     'manifest-tracking.sh',
     'ingestion-stats.sh',
+    'memoize.sh',
   ],
   'workdir' : meson.current_source_dir(),
 }

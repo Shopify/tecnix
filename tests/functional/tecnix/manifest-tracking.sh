@@ -4,10 +4,11 @@
 # A target that reads one zone's manifest entry (`tectonixManifestEntry`), the
 # key set (`tectonixManifestKeys`) or one id (`tectonixManifestIdToPath`)
 # depends on exactly that, not on the whole `.meta/manifest.json`. So adding an
-# unrelated zone leaves such a target's eval-cache row valid. `tectonixMemo`
-# shares one evaluation, and the source dependencies recorded during it, among
-# every consumer, but never shares a result computed outside tracking with a
-# tracked target (or the other way round).
+# unrelated zone leaves such a target's eval-cache row valid. A function
+# memoized with `tecnixMemoize` shares one evaluation, and the source
+# dependencies recorded during it, among every consumer, but never shares a
+# result computed outside tracking with a tracked target (or the other way
+# round).
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -49,11 +50,11 @@ let
   };
   entry = name: builtins.tectonixManifestEntry "//zones/${name}";
   # Two consumers of one memoized load: the load reads shared.txt once.
-  loaded = builtins.tectonixMemo "loader" "shared" (_: builtins.readFile ./shared.txt);
+  loaded = builtins.tecnixMemoize (_: builtins.readFile ./shared.txt) "shared";
   # Memoized lookups that every consumer calls afresh, so every consumer after
   # the first is a memo hit rather than a force of one shared thunk.
-  zoneId = name: builtins.tectonixMemo "zone-id" name (n: (entry n).id);
-  zoneRecord = name: builtins.tectonixMemo "zone-record" name (n: { id = (entry n).id; });
+  zoneId = builtins.tecnixMemoize (name: (entry name).id);
+  zoneRecord = builtins.tecnixMemoize (name: { id = (entry name).id; });
 in
 {
   allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" "peek" "fill-record" "prefilled" "record-field" ];
