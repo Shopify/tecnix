@@ -324,25 +324,3 @@ jobs:
           install_options: ${{ format('--tarball-url-prefix {0}', steps.installer-tarball-url.outputs.installer-url) }}
       - name: Run flake regressions tests
         run: MAX_FLAKES=25 flake-regressions/eval-all.sh
-
-  profile_build:
-    needs: tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    if: >-
-      github.event_name == 'push' &&
-      github.ref_name == 'main'
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-    - uses: ./.github/actions/install-nix-action
-      with:
-        github_token: ${{ github.token }}
-        catfood: ${{ github.event_name == 'workflow_dispatch' && inputs.catfood || github.event_name != 'workflow_dispatch' }}
-        extra_nix_config: |
-          experimental-features = flakes nix-command ca-derivations impure-derivations
-          max-jobs = 1
-    - run: |
-        nix build -L --file ./ci/gha/profile-build buildTimeReport --out-link build-time-report.md
-        cat build-time-report.md >> $GITHUB_STEP_SUMMARY
