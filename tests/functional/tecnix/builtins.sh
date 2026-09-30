@@ -449,6 +449,18 @@ assert_jq "$parallel_deps" '( ."//areas/app/web:alpha" | has("areas/app/web/comm
 assert_jq "$parallel_deps" '( ."//areas/app/web:beta" | has("areas/app/web/common.nix") and has("areas/app/web/targets/beta.nix") and (has("areas/app/web/targets/alpha.nix") | not) )' \
     "parallel beta deps should include beta-specific files only"
 
+echo "Testing tecnixTargets keepGoing records per-target errors..."
+kg_targets='targets = [ "//areas/app/web:alpha" "//areas/missing/zone:x" ];'
+for eval_fn in tecnix_eval_json_no_cache tecnix_eval_json_parallel_no_cache; do
+    kg=$($eval_fn "builtins.tecnixTargets (($base_args) // { $kg_targets includeDependencies = true; keepGoing = true; })")
+    assert_jq "$kg" 'length == 2 and .[0].target == "//areas/app/web:alpha" and .[0].value.name == "alpha" and (.[0].dependencies | has("areas/app/web/targets/alpha.nix"))' \
+        "keepGoing ($eval_fn) should still return the passing target's value and dependencies"
+    assert_jq "$kg" '.[1].target == "//areas/missing/zone:x" and (.[1].error | contains("/areas/missing/zone/targets.nix") and contains("does not exist")) and (.[1] | has("value") | not) and (.[1] | has("dependencies") | not)' \
+        "keepGoing ($eval_fn) should record the failing target's error and nothing else"
+done
+expect 1 tecnix_eval_json_no_cache "builtins.tecnixTargets (($base_args) // { $kg_targets includeDependencies = true; })" >/dev/null 2>&1
+expect 1 tecnix_eval_json_no_cache "builtins.tecnixTargets (($base_args) // { $kg_targets keepGoing = true; })" >/dev/null 2>&1
+
 # Source-deps scopes must be target-local. These two targets intentionally use
 # the same scope key with different source files; mutable global replay would
 # leak owner-collision-b.txt into A or vice versa.
@@ -1048,6 +1060,19 @@ warm_deps=$(tecnix_eval_json_cache "tecnixTargetDependencyPathSet (($cache_args)
 assert_json_equal "$warm_deps" "$cold_deps" "warm dependency query should equal cold"
 assert_jq "$warm_deps" '.alpha | has("deps/alpha.txt")' "cached dependency sets should contain the per-target dep"
 grepQuiet "dependency cache hit" "$TEST_ROOT/cache-warm.err"
+
+# keepGoing with the cache on: the passing target is served from (or written to)
+# the cache and the failing one is re-evaluated, and reported, on every run.
+echo "Testing tecnixTargets keepGoing with the eval cache..."
+kg_cache_expr="builtins.tecnixTargets (($cache_args) // { targets = [ \"alpha\" \"missing\" ]; includeDependencies = true; includeTargets = false; keepGoing = true; })"
+kg_cold=$(tecnix_eval_json_cache "$kg_cache_expr" 2> "$TEST_ROOT/cache-keep-going-cold.err")
+kg_warm=$(tecnix_eval_json_cache "$kg_cache_expr" 2> "$TEST_ROOT/cache-keep-going-warm.err")
+assert_json_equal "$kg_warm" "$kg_cold" "keepGoing results should not depend on the cache state"
+assert_jq "$kg_warm" 'length == 2 and .[0].target == "alpha" and (.[0].dependencies | has("deps/alpha.txt")) and .[1].target == "missing" and (.[1].error | contains("missing.txt")) and (.[1] | has("dependencies") | not)' \
+    "keepGoing with the cache should return alpha's dependencies and record missing's error"
+grepQuiet "dependency cache hit for 'alpha'" "$TEST_ROOT/cache-keep-going-warm.err"
+grepQuiet "dependency cache miss, evaluating 'missing'" "$TEST_ROOT/cache-keep-going-warm.err"
+
 eval_cache_databases=("$EVAL_CACHE_HOME"/nix/tecnix-eval-cache-*.sqlite)
 EVAL_CACHE_DB="${eval_cache_databases[0]}"
 
