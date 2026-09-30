@@ -516,6 +516,16 @@ struct EvalSettings : Config
           Disabling this forces Tecnix dependency discovery to re-evaluate
           instead of reusing results whose recorded source fingerprints still
           match.
+
+          Cached results are found by the resolver path and its arguments, not
+          by where the repository is checked out, so every clone or checkout of
+          the repository on a machine shares them, and a cache file copied to
+          another machine serves the same repository there. Sharing is safe
+          because a result is only reused after every path in its recorded
+          source closure matches the evaluated commit by content fingerprint
+          (git oid). A cached target value additionally needs its `.drv` to be
+          valid in the local store, so copy the derivations along with a copied
+          cache (`nix copy --derivation`) or those targets are re-evaluated.
         )"};
 
     Setting<unsigned> tecnixEvalCacheHistory{
