@@ -235,34 +235,34 @@ static void prim_tectonixMemo(EvalState & state, const PosIdx pos, Value ** args
     auto keyStr = state.forceStringNoCtx(*args[1], pos, "while evaluating the 'key' argument to builtins.tectonixMemo");
 
     auto cacheKey = std::string(ns) + '\0' + std::string(keyStr);
-    auto & memoCache = *state.tecnixEvalData().tecnixMemoCache;
     auto * trackingCtx = currentTecnixThreadState.trackingContext;
+
+    /* A result computed outside tracking carries no label, and the lazy parts
+       of a tracked result must only ever be forced under tracking, so tracked
+       and untracked calls never share a table: a tracked call reusing an
+       untracked result would record none of its sources, and an untracked call
+       forcing part of a tracked result would leave that part unlabelled for
+       every later tracked consumer. Untracked results are still memoized, in
+       their own table: `f` is typically recursive (zone A loads zone B), so
+       building them afresh would re-walk everything they share. */
+    auto & memoCache =
+        trackingCtx ? *state.tecnixEvalData().trackedTecnixMemoCache : *state.tecnixEvalData().tecnixMemoCache;
 
     Value * stored = nullptr;
     EvalSourceAccessSetId sourceDeps = emptyEvalSourceAccessSetId;
 
-    if (trackingCtx) {
-        bool hit = false;
-        memoCache.cvisit(cacheKey, [&](auto & i) {
-            stored = *i.second.value;
-            sourceDeps = i.second.sourceDeps;
-            hit = true;
-        });
-        if (hit) {
+    bool hit = false;
+    memoCache.cvisit(cacheKey, [&](auto & i) {
+        stored = *i.second.value;
+        sourceDeps = i.second.sourceDeps;
+        hit = true;
+    });
+    if (hit) {
+        // Replay into this consumer the sources the entry's evaluation read.
+        if (trackingCtx)
             recordTrackedSourceAccessSetDependency(*trackingCtx, sourceDeps);
-            v = *stored;
-            return;
-        }
-    } else {
-        bool hit = false;
-        memoCache.cvisit(cacheKey, [&](auto & i) {
-            stored = *i.second.value;
-            hit = true;
-        });
-        if (hit) {
-            v = *stored;
-            return;
-        }
+        v = *stored;
+        return;
     }
 
     // Miss. Guard against same-key re-entry (a cycle through `f`).
@@ -297,8 +297,8 @@ static void prim_tectonixMemo(EvalState & state, const PosIdx pos, Value ** args
         state.forceValue(*stored, pos);
     }
 
-    // Insert, but if another evaluation raced ahead (untracked parallel
-    // evaluation), reuse its entry so the table keeps a single shared value.
+    // Insert, but if another evaluation raced ahead (parallel evaluation),
+    // reuse its entry so the table keeps a single shared value.
     memoCache.try_emplace_and_cvisit(
         cacheKey,
         EvalTecnixMemoCacheEntry{},
@@ -329,6 +329,10 @@ static RegisterPrimOp primop_tectonixMemo({
       `namespace` and `key` must be strings; `f` is called as `f key`. A
       self-referential `f` (one whose evaluation re-enters `tectonixMemo` with
       the same namespace and key) throws a catchable circular-evaluation error.
+
+      Results computed outside Tecnix source tracking and results computed
+      under it are kept apart: neither is ever returned to the other kind of
+      call.
 
       Example:
       `builtins.tectonixMemo "zones" "//a/b" (path: loadZone path)`

@@ -155,15 +155,18 @@ struct EvalState::TecnixEvalData
     const ref<EvalTecnixModuleCache> tecnixModuleCache = make_ref<EvalTecnixModuleCache>();
 
     /**
-     * Memoization table for `builtins.tectonixMemo`, keyed by
+     * Memoization tables for `builtins.tectonixMemo`, keyed by
      * `namespace\0key`. Each entry holds the single shared result of `f key`
-     * and its recorded source-access-set label, so the (potentially
-     * expensive) `f key` evaluation runs once per EvalState and every
-     * consumer inherits the same tracked dependencies. Tracked evaluation
-     * never spawns parallel work, so re-entrant misses (zone A loading zone
-     * B) evaluate outside any bucket lock and never deadlock.
+     * and, in the tracked table, its recorded source-access-set label, so the
+     * (potentially expensive) `f key` evaluation runs once per EvalState and
+     * every tracked consumer inherits the same tracked dependencies. Tracked
+     * and untracked calls use separate tables, like `trackedFileEvalCache`
+     * and `fileEvalCache`, so a result never crosses between them. Misses
+     * evaluate outside any bucket lock, so re-entrant misses (zone A loading
+     * zone B) never deadlock.
      */
     const ref<EvalTecnixMemoCache> tecnixMemoCache = make_ref<EvalTecnixMemoCache>();
+    const ref<EvalTecnixMemoCache> trackedTecnixMemoCache = make_ref<EvalTecnixMemoCache>();
 
     /** Lazy-initialized set of zone IDs in sparse checkout (thread-safe via once_flag) */
     mutable std::once_flag tectonixSparseCheckoutRootsFlag;

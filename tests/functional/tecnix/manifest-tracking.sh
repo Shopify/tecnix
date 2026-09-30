@@ -6,7 +6,8 @@
 # depends on exactly that, not on the whole `.meta/manifest.json`. So adding an
 # unrelated zone leaves such a target's eval-cache row valid. `tectonixMemo`
 # shares one evaluation, and the source dependencies recorded during it, among
-# every consumer.
+# every consumer, but never shares a result computed outside tracking with a
+# tracked target (or the other way round).
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -49,9 +50,13 @@ let
   entry = name: builtins.tectonixManifestEntry "//zones/${name}";
   # Two consumers of one memoized load: the load reads shared.txt once.
   loaded = builtins.tectonixMemo "loader" "shared" (_: builtins.readFile ./shared.txt);
+  # Memoized lookups that every consumer calls afresh, so every consumer after
+  # the first is a memo hit rather than a force of one shared thunk.
+  zoneId = name: builtins.tectonixMemo "zone-id" name (n: (entry n).id);
+  zoneRecord = name: builtins.tectonixMemo "zone-record" name (n: { id = (entry n).id; });
 in
 {
-  allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" ];
+  allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" "peek" "fill-record" "prefilled" "record-field" ];
   resolve = name:
     if name == "whole" then drv name (toString (builtins.length (builtins.attrNames builtins.unsafeTectonixInternalManifest)))
     else if name == "keys" then drv name (toString (builtins.length (builtins.tectonixManifestKeys)))
@@ -59,6 +64,12 @@ in
       let path = builtins.tectonixManifestIdToPath "W-000001"; in if path == null then "absent" else path
     )
     else if name == "m1" || name == "m2" then drv name (builtins.hashString "sha256" loaded)
+    else if name == "za1" || name == "za2" || name == "prefilled" then drv name (zoneId "a")
+    # Hands both memoized lookups, unforced, to whoever reads the value.
+    else if name == "peek" then drv name "peek" // { zoneId = zoneId "a"; recordId = (zoneRecord "a").id; }
+    # Fills the memoized record without forcing its field.
+    else if name == "fill-record" then builtins.seq (zoneRecord "a") (drv name "record")
+    else if name == "record-field" then drv name (zoneRecord "a").id
     else drv name (entry name).id;
 }
 EOF
@@ -71,7 +82,7 @@ commit_world() {
 
 REV1=$(commit_world "two zones")
 
-TARGETS='[ "a" "b" "keys" "id" "m1" "m2" "whole" ]'
+TARGETS='[ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" ]'
 
 # Dependency sets (target -> path -> fingerprint) of every target at $1.
 # Extra nix flags follow.
@@ -123,7 +134,7 @@ assert_jq "$deps1" '.keys | keys == [".meta/manifest.json#keys", "resolve.nix"]'
     "keys should depend on the key set only"
 assert_jq "$deps1" '.id | keys == [".meta/manifest.json#id/W-000001", "resolve.nix"]' \
     "id should depend on one id lookup only"
-assert_jq "$deps1" '[.a, .b, .keys, .id, .m1, .m2 | has(".meta/manifest.json")] | any | not' \
+assert_jq "$deps1" '[.a, .b, .keys, .id, .m1, .m2, .za1, .za2 | has(".meta/manifest.json")] | any | not' \
     "the per-entry targets should not depend on the whole manifest file"
 assert_jq "$deps1" '.whole | has(".meta/manifest.json")' \
     "reading the whole manifest (builtins.unsafeTectonixInternalManifest) should still depend on the file"
@@ -131,10 +142,12 @@ assert_jq "$deps1" '.a[".meta/manifest.json#//zones/a"] != .b[".meta/manifest.js
     "entry fingerprints should differ between zones"
 assert_jq "$deps1" '.m1 == .m2 and (.m1 | has("shared.txt"))' \
     "both consumers of a memoized load should inherit the load's dependencies"
+assert_jq "$deps1" '[.za1, .za2 | keys == [".meta/manifest.json#//zones/a", "resolve.nix"]] | all' \
+    "a memo hit should replay the dependencies recorded when its entry was filled"
 
 echo "Testing the eval cache across commits..."
 cached_deps_at "$REV1" > "$TEST_ROOT/cold.json" 2> "$TEST_ROOT/cold.err"
-misses "$TEST_ROOT/cold.err" a b keys id m1 m2 whole
+misses "$TEST_ROOT/cold.err" a b keys id m1 m2 whole za1 za2
 [[ "$(jq -S . < "$TEST_ROOT/cold.json")" == "$(jq -S . <<< "$deps1")" ]] \
     || fail "the cached evaluation should report the same dependencies"
 
@@ -143,14 +156,14 @@ misses "$TEST_ROOT/cold.err" a b keys id m1 m2 whole
 write_manifest '  "//zones/c": { "id": "W-000003" },'
 REV2=$(commit_world "add an unrelated zone")
 cached_deps_at "$REV2" > /dev/null 2> "$TEST_ROOT/add-zone.err"
-hits "$TEST_ROOT/add-zone.err" a b id m1 m2
+hits "$TEST_ROOT/add-zone.err" a b id m1 m2 za1 za2
 misses "$TEST_ROOT/add-zone.err" keys whole
 
 # Changing one zone's entry invalidates that zone's target and nothing else.
 sed -i.bak 's/W-000002/W-000009/' "$WORLD/.meta/manifest.json" && rm "$WORLD/.meta/manifest.json.bak"
 REV3=$(commit_world "change b's id")
 cached_deps_at "$REV3" > "$TEST_ROOT/change-b.json" 2> "$TEST_ROOT/change-b.err"
-hits "$TEST_ROOT/change-b.err" a id keys m1 m2
+hits "$TEST_ROOT/change-b.err" a id keys m1 m2 za1 za2
 misses "$TEST_ROOT/change-b.err" b whole
 assert_jq "$(cat "$TEST_ROOT/change-b.json")" \
     ".b[\".meta/manifest.json#//zones/b\"] != $(jq '.b[".meta/manifest.json#//zones/b"]' <<< "$deps1")" \
@@ -161,20 +174,67 @@ sed -i.bak 's/W-000001/W-000010/' "$WORLD/.meta/manifest.json" && rm "$WORLD/.me
 REV4=$(commit_world "renumber a")
 cached_deps_at "$REV4" > /dev/null 2> "$TEST_ROOT/renumber-a.err"
 hits "$TEST_ROOT/renumber-a.err" b keys m1 m2
-misses "$TEST_ROOT/renumber-a.err" a id whole
+misses "$TEST_ROOT/renumber-a.err" a id whole za1 za2
 
 # A memoized load's dependencies reach every consumer: changing what the load
 # read invalidates both, not just whichever consumer evaluated it first.
 echo "shared two" > "$WORLD/shared.txt"
 REV5=$(commit_world "change the shared file")
 cached_deps_at "$REV5" > /dev/null 2> "$TEST_ROOT/shared.err"
-hits "$TEST_ROOT/shared.err" a b id keys whole
+hits "$TEST_ROOT/shared.err" a b id keys whole za1 za2
 misses "$TEST_ROOT/shared.err" m1 m2
 
 # A file nothing read leaves every row valid.
 echo "unrelated two" > "$WORLD/unrelated.txt"
 REV6=$(commit_world "change an unrelated file")
 cached_deps_at "$REV6" > /dev/null 2> "$TEST_ROOT/unrelated.err"
-hits "$TEST_ROOT/unrelated.err" a b keys id m1 m2 whole
+hits "$TEST_ROOT/unrelated.err" a b keys id m1 m2 whole za1 za2
+
+# A memoized result computed outside tracking must never reach a tracked
+# target without its dependencies, in either direction: an untracked call that
+# comes first, and an untracked call that forces part of an entry a tracked
+# target filled. `peek` hands both lookups, unforced, to the top-level
+# expression, which forces them outside tracking before the tracked targets
+# run in the same evaluation. Extra nix flags follow the rev.
+prefill_deps_at() {
+    local rev="$1"
+    shift
+    nix eval --json -v \
+        --extra-experimental-features 'nix-command' \
+        --option lazy-trees true \
+        --option tectonix-git-dir "$WORLD/.git" \
+        --option tectonix-git-sha "$rev" \
+        "$@" \
+        --expr "let
+          call = includeTargets: targets: builtins.tecnixTargets {
+            gitDir = \"$WORLD/.git\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; };
+            rev = \"$rev\"; inherit targets includeTargets; includeDependencies = true; };
+          peek = (builtins.head (call true [ \"peek\" ])).value;
+          outsideTracking = builtins.seq peek.zoneId (builtins.seq (call false [ \"fill-record\" ]) peek.recordId);
+        in builtins.seq outsideTracking (builtins.listToAttrs (map (r: { name = r.target; value = r.dependencies; })
+          (call false [ \"prefilled\" \"record-field\" ])))"
+}
+
+echo "Testing memoized results computed outside tracking..."
+PREFILLED_DEPS='[.prefilled, ."record-field" | keys == [".meta/manifest.json#//zones/a", "resolve.nix"]] | all'
+# First with tracking from includeDependencies alone, then through the eval
+# cache, where a missing dependency turns into a stale warm hit.
+assert_jq "$(prefill_deps_at "$REV6" --option tecnix-eval-cache false)" "$PREFILLED_DEPS" \
+    "tracked targets should depend on the entry behind memoized values first touched outside tracking"
+
+PREFILL_CACHE_HOME="$TEST_ROOT/manifest-prefill-cache-home"
+XDG_CACHE_HOME="$PREFILL_CACHE_HOME" prefill_deps_at "$REV6" --option tecnix-eval-cache true --pure-eval \
+    > "$TEST_ROOT/prefill-cold.json" 2> "$TEST_ROOT/prefill-cold.err"
+misses "$TEST_ROOT/prefill-cold.err" prefilled record-field
+assert_jq "$(cat "$TEST_ROOT/prefill-cold.json")" "$PREFILLED_DEPS" \
+    "cached tracked targets should depend on the entry behind memoized values first touched outside tracking"
+
+# The reviewer's reproduction: renumber zone a, and the warm run must
+# re-evaluate instead of serving the old id.
+sed -i.bak 's/W-000010/W-000011/' "$WORLD/.meta/manifest.json" && rm "$WORLD/.meta/manifest.json.bak"
+REV7=$(commit_world "renumber a again")
+XDG_CACHE_HOME="$PREFILL_CACHE_HOME" prefill_deps_at "$REV7" --option tecnix-eval-cache true --pure-eval \
+    > /dev/null 2> "$TEST_ROOT/prefill-warm.err"
+misses "$TEST_ROOT/prefill-warm.err" prefilled record-field
 
 echo "All manifest tracking tests passed!"
