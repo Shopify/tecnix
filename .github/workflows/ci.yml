@@ -156,7 +156,7 @@ jobs:
     - name: Run the cheap flake checks
       run: |
         nix build --file ci/gha/tests/wrapper.nix \
-          topLevel.rl-next topLevel.packaging-overriding -L \
+          topLevel.rl-next topLevel.packaging-overriding topLevel.repl-completion -L \
           --arg withSanitizers ${{ matrix.sanitizers }} \
           --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
