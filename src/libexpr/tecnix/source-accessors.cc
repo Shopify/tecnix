@@ -118,8 +118,12 @@ static std::string normalizeZonePath(std::string_view zonePath)
 }
 
 static GitAccessorOptions
-makeZoneAccessorOptions(ref<GitRepo> repo, const Hash & commitHash, const std::string & zonePath)
+makeZoneAccessorOptions(EvalState & state, ref<GitRepo> repo, const Hash & commitHash, const std::string & zonePath)
 {
+    // Raw trees ignore `.gitattributes`, so attributes can't change their
+    // content and don't belong in the fingerprint either.
+    if (state.settings.tectonixRawZoneTrees)
+        return {.exportIgnore = false, .smudgeLfs = false};
     std::string attrFp;
     for (auto & h : repo->getGitAttributesAlongPath(commitHash, zonePath))
         attrFp += h.gitRev();
@@ -737,7 +741,7 @@ StorePath getLegacyTectonixZoneStorePath(EvalState & state, std::string_view zon
         debug("getLegacyTectonixZoneStorePath: %s clean, eager copy from git (tree %s)", zonePath, treeSha.gitRev());
         auto repo = getWorldRepo(state);
         auto commitHash = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(state), HashAlgorithm::SHA1);
-        auto opts = makeZoneAccessorOptions(repo, commitHash, normalizeZonePath(zonePath));
+        auto opts = makeZoneAccessorOptions(state, repo, commitHash, normalizeZonePath(zonePath));
         auto accessor = repo->getAccessor(treeSha, opts, "zone");
 
         std::string name = "zone-" + sanitizeZoneNameForStore(zonePath);
@@ -824,7 +828,7 @@ static StorePath mountLegacyTectonixZoneByTreeSha(EvalState & state, const Hash 
     // race to mount the same zone, but we check again before inserting.
     auto repo = getWorldRepo(state);
     auto commitHash = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(state), HashAlgorithm::SHA1);
-    auto opts = makeZoneAccessorOptions(repo, commitHash, std::string(zonePath));
+    auto opts = makeZoneAccessorOptions(state, repo, commitHash, std::string(zonePath));
     auto accessor = repo->getAccessor(treeSha, opts, "zone");
 
     // Generate name from zone path (sanitized for store path requirements)
@@ -961,7 +965,7 @@ static StorePath getLegacyTectonixZoneFromCheckout(
     auto makeDirtyAccessor = [&]() -> ref<SourceAccessor> {
         auto repo = getWorldRepo(state);
         auto commitHash = Hash::parseNonSRIUnprefixed(requireTectonixGitSha(state), HashAlgorithm::SHA1);
-        auto zoneOpts = makeZoneAccessorOptions(repo, commitHash, zone);
+        auto zoneOpts = makeZoneAccessorOptions(state, repo, commitHash, zone);
         auto baseAccessor = repo->getAccessor(getWorldTreeSha(state, zone), zoneOpts, "zone");
         boost::unordered_flat_set<std::string> zoneDirtyFiles;
         if (dirtyFiles) {
