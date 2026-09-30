@@ -859,7 +859,20 @@ public:
 
 private:
 
+    /**
+     * Number of slots in the base environment, and the capacity of the
+     * `builtins` attribute set that mirrors it. Every global constant and
+     * every primop takes one of each (see `addConstant` and `addPrimOp`), so
+     * registering more builtins than this would write past the end of both.
+     * `nix __dump-language` registers all of them, including the ones gated
+     * behind experimental features; keep some headroom above what it needs.
+     */
+    static constexpr size_t baseEnvCapacity = 160;
+
     unsigned int baseEnvDispl = 0;
+
+    /** Throw instead of writing past the end of the base environment. */
+    void checkBaseEnvHasRoom(std::string_view name) const;
 
     void createBaseEnv(const EvalSettings & settings);
 

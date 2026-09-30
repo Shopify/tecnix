@@ -107,6 +107,236 @@ static RegisterPrimOp primop_worldManifestInverted({
     .impl = prim_worldManifestInverted,
 });
 
+// ============================================================================
+// builtins.tectonixManifestEntry zonePath
+// Returns null or { id = "W-xxxxxx" } for a single zone, recording only that
+// entry as a tracked dependency (synthetic path .meta/manifest.json#<zonePath>)
+// instead of the whole manifest file.
+// ============================================================================
+static void prim_tectonixManifestEntry(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zonePath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zonePath' argument to builtins.tectonixManifestEntry");
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(".meta/manifest.json#" + std::string(zonePath));
+    auto & manifest = getManifest(state);
+    auto it = manifest.find(std::string(zonePath));
+    if (it == manifest.end() || !it->is_object() || !it->contains("id") || !(*it).at("id").is_string()) {
+        v.mkNull();
+        return;
+    }
+    auto zoneAttrs = state.buildBindings(1);
+    zoneAttrs.alloc("id").mkString((*it).at("id").get<std::string>(), state.mem);
+    v.mkAttrs(zoneAttrs);
+}
+
+static RegisterPrimOp primop_tectonixManifestEntry({
+    .name = "__tectonixManifestEntry",
+    .args = {"zonePath"},
+    .doc = R"(
+      Get a single zone's manifest entry as a Nix attrset { id = "W-xxxxxx"; },
+      or null if the zone does not exist. Records only that entry as a Tecnix
+      tracked dependency (synthetic path .meta/manifest.json#<zonePath>), not
+      the whole manifest file.
+      Example: `builtins.tectonixManifestEntry "//areas/tools/dev"` returns `{ id = "W-123456"; }`.
+    )",
+    .impl = prim_tectonixManifestEntry,
+});
+
+// ============================================================================
+// builtins.tectonixManifestKeys
+// Returns the sorted list of zone paths (manifest keys), recording only the
+// key set as a tracked dependency (synthetic path .meta/manifest.json#keys).
+// ============================================================================
+static void prim_tectonixManifestKeys(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(".meta/manifest.json#keys");
+    auto & manifest = getManifest(state);
+    std::vector<std::string> keys;
+    keys.reserve(manifest.size());
+    for (auto & [path, value] : manifest.items())
+        keys.push_back(path);
+    std::sort(keys.begin(), keys.end());
+    auto list = state.buildList(keys.size());
+    for (size_t i = 0; i < keys.size(); i++) {
+        auto * val = state.allocValue();
+        val->mkString(keys[i], state.mem);
+        list[i] = val;
+    }
+    v.mkList(list);
+}
+
+static RegisterPrimOp primop_tectonixManifestKeys({
+    .name = "__tectonixManifestKeys",
+    .args = {},
+    .doc = R"(
+      Get the sorted list of zone paths (manifest keys). Records only the key
+      set as a Tecnix tracked dependency (synthetic path .meta/manifest.json#keys),
+      not the whole manifest file. Only world-wide folds that enumerate every
+      zone should use this; per-target resolution should use tectonixManifestEntry.
+    )",
+    .impl = prim_tectonixManifestKeys,
+});
+
+// ============================================================================
+// builtins.tectonixManifestIdToPath zoneId
+// Returns null or the zone path for a zone ID, recording only that id lookup
+// as a tracked dependency (synthetic path .meta/manifest.json#id/<zoneId>).
+// ============================================================================
+static void prim_tectonixManifestIdToPath(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zoneId = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zoneId' argument to builtins.tectonixManifestIdToPath");
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
+        ctx->recordAccess(".meta/manifest.json#id/" + std::string(zoneId));
+    auto & manifest = getManifest(state);
+    for (auto & [path, value] : manifest.items()) {
+        if (value.contains("id") && value.at("id").is_string() && value.at("id").get<std::string>() == zoneId) {
+            v.mkString(path, state.mem);
+            return;
+        }
+    }
+    v.mkNull();
+}
+
+static RegisterPrimOp primop_tectonixManifestIdToPath({
+    .name = "__tectonixManifestIdToPath",
+    .args = {"zoneId"},
+    .doc = R"(
+      Get the zone path for a zone ID, or null if not found. Records only that
+      id lookup as a Tecnix tracked dependency (synthetic path
+      .meta/manifest.json#id/<zoneId>), not the whole manifest file.
+      Example: `builtins.tectonixManifestIdToPath "W-123456"` returns `"//areas/tools/dev"`.
+    )",
+    .impl = prim_tectonixManifestIdToPath,
+});
+
+// Re-entrancy guard for `builtins.tectonixMemo`: keys whose `f key` evaluation
+// is currently in progress on this thread. Tracked evaluation is
+// single-threaded, so a same-key re-entry can only be a genuine cycle (zone A
+// loading itself transitively); the guard turns it into a catchable error
+// instead of unbounded recursion through fresh thunks each call.
+static thread_local std::vector<std::string> tectonixMemoInProgress;
+
+// ============================================================================
+// builtins.tectonixMemo namespace key f
+// Evaluates `f key` once per EvalState and returns the shared value. While
+// tracked, the one evaluation records its source accesses into a label stored
+// alongside the value; every later consumer records that label as a child of
+// its own frame (and inherits the value's label through the value-copy hooks),
+// so all consumers share the same tracked dependencies without re-evaluating
+// `f key`.
+// ============================================================================
+static void prim_tectonixMemo(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto ns =
+        state.forceStringNoCtx(*args[0], pos, "while evaluating the 'namespace' argument to builtins.tectonixMemo");
+    auto keyStr = state.forceStringNoCtx(*args[1], pos, "while evaluating the 'key' argument to builtins.tectonixMemo");
+
+    auto cacheKey = std::string(ns) + '\0' + std::string(keyStr);
+    auto & memoCache = *state.tecnixEvalData().tecnixMemoCache;
+    auto * trackingCtx = currentTecnixThreadState.trackingContext;
+
+    Value * stored = nullptr;
+    EvalSourceAccessSetId sourceDeps = emptyEvalSourceAccessSetId;
+
+    if (trackingCtx) {
+        bool hit = false;
+        memoCache.cvisit(cacheKey, [&](auto & i) {
+            stored = *i.second.value;
+            sourceDeps = i.second.sourceDeps;
+            hit = true;
+        });
+        if (hit) {
+            recordTrackedSourceAccessSetDependency(*trackingCtx, sourceDeps);
+            v = *stored;
+            return;
+        }
+    } else {
+        bool hit = false;
+        memoCache.cvisit(cacheKey, [&](auto & i) {
+            stored = *i.second.value;
+            hit = true;
+        });
+        if (hit) {
+            v = *stored;
+            return;
+        }
+    }
+
+    // Miss. Guard against same-key re-entry (a cycle through `f`).
+    for (const auto & inProgress : tectonixMemoInProgress) {
+        if (inProgress == cacheKey)
+            // AssertionError so builtins.tryEval can catch a circular zone
+            // dependency the same way it catches a missing zone, instead of
+            // crashing the whole evaluation.
+            state
+                .error<AssertionError>(
+                    "builtins.tectonixMemo: circular evaluation detected for namespace '%s' key '%s'", ns, keyStr)
+                .atPos(pos)
+                .debugThrow();
+    }
+
+    tectonixMemoInProgress.push_back(cacheKey);
+    Finally popInProgress([&]() { tectonixMemoInProgress.pop_back(); });
+
+    // Evaluate `f key` outside any map bucket lock so re-entrant misses (zone A
+    // loading zone B) can insert their own entries without deadlock. Under
+    // tracking, scope the evaluation so its accesses intern into one reusable
+    // label that every later consumer records.
+    if (trackingCtx) {
+        TrackedSourceDepsScope scope(*trackingCtx);
+        stored = state.allocValue();
+        state.callFunction(*args[2], *args[1], *stored, pos);
+        state.forceValue(*stored, pos);
+        sourceDeps = scope.finish(stored);
+    } else {
+        stored = state.allocValue();
+        state.callFunction(*args[2], *args[1], *stored, pos);
+        state.forceValue(*stored, pos);
+    }
+
+    // Insert, but if another evaluation raced ahead (untracked parallel
+    // evaluation), reuse its entry so the table keeps a single shared value.
+    memoCache.try_emplace_and_cvisit(
+        cacheKey,
+        EvalTecnixMemoCacheEntry{},
+        [&](auto & i) {
+            i.second.value = RootValue(stored);
+            i.second.sourceDeps = sourceDeps;
+        },
+        [&](auto & i) {
+            stored = *i.second.value;
+            sourceDeps = i.second.sourceDeps;
+        });
+
+    if (trackingCtx)
+        recordTrackedSourceAccessSetDependency(*trackingCtx, sourceDeps);
+    v = *stored;
+}
+
+static RegisterPrimOp primop_tectonixMemo({
+    .name = "__tectonixMemo",
+    .args = {"namespace", "key", "f"},
+    .doc = R"(
+      Evaluate `f key` once per evaluation and return the shared value. Later
+      calls with the same `namespace` and `key` return the cached value without
+      re-invoking `f`, and (under Tecnix source tracking) every consumer
+      inherits the cached value's recorded source dependencies, so the work and
+      the tracked closure are both shared.
+
+      `namespace` and `key` must be strings; `f` is called as `f key`. A
+      self-referential `f` (one whose evaluation re-enters `tectonixMemo` with
+      the same namespace and key) throws a catchable circular-evaluation error.
+
+      Example:
+      `builtins.tectonixMemo "zones" "//a/b" (path: loadZone path)`
+      evaluates `loadZone "//a/b"` once and shares the result.
+    )",
+    .impl = prim_tectonixMemo,
+});
+
 static std::string normalizeTrackedRepoPath(std::string_view path);
 
 // ============================================================================

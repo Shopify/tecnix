@@ -47,6 +47,22 @@ struct EvalTecnixModuleCacheEntry
 
 using EvalTecnixModuleCache = boost::concurrent_flat_map<std::string, EvalTecnixModuleCacheEntry>;
 
+/**
+ * A memoized `builtins.tectonixMemo` result: the shared finished value plus
+ * the source-access-set label recorded the one time `f key` was evaluated.
+ * Every later consumer records `sourceDeps` as a child of its own frame (and
+ * inherits the value's label through the normal value-copy hooks), so the
+ * shared value's tracked dependencies propagate to all consumers without
+ * re-evaluating `f key`.
+ */
+struct EvalTecnixMemoCacheEntry
+{
+    RootValue value;
+    EvalSourceAccessSetId sourceDeps = emptyEvalSourceAccessSetId;
+};
+
+using EvalTecnixMemoCache = boost::concurrent_flat_map<std::string, EvalTecnixMemoCacheEntry>;
+
 struct EvalState::TecnixEvalData
 {
     /**
@@ -137,6 +153,17 @@ struct EvalState::TecnixEvalData
      * force in another context picks that label up via `forceValueTracked`.
      */
     const ref<EvalTecnixModuleCache> tecnixModuleCache = make_ref<EvalTecnixModuleCache>();
+
+    /**
+     * Memoization table for `builtins.tectonixMemo`, keyed by
+     * `namespace\0key`. Each entry holds the single shared result of `f key`
+     * and its recorded source-access-set label, so the (potentially
+     * expensive) `f key` evaluation runs once per EvalState and every
+     * consumer inherits the same tracked dependencies. Tracked evaluation
+     * never spawns parallel work, so re-entrant misses (zone A loading zone
+     * B) evaluate outside any bucket lock and never deadlock.
+     */
+    const ref<EvalTecnixMemoCache> tecnixMemoCache = make_ref<EvalTecnixMemoCache>();
 
     /** Lazy-initialized set of zone IDs in sparse checkout (thread-safe via once_flag) */
     mutable std::once_flag tectonixSparseCheckoutRootsFlag;
