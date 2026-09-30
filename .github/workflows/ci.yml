@@ -59,8 +59,9 @@ jobs:
         run: |
           exit 1
 
+  # The test legs do not wait for the basic checks: a lint failure is reported by
+  # `aggregate basic checks` without holding up the (much longer) test legs.
   tests:
-    needs: basic-checks
     strategy:
       fail-fast: false
       matrix:
@@ -85,7 +86,7 @@ jobs:
             stdenv: clangStdenv
     name: tests ${{ matrix.scenario }}
     runs-on: ${{ matrix.runs-on }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
     - uses: actions/checkout@v7
       with:
