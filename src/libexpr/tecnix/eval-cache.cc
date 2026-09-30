@@ -61,6 +61,17 @@ struct DependencyFingerprintThreadLocalCache
 
 static DependencyFingerprintThreadLocalCache & getDependencyFingerprintThreadCache(DependencyFingerprintCache & cache);
 
+/**
+ * What the `gitDir` column holds. The cache used to key rows by the location
+ * of the git directory, so one repository cached in two places (a laptop, a CI
+ * runner, a sandbox) never shared rows. Tecnix serves one repository, and a hit
+ * is only taken after every path in its closure matches the evaluated tree, so
+ * the location has no role in correctness and is no longer part of the key.
+ * The column stays, holding this constant, so existing cache files need no
+ * schema change; rows written under a location are simply never read again.
+ */
+static constexpr std::string_view repositoryColumnValue = "";
+
 // Unshipped development cache: the schema may change incompatibly at any
 // time, with no migrations. Foreign or stale rows are rejected by content
 // validation (a miss), and deleting the database is always safe.
@@ -1116,7 +1127,11 @@ struct TecnixEvalCache
      */
     static bool readShardRow(State & state, const TecnixCacheScope & scope, uint32_t shard, std::string & row)
     {
-        auto stmt(state.lookupShard.use().apply(scope.gitDir).apply(scope.resolver).apply(scope.argsKey).apply(shard));
+        auto stmt(state.lookupShard.use()
+                      .apply(repositoryColumnValue)
+                      .apply(scope.resolver)
+                      .apply(scope.argsKey)
+                      .apply(shard));
         if (!stmt.next())
             return false;
         auto blob = stmt.getBlob(0);
@@ -1160,7 +1175,7 @@ struct TecnixEvalCache
                         existingBlob = existing;
                     auto outcome = mergedShardRow(existingBlob, updates, historyLimit, state->maxRowBytes, blob);
                     state->upsertShard.use()
-                        .apply(scope.gitDir)
+                        .apply(repositoryColumnValue)
                         .apply(scope.resolver)
                         .apply(scope.argsKey)
                         .apply(shard)

@@ -23,6 +23,7 @@ headers = [ config_pub_h ] + files(
   'function-trace.hh',
   'gc-small-vector.hh',
   'get-drvs.hh',
+  'ingestion-stats.hh',
   'json-to-value.hh',
   'nixexpr.hh',
   'parallel-eval.hh',

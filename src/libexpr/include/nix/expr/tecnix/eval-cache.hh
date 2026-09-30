@@ -56,10 +56,13 @@ DependencyClosure dependencyFingerprints(
  */
 constexpr std::string_view tecnixTargetNamesCacheKey = "__tecnixTargetNames";
 
-/** The (gitDir, resolver, argsKey) row family a lookup or upsert addresses. */
+/**
+ * The (resolver, argsKey) row family a lookup or upsert addresses. The cache
+ * assumes one repository and never keys by where it is checked out: what a
+ * lookup finds is proven against the evaluated tree before it is used.
+ */
 struct TecnixCacheScope
 {
-    std::string_view gitDir;
     std::string_view resolver;
     std::string_view argsKey;
 };

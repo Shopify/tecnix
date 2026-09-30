@@ -6,6 +6,7 @@ suites += {
     'builtins.sh',
     'gc.sh',
     'manifest-tracking.sh',
+    'ingestion-stats.sh',
   ],
   'workdir' : meson.current_source_dir(),
 }

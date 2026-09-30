@@ -9,7 +9,9 @@
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval-settings.hh"
 #include "nix/expr/parallel-eval.hh"
+#include "nix/util/terminal.hh"
 #include "nix/expr/primops.hh"
+#include "nix/expr/ingestion-stats.hh"
 #include "nix/expr/tecnix/access-set-graph.hh"
 #include "nix/expr/tecnix/eval-cache.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
@@ -169,12 +171,15 @@ struct TecnixArgs
     /** The caller asked for the tracked source closure (`includeDependencies`),
         so it must be computed even when the eval cache would not need it. */
     bool requireDependencies = false;
+    /** Record a target's evaluation error in its result record instead of failing the whole
+        call (`keepGoing`, with `includeDependencies`). */
+    bool keepGoing = false;
 };
 
 /** The persistent-cache row family these arguments address. */
 static TecnixCacheScope cacheScope(const TecnixArgs & args)
 {
-    return {args.gitDir, args.resolver, args.argsKey};
+    return {args.resolver, args.argsKey};
 }
 
 static const Bindings & forceTecnixBuiltinAttrs(EvalState & state, const PosIdx pos, Value ** args)
@@ -721,6 +726,16 @@ static void prim_tecnixTargets(EvalState & state, const PosIdx pos, Value ** arg
         state.symbols.create("includeDependencies"),
         "while evaluating the 'includeDependencies' argument to builtins.tecnixTargets");
     tArgs.requireDependencies = includeDependencies;
+    tArgs.keepGoing = getTecnixBoolAttr(
+        state,
+        pos,
+        args,
+        state.symbols.create("keepGoing"),
+        "while evaluating the 'keepGoing' argument to builtins.tecnixTargets");
+    if (tArgs.keepGoing && !includeDependencies)
+        state.error<EvalError>("builtins.tecnixTargets: 'keepGoing' requires 'includeDependencies = true'")
+            .atPos(pos)
+            .debugThrow();
 
     if (includeDependencies) {
         auto includeTargets = getTecnixBoolAttr(
@@ -796,7 +811,9 @@ static RegisterPrimOp primop_tecnixTargets({
       keyed by those same strings. With `includeDependencies = true`, returns
       an ordered list of `{ target, value, dependencies }` records, where
       `dependencies` is an attrset of `path = fingerprint`. Add
-      `includeTargets = false` to omit `value` from each record.
+      `includeTargets = false` to omit `value` from each record. With
+      `keepGoing = true` (requires `includeDependencies`), a target whose
+      evaluation fails yields `{ target, error }` instead of failing the call.
 
       Under pure evaluation with `tecnix-eval-cache` enabled, a target whose
       stored source closure still matches the current tree and whose cached
@@ -880,6 +897,7 @@ static TargetDependencyResult evalTargetDependencies(
     bool track)
 {
     auto started = std::chrono::steady_clock::now();
+    IngestionTargetScope ingestionTargetScope(target);
     printTalkative(
         "tecnixTargets dependencies: start evaluating '%s' on %s thread",
         target,
@@ -1042,7 +1060,8 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
     const PosIdx pos,
     const TecnixArgs & args,
     DependencyFingerprintCache & fingerprintCache,
-    bool keepTargetValues = false)
+    bool keepTargetValues = false,
+    std::vector<std::string> * errors = nullptr)
 {
     bool useCache = state.settings.pureEval && state.settings.tecnixEvalCache;
     printTalkative(
@@ -1116,14 +1135,23 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
 
         auto evalMiss = [&](size_t i) {
             auto & target = args.targets[i];
-            results[i] = evalTargetDependencies(
-                state,
-                pos,
-                *preparedResolve.resolveFn,
-                preparedResolve.sourceDeps,
-                target,
-                keepTargetValues,
-                tecnixSourceTrackingEnabled(state, args));
+            try {
+                results[i] = evalTargetDependencies(
+                    state,
+                    pos,
+                    *preparedResolve.resolveFn,
+                    preparedResolve.sourceDeps,
+                    target,
+                    keepTargetValues,
+                    tecnixSourceTrackingEnabled(state, args));
+            } catch (Error & e) {
+                // Interrupted is not an Error, so interrupts still stop the call.
+                if (!errors)
+                    throw;
+                (*errors)[i] = filterANSIEscapes(e.what(), true);
+                results[i].reset();
+                return;
+            }
             if (results[i])
                 results[i]->cacheNeedsUpsert = true;
         };
@@ -1167,13 +1195,28 @@ static void prim_tecnixTargetsWithDependencies(
     EvalState & state, const PosIdx pos, Value **, Value & v, TecnixArgs && tArgs, bool includeTargets)
 {
     DependencyFingerprintCache fingerprintCache;
-    auto results = evaluateTecnixTargetDependencies(state, pos, tArgs, fingerprintCache, includeTargets);
+    std::vector<std::string> errors(tArgs.keepGoing ? tArgs.targets.size() : 0);
+    auto results = evaluateTecnixTargetDependencies(
+        state, pos, tArgs, fingerprintCache, includeTargets, tArgs.keepGoing ? &errors : nullptr);
     printTecnixAccessSetStats(state, "tecnixTargets");
     auto list = state.buildList(tArgs.targets.size());
     for (size_t i = 0; i < tArgs.targets.size(); i++) {
-        auto & result = *results[i];
         auto * targetValue = state.allocValue();
         targetValue->mkString(tArgs.targets[i], state.mem);
+        if (!results[i]) {
+            // Only keepGoing leaves a result empty: the target failed, and its record says why.
+            assert(tArgs.keepGoing);
+            auto * errorValue = state.allocValue();
+            errorValue->mkString(errors[i], state.mem);
+            auto attrs = state.buildBindings(2);
+            attrs.insert(state.symbols.create("target"), targetValue);
+            attrs.insert(state.symbols.create("error"), errorValue);
+            auto * recordValue = state.allocValue();
+            recordValue->mkAttrs(attrs);
+            list[i] = recordValue;
+            continue;
+        }
+        auto & result = *results[i];
         // A hit carries its closure (dependencies were requested); a miss evaluated one.
         assert(result.cachedDependencies || result.cacheNeedsUpsert);
         auto * dependenciesValue =
