@@ -111,14 +111,21 @@ static RegisterPrimOp primop_worldManifestInverted({
 // builtins.tectonixManifestEntry zonePath
 // Returns null or { id = "W-xxxxxx" } for a single zone, recording only that
 // entry as a tracked dependency (synthetic path .meta/manifest.json#<zonePath>)
-// instead of the whole manifest file.
+// instead of the whole manifest file. The doc below is the one statement of
+// the synthetic-key grammar; eval-cache.cc fingerprints the keys.
 // ============================================================================
 static void prim_tectonixManifestEntry(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto zonePath = state.forceStringNoCtx(
         *args[0], pos, "while evaluating the 'zonePath' argument to builtins.tectonixManifestEntry");
-    if (auto ctx = currentTecnixThreadState.trackingContext; ctx)
-        ctx->recordAccess(".meta/manifest.json#" + std::string(zonePath));
+    if (auto ctx = currentTecnixThreadState.trackingContext; ctx) {
+        // Manifest keys start with `//`. Anything else could spell one of the
+        // other key forms (`keys`, `id/...`), so it records the whole file.
+        if (zonePath.starts_with("//"))
+            ctx->recordAccess(".meta/manifest.json#" + std::string(zonePath));
+        else
+            ctx->recordAccess(".meta/manifest.json");
+    }
     auto & manifest = getTecnixManifestJson(state);
     auto it = manifest.find(std::string(zonePath));
     if (it == manifest.end() || !it->is_object() || !it->contains("id") || !(*it).at("id").is_string()) {
@@ -134,12 +141,34 @@ static RegisterPrimOp primop_tectonixManifestEntry({
     .name = "__tectonixManifestEntry",
     .args = {"zonePath"},
     .doc = R"(
-      Get a single zone's manifest entry as a Nix attrset { id = "W-xxxxxx"; },
-      or null if the zone does not exist. Records only that entry as a Tecnix
-      tracked dependency (synthetic path .meta/manifest.json#<zonePath>), not
-      the whole manifest file. Reads the manifest through the Tecnix
-      repository view (the evaluated rev plus the checkout's uncommitted
-      changes) that every tracked read and every dependency fingerprint uses.
+      Get a single zone's manifest entry as a Nix attrset `{ id = "W-xxxxxx"; }`,
+      or null if the manifest has no entry for `zonePath` (or its entry has no
+      string `id`). Reads `.meta/manifest.json` through the Tecnix repository
+      view (the evaluated rev plus the checkout's uncommitted changes) that
+      every tracked read and every dependency fingerprint uses.
+
+      Under Tecnix source tracking, the manifest builtins record what they
+      read of `.meta/manifest.json` as synthetic dependency keys, not the
+      whole file. These are all of them:
+
+      - `.meta/manifest.json#<zonePath>`, from this builtin: the entry for
+        `zonePath`. Its fingerprint changes when the entry's JSON value (any
+        field, not only `id`) changes, appears or disappears. `zonePath` is
+        recorded verbatim; manifest keys start with `//`, and an argument
+        that does not records the whole file, `.meta/manifest.json`, instead.
+      - `.meta/manifest.json#keys`, from `builtins.tectonixManifestKeys`: the
+        set of zone paths (manifest keys).
+      - `.meta/manifest.json#id/<zoneId>`, from
+        `builtins.tectonixManifestIdToPath`: which zone path has the id
+        `zoneId` (the first in sorted order), or that none has. `<zoneId>` is
+        everything after `id/`, verbatim.
+
+      Only keys that begin with `.meta/manifest.json#` are synthetic; every
+      other dependency key is a repo-relative path, even one that contains
+      `#`. A synthetic key depends on the file `.meta/manifest.json`: a
+      consumer of dependency keys that cannot interpret the part after the
+      `#` must treat any change to that file as affecting the key.
+
       Example: `builtins.tectonixManifestEntry "//areas/tools/dev"` returns `{ id = "W-123456"; }`.
     )",
     .impl = prim_tectonixManifestEntry,
@@ -178,7 +207,7 @@ static RegisterPrimOp primop_tectonixManifestKeys({
       not the whole manifest file. Only world-wide folds that enumerate every
       zone should use this; per-target resolution should use tectonixManifestEntry.
       Reads the manifest through the same Tecnix repository view as
-      tectonixManifestEntry.
+      tectonixManifestEntry, whose documentation lists every synthetic key.
     )",
     .impl = prim_tectonixManifestKeys,
 });
@@ -212,7 +241,7 @@ static RegisterPrimOp primop_tectonixManifestIdToPath({
       id lookup as a Tecnix tracked dependency (synthetic path
       .meta/manifest.json#id/<zoneId>), not the whole manifest file. Reads the
       manifest through the same Tecnix repository view as
-      tectonixManifestEntry.
+      tectonixManifestEntry, whose documentation lists every synthetic key.
       Example: `builtins.tectonixManifestIdToPath "W-123456"` returns `"//areas/tools/dev"`.
     )",
     .impl = prim_tectonixManifestIdToPath,

@@ -202,6 +202,24 @@ This is the precise sense in which the system works across commits. After a comm
 
 The same property makes the system fail-safe. A row is never believed on the strength of its key; it is believed only when proven. Format changes, corruption, and storage defects therefore all degrade into cache misses, never into wrong answers. In practice, the difference between a cold run and a warm run is the difference between roughly a minute of full tracked evaluation and well under a second — several orders of magnitude, with the gap consisting precisely of "all of evaluation" versus "fingerprint checks and output construction."
 
+### 4.2 Synthetic keys: parts of the manifest
+
+Not every closure key is a file. A target that looks up one zone in `.meta/manifest.json` depends on that zone's entry, not on the whole file, and recording the file would invalidate every such target whenever any zone is added or renumbered. The manifest builtins therefore record *synthetic* keys, each naming one observation of the manifest. This is the complete list:
+
+| key | recorded by | fingerprint changes exactly when |
+|---|---|---|
+| `.meta/manifest.json#<zonePath>` | `builtins.tectonixManifestEntry zonePath` | the JSON value of that zone's entry (any field, not only `id`) changes, appears, or disappears |
+| `.meta/manifest.json#keys` | `builtins.tectonixManifestKeys` | the set of zone paths (manifest keys) changes |
+| `.meta/manifest.json#id/<zoneId>` | `builtins.tectonixManifestIdToPath zoneId` | a different zone path, or none, is the first in sorted order whose entry has the id `zoneId` |
+
+The builtins read the manifest through the same accessor as every other tracked read (§7), so a value and the fingerprint of its key always describe the same manifest. The grammar is exact:
+
+- A key is synthetic if and only if it begins with `.meta/manifest.json#`. Every other key is a repo-relative path, even one that contains `#`; splitting arbitrary keys at `#` is wrong.
+- The fragment after that prefix is `keys`, or `id/` followed by a zone id (everything after `id/`, verbatim), or a zone path, which begins with `//`. `tectonixManifestEntry` given an argument that does not begin with `//` records the whole file, `.meta/manifest.json`, so the three forms never overlap.
+- A synthetic key depends on the file `.meta/manifest.json`. A consumer of closure keys (for example, one mapping changed files to affected targets) that cannot interpret a fragment must treat any change to that file as affecting the key; one that can compares the named observation of the manifest before and after the change.
+
+Reading the whole manifest (the `unsafeTectonixInternalManifest*` builtins, or `builtins.readFile` of the file) still records the plain path `.meta/manifest.json`.
+
 ---
 
 ## 5. A Worked Example

@@ -57,7 +57,7 @@ let
   zoneRecord = builtins.tecnixMemoize (name: { id = (entry name).id; });
 in
 {
-  allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" "peek" "fill-record" "prefilled" "record-field" "agree" ];
+  allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" "peek" "fill-record" "prefilled" "record-field" "agree" "not-a-zone" ];
   resolve = name:
     if name == "whole" then drv name (toString (builtins.length (builtins.attrNames builtins.unsafeTectonixInternalManifest)))
     else if name == "keys" then drv name (toString (builtins.length (builtins.tectonixManifestKeys)))
@@ -83,6 +83,8 @@ in
           file = { inherit id; keys = builtins.attrNames manifest; path = "//zones/a"; };
         };
       }
+    # Every manifest key starts with `//`; "keys" is not one.
+    else if name == "not-a-zone" then drv name (if builtins.tectonixManifestEntry "keys" == null then "none" else "some")
     else drv name (entry name).id;
 }
 EOF
@@ -157,6 +159,11 @@ assert_jq "$deps1" '.m1 == .m2 and (.m1 | has("shared.txt"))' \
     "both consumers of a memoized load should inherit the load's dependencies"
 assert_jq "$deps1" '[.za1, .za2 | keys == [".meta/manifest.json#//zones/a", "resolve.nix"]] | all' \
     "a memo hit should replay the dependencies recorded when its entry was filled"
+# An argument that is not a zone path could spell another key form (here
+# `#keys`, the key set), so it records the whole manifest instead.
+not_a_zone=$(TARGETS='[ "not-a-zone" ]' nocache_deps_at "$REV1")
+assert_jq "$not_a_zone" '."not-a-zone" | keys == [".meta/manifest.json", "resolve.nix"]' \
+    "looking up a non-zone path should depend on the whole manifest"
 
 echo "Testing the eval cache across commits..."
 cached_deps_at "$REV1" > "$TEST_ROOT/cold.json" 2> "$TEST_ROOT/cold.err"
