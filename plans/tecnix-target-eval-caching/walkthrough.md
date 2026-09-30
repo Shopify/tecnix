@@ -50,7 +50,7 @@ Second, **the `args` value becomes part of the cache key.** It is converted to a
 
 ## 4. Step ②: The Cache Question
 
-> **Structure: `TecnixEvalCache`.** A SQLite database holding shard rows keyed by `(gitDir, resolver, argsKey, shard)`. Each shard row contains bounded source-closure histories for the targets assigned to that shard. It exists because skipping evaluation requires remembering what would certify the skipped result.
+> **Structure: `TecnixEvalCache`.** A SQLite database holding shard rows keyed by `(resolver, argsKey, shard)`, never by where the repository is checked out. Each shard row contains bounded source-closure histories for the targets assigned to that shard. It exists because skipping evaluation requires remembering what would certify the skipped result.
 
 The shard containing `//services/api` is loaded. Requested targets are grouped by shard up front (the shard is a hash of the target name), and the shards are visited one row at a time: each row is copied out of the database, its targets are validated outside the database lock and their outputs copied out, and the row is released before the next is read, so memory is bounded by one row rather than the whole scope. Each row's blob begins with the magic bytes `TXDC` (explainer §8).
 
