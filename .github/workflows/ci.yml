@@ -61,7 +61,8 @@ jobs:
   # Pull requests run the component tests (unit + functional) and the cheap flake
   # checks. VM tests, the remaining flake checks, the installer tarball, the
   # installer tests and flake regressions run on pushes to main, merge queue runs
-  # and manual dispatches.
+  # and manual dispatches. On pull requests they run as optional `extended / ...`
+  # jobs in extended.yml, which are not required status checks.
   #
   # The test legs do not wait for the basic checks: a lint failure is reported by
   # `aggregate basic checks` without holding up the (much longer) test legs.
