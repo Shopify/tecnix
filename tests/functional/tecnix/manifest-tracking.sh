@@ -40,6 +40,9 @@ mkdir -p "$WORLD/.meta"
 write_manifest ""
 echo "shared one" > "$WORLD/shared.txt"
 echo "unrelated one" > "$WORLD/unrelated.txt"
+# Two files naming zone a, one memo key read from each by its own target.
+printf a > "$WORLD/key1.txt"
+printf a > "$WORLD/key2.txt"
 
 cat > "$WORLD/resolve.nix" <<'EOF'
 args:
@@ -57,7 +60,7 @@ let
   zoneRecord = builtins.tecnixMemoize (name: { id = (entry name).id; });
 in
 {
-  allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" "peek" "fill-record" "prefilled" "record-field" "agree" "not-a-zone" ];
+  allTargetNames = [ "a" "b" "keys" "id" "m1" "m2" "whole" "za1" "za2" "peek" "fill-record" "prefilled" "record-field" "agree" "not-a-zone" "key1" "key2" ];
   resolve = name:
     if name == "whole" then drv name (toString (builtins.length (builtins.attrNames builtins.unsafeTectonixInternalManifest)))
     else if name == "keys" then drv name (toString (builtins.length (builtins.tectonixManifestKeys)))
@@ -85,6 +88,7 @@ in
       }
     # Every manifest key starts with `//`; "keys" is not one.
     else if name == "not-a-zone" then drv name (if builtins.tectonixManifestEntry "keys" == null then "none" else "some")
+    else if name == "key1" || name == "key2" then drv name (zoneId (builtins.readFile ./${name}.txt))
     else drv name (entry name).id;
 }
 EOF
@@ -164,6 +168,12 @@ assert_jq "$deps1" '[.za1, .za2 | keys == [".meta/manifest.json#//zones/a", "res
 not_a_zone=$(TARGETS='[ "not-a-zone" ]' nocache_deps_at "$REV1")
 assert_jq "$not_a_zone" '."not-a-zone" | keys == [".meta/manifest.json", "resolve.nix"]' \
     "looking up a non-zone path should depend on the whole manifest"
+# How a caller computed a memo key is its own dependency, never the shared
+# entry's. Either target may fill the entry first, so check both.
+via=$(TARGETS='[ "key1" "key2" ]' nocache_deps_at "$REV1")
+assert_jq "$via" '(.key1 | keys) == [".meta/manifest.json#//zones/a", "key1.txt", "resolve.nix"]
+    and (.key2 | keys) == [".meta/manifest.json#//zones/a", "key2.txt", "resolve.nix"]' \
+    "a memo caller should depend on the file it read the key from, and on no other caller's"
 
 echo "Testing the eval cache across commits..."
 cached_deps_at "$REV1" > "$TEST_ROOT/cold.json" 2> "$TEST_ROOT/cold.err"

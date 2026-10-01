@@ -187,14 +187,22 @@ static void prim_tecnixMemoize(EvalState & state, const PosIdx pos, Value ** arg
     // loading zone B) can insert their own entries without deadlock. Under
     // tracking, scope the evaluation so its accesses intern into one reusable
     // label that every later consumer records.
+    //
+    // `f` gets a fresh copy of the key, not `args[1]`: that value carries the
+    // label of however this caller computed `k` (already recorded for this
+    // caller by the force above), and `f` forcing it inside the scope would
+    // store that label with the shared entry and replay it into every later
+    // caller. The key is a string without context, so the copy is equal.
+    auto * keyArg = state.allocValue();
+    keyArg->mkString(key, state.mem);
     result = state.allocValue();
     if (trackingCtx) {
         TrackedSourceDepsScope scope(*trackingCtx);
-        state.callFunction(*function, *args[1], *result, pos);
+        state.callFunction(*function, *keyArg, *result, pos);
         state.forceValue(*result, pos);
         sourceDeps = scope.finish(result);
     } else {
-        state.callFunction(*function, *args[1], *result, pos);
+        state.callFunction(*function, *keyArg, *result, pos);
         state.forceValue(*result, pos);
     }
 
@@ -231,7 +239,7 @@ static RegisterPrimOp primop_tecnixMemoize({
       value of `f` shares its results, and a different function (another
       system's loader, say) never sees them, even for equal keys. `k` must be
       a string without string context; two keys are equal when they are the
-      same string. `f` receives `k` itself.
+      same string. `f` is called with a string equal to `k`.
 
       Results live as long as the evaluator (one `EvalState`) and are never
       freed. A call whose `f k` throws stores nothing, so the next call
@@ -240,10 +248,12 @@ static RegisterPrimOp primop_tecnixMemoize({
       Under Tecnix source tracking, the evaluation of `f k` records the
       sources it reads, and every tracked call that reuses the result records
       them too, so each target depends on everything the shared value was
-      computed from. Tracked and untracked calls keep separate results, each
-      computed once: neither kind of call is ever handed the other's, since
-      an untracked result has no sources recorded, and forcing parts of a
-      tracked result outside tracking would lose theirs.
+      computed from. The sources a caller read to compute `k` count for that
+      caller only; they are never stored with the shared result. Tracked and
+      untracked calls keep separate results, each computed once: neither kind
+      of call is ever handed the other's, since an untracked result has no
+      sources recorded, and forcing parts of a tracked result outside tracking
+      would lose theirs.
 
       If computing `f k` calls `g k` again, that call throws an error that
       `builtins.tryEval` can catch.
