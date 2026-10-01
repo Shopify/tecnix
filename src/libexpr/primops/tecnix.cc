@@ -174,9 +174,10 @@ static void prim_tecnixMemoize(EvalState & state, const PosIdx pos, Value ** arg
 
     for (auto & inProgress : tecnixMemoizeInProgress)
         if (EvalTecnixMemoizeKey::Equal{}(inProgress, lookup))
-            // AssertionError, so builtins.tryEval catches a circular zone
-            // dependency the way it catches a missing zone.
-            state.error<AssertionError>("builtins.tecnixMemoize: circular evaluation detected for key '%s'", key)
+            // A value that needs itself: fail as infinite recursion does, which
+            // builtins.tryEval cannot catch.
+            state
+                .error<InfiniteRecursionError>("builtins.tecnixMemoize: circular evaluation detected for key '%s'", key)
                 .atPos(pos)
                 .debugThrow();
 
@@ -255,8 +256,8 @@ static RegisterPrimOp primop_tecnixMemoize({
       sources recorded, and forcing parts of a tracked result outside tracking
       would lose theirs.
 
-      If computing `f k` calls `g k` again, that call throws an error that
-      `builtins.tryEval` can catch.
+      If computing `f k` calls `g k` again, evaluation fails as it does for
+      infinite recursion, and `builtins.tryEval` cannot catch the error.
 
       Example:
 

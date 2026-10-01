@@ -41,9 +41,9 @@ memo_eval 'let f = x: builtins.trace "computing ${x}" (x + "!"); g1 = builtins.t
 expectStderr 1 nix eval --extra-experimental-features 'nix-command' --expr 'builtins.tecnixMemoize (x: x) 1' \
     | grepQuiet "expected a string but found an integer"
 
-# A call that needs its own result throws, catchably, instead of recursing forever.
-out=$(memo_eval 'let g = builtins.tecnixMemoize (k: g k); in if (builtins.tryEval (g "a")).success then "no-throw" else "threw"')
-[[ "$out" == "threw" ]] || fail "a circular call should throw a catchable error, got '$out'"
+# A call that needs its own result fails like infinite recursion: tryEval can't catch it.
+expectStderr 1 nix eval --extra-experimental-features 'nix-command' --expr 'let g = builtins.tecnixMemoize (k: g k); in builtins.tryEval (g "a")' \
+    | grepQuiet "circular evaluation detected"
 
 # Re-entering for a different key is not a cycle.
 out=$(memo_eval 'let g = builtins.tecnixMemoize (k: if k == "root" then g "child" else k + "-val"); in g "root"')
