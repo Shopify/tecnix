@@ -1180,27 +1180,50 @@ struct GitInputScheme : InputScheme
                     submodule.branch,
                     submoduleRev.gitRev(),
                     resolved);
-                fetchers::Attrs attrs;
-                attrs.insert_or_assign("type", "git");
-                attrs.insert_or_assign("url", resolved);
-                if (submodule.branch != "") {
-                    // A special value of . is used to indicate that the name of the branch in the submodule
-                    // should be the same name as the current branch in the current repository.
-                    // https://git-scm.com/docs/gitmodules
-                    if (submodule.branch == ".") {
-                        attrs.insert_or_assign("ref", ref);
-                    } else {
-                        attrs.insert_or_assign("ref", submodule.branch);
+                auto fetchSubmodule = [&](bool useShallow) {
+                    fetchers::Attrs attrs;
+                    attrs.insert_or_assign("type", "git");
+                    attrs.insert_or_assign("url", resolved);
+                    if (submodule.branch != "") {
+                        // A special value of . is used to indicate that the name of the branch in the submodule
+                        // should be the same name as the current branch in the current repository.
+                        // https://git-scm.com/docs/gitmodules
+                        if (submodule.branch == ".") {
+                            attrs.insert_or_assign("ref", ref);
+                        } else {
+                            attrs.insert_or_assign("ref", submodule.branch);
+                        }
                     }
-                }
-                attrs.insert_or_assign("rev", submoduleRev.gitRev());
-                attrs.insert_or_assign("exportIgnore", Explicit<bool>{options.exportIgnore});
-                attrs.insert_or_assign("submodules", Explicit<bool>{true});
-                attrs.insert_or_assign("lfs", Explicit<bool>{options.smudgeLfs});
-                attrs.insert_or_assign("allRefs", Explicit<bool>{true});
-                auto submoduleInput = fetchers::Input::fromAttrs(settings, std::move(attrs));
-                auto [submoduleAccessor, submoduleInput2] = submoduleInput.getAccessor(settings, store);
-                submoduleAccessor->setPathDisplay("«" + submoduleInput.to_string(true) + "»");
+                    attrs.insert_or_assign("rev", submoduleRev.gitRev());
+                    attrs.insert_or_assign("exportIgnore", Explicit<bool>{options.exportIgnore});
+                    attrs.insert_or_assign("submodules", Explicit<bool>{true});
+                    attrs.insert_or_assign("lfs", Explicit<bool>{options.smudgeLfs});
+                    if (useShallow)
+                        attrs.insert_or_assign("shallow", Explicit<bool>{true});
+                    else
+                        attrs.insert_or_assign("allRefs", Explicit<bool>{true});
+
+                    auto submoduleInput = fetchers::Input::fromAttrs(settings, std::move(attrs));
+                    auto [submoduleAccessor, submoduleInput2] = submoduleInput.getAccessor(settings, store);
+                    submoduleAccessor->setPathDisplay("«" + submoduleInput.to_string(true) + "»");
+                    return submoduleAccessor;
+                };
+
+                auto submoduleAccessor = [&]() {
+                    if (shallow) {
+                        try {
+                            return fetchSubmodule(true);
+                        } catch (Error & e) {
+                            debug(
+                                "shallow fetch of Git submodule '%s' from '%s' failed: %s; falling back to full fetch",
+                                submodule.path,
+                                resolved,
+                                e.what());
+                        }
+                    }
+                    return fetchSubmodule(false);
+                }();
+
                 mounts.insert_or_assign(submodule.path, submoduleAccessor);
             }
 
