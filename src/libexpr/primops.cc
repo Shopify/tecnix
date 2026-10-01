@@ -1833,15 +1833,30 @@ static void derivationStrictInternal(
             for (auto & wi : worldInputs) {
                 j.push_back({{"path", wi.path}, {"oid", wi.oid}});
             }
-            drv.env["__worldInputs"] = j.dump();
 
-            // Add "world-inputs" to requiredSystemFeatures so schedulers
-            // never send such drvs to builders without a provider.
-            std::string & rsf = drv.env["requiredSystemFeatures"];
-            if (rsf.find("world-inputs") == std::string::npos) {
-                if (!rsf.empty())
-                    rsf += " ";
-                rsf += "world-inputs";
+            /* Record them where `derivationOptionsFromStructuredAttrs` reads
+               them: in the structured attrs when the derivation has them
+               (`env` is then ignored, by the builder too), in `env`
+               otherwise. The same goes for the "world-inputs" system
+               feature, which keeps schedulers from sending such drvs to
+               builders without a provider. */
+            if (drv.structuredAttrs) {
+                auto & attrs = drv.structuredAttrs->structuredAttrs;
+                attrs.insert_or_assign("__worldInputs", std::move(j));
+                auto & rsf = attrs["requiredSystemFeatures"];
+                if (rsf.is_null())
+                    rsf = nlohmann::json::array();
+                // Anything but a list is rejected when the options are read.
+                if (rsf.is_array() && std::find(rsf.begin(), rsf.end(), "world-inputs") == rsf.end())
+                    rsf.push_back("world-inputs");
+            } else {
+                drv.env["__worldInputs"] = j.dump();
+                std::string & rsf = drv.env["requiredSystemFeatures"];
+                if (rsf.find("world-inputs") == std::string::npos) {
+                    if (!rsf.empty())
+                        rsf += " ";
+                    rsf += "world-inputs";
+                }
             }
         }
     }

@@ -62,6 +62,28 @@ if grep -q "areas-tools-dev" "$DRV_PATH"; then
 fi
 echo "PASS: no zone source store path in drv"
 
+# -- Test 2b: with __structuredAttrs, the World input and the feature are in the
+#    structured attrs, where the builder and schedulers read them (env is ignored) --
+saExpr='
+  (derivation {
+    name = "wi-sa-test";
+    builder = "/bin/sh";
+    system = builtins.currentSystem;
+    __structuredAttrs = true;
+    src = builtins.tectonixWorldInput "//areas/tools/dev";
+    requiredSystemFeatures = [ "kvm" ];
+  })
+'
+SA_DRV=$(nix eval --raw "${evalOpts[@]}" --expr "($saExpr).drvPath")
+SA=$(nix derivation show "${evalOpts[@]}" "$SA_DRV" | jq -c '[.. | objects | select(has("structuredAttrs"))][0]')
+jq -e --arg oid "$TREE_OID" '.structuredAttrs.__worldInputs == [{path: "//areas/tools/dev", oid: $oid}]' <<< "$SA" > /dev/null \
+    || fail "a structured-attrs derivation should declare its World input in the structured attrs: $SA"
+jq -e '.structuredAttrs.requiredSystemFeatures == ["kvm", "world-inputs"]' <<< "$SA" > /dev/null \
+    || fail "a structured-attrs derivation should require world-inputs in the structured attrs: $SA"
+jq -e '.env | (has("__worldInputs") or has("requiredSystemFeatures")) | not' <<< "$SA" > /dev/null \
+    || fail "a structured-attrs derivation should not record World inputs in env, where nothing reads them: $SA"
+echo "PASS: structured attrs carry __worldInputs and world-inputs"
+
 # -- Test 3: drvPath changes when oid changes --
 echo "new content" > "$TEST_WORLD/areas/tools/dev/NEW_FILE.txt"
 git -C "$TEST_WORLD" add -A && git -C "$TEST_WORLD" commit -m "Add file" --quiet
