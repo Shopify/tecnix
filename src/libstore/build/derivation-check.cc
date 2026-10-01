@@ -12,14 +12,15 @@ void checkOutputs(
     const StorePath & drvPath,
     const decltype(Derivation::outputs) & drvOutputs,
     const decltype(DerivationOptions<StorePath>::outputChecks) & outputChecks,
-    const std::map<std::string, ValidPathInfo> & outputs,
+    const std::map<std::string, ValidPathInfo> & newlyBuiltOutputs,
+    const std::map<std::string, StorePath> & alreadyRegisteredOutputs,
     Activity & act)
 {
     std::map<StorePath, const ValidPathInfo &> outputsByPath;
-    for (auto & output : outputs)
+    for (auto & output : newlyBuiltOutputs)
         outputsByPath.emplace(output.second.path, output.second);
 
-    for (auto & pair : outputs) {
+    for (auto & pair : newlyBuiltOutputs) {
         // We can't use auto destructuring here because
         // clang-tidy seems to complain about it.
         const std::string & outputName = pair.first;
@@ -123,11 +124,13 @@ void checkOutputs(
                         overloaded{
                             [&](const StorePath & path) { spec.insert(path); },
                             [&](const OutputName & refOutputName) {
-                                if (auto output = get(outputs, refOutputName))
+                                if (auto output = get(newlyBuiltOutputs, refOutputName))
                                     spec.insert(output->path);
+                                else if (auto storePath = get(alreadyRegisteredOutputs, refOutputName))
+                                    spec.insert(*storePath);
                                 else {
                                     std::string outputsListing =
-                                        concatMapStringsSep(", ", outputs, [](auto & o) { return o.first; });
+                                        concatMapStringsSep(", ", newlyBuiltOutputs, [](auto & o) { return o.first; });
                                     throw BuildError(
                                         BuildResult::Failure::OutputRejected,
                                         "derivation '%s' output check for '%s' contains output name '%s',"

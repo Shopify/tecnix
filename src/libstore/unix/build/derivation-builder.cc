@@ -1665,6 +1665,8 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 
     OutputPathMap finalOutputs;
 
+    std::map<std::string, StorePath> alreadyRegisteredOutputs;
+
     for (auto & outputName : sortedOutputNames) {
         auto output = get(drv.outputs, outputName);
         auto scratchPath = get(scratchOutputs, outputName);
@@ -1695,6 +1697,7 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
             overloaded{
                 [&](const AlreadyRegistered & skippedFinalPath) -> std::optional<StorePathSet> {
                     finish(skippedFinalPath.path);
+                    alreadyRegisteredOutputs.insert_or_assign(outputName, skippedFinalPath.path);
                     return std::nullopt;
                 },
                 [&](const PerhapsNeedToRegister & r) -> std::optional<StorePathSet> { return r.refs; },
@@ -2041,7 +2044,7 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 
     /* Apply output checks. This includes checking of the wanted vs got
        hash of fixed-outputs. */
-    checkOutputs(store, drvPath, drv.outputs, drvOptions.outputChecks, infos, *act);
+    checkOutputs(store, drvPath, drv.outputs, drvOptions.outputChecks, infos, alreadyRegisteredOutputs, *act);
 
     if (buildMode == bmCheck) {
         return {};
