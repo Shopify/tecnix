@@ -232,10 +232,10 @@ FileTransferRequest HttpBinaryCacheStore::makeRequest(std::string_view path)
        (note the query param) and that gets passed here. */
     auto result = parseURLRelative(path, cacheUriWithTrailingSlash);
 
-    /* For S3 URLs, preserve query parameters from the base URL when the
+    /* For S3/GCS URLs, preserve query parameters from the base URL when the
        relative path doesn't have its own query parameters. This is needed
-       to preserve S3-specific parameters like endpoint and region. */
-    if (config->cacheUri.scheme == "s3" && result.query.empty()) {
+       to preserve scheme-specific parameters like endpoint and region. */
+    if ((config->cacheUri.scheme == "s3" || config->cacheUri.scheme == "gs") && result.query.empty()) {
         result.query = config->cacheUri.query;
     }
 
