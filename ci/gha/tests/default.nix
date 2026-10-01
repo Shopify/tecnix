@@ -76,12 +76,17 @@ rec {
   */
   topLevel = {
     installerScriptForGHA = hydraJobs.installerScriptForGHA.${system};
-    nixpkgsLibTests = hydraJobs.tests.nixpkgsLibTests.${system};
-    nixpkgsLibTestsLazy = hydraJobs.tests.nixpkgsLibTestsLazy.${system};
     rl-next = pkgs.buildPackages.runCommand "test-rl-next-release-notes" { } ''
       LANG=C.UTF-8 ${pkgs.changelog-d}/bin/changelog-d ${../../../doc/manual/rl-next} >$out
     '';
-    repl-completion = pkgs.callPackage ../../../tests/repl-completion.nix { inherit (packages') nix; };
+    # The package's build gate runs nix-store-tests, which `componentTests` builds with
+    # benchmarks (see nixComponentsInstrumented). Use that variant here too, or this
+    # check builds and runs a second copy of nix-store-tests.
+    repl-completion = pkgs.callPackage ../../../tests/repl-completion.nix {
+      nix = packages'.nix.override {
+        nix-store-tests = nixComponents.nix-store-tests.override { withBenchmarks = true; };
+      };
+    };
 
     lazyTrees = nixComponents.nix-functional-tests.override {
       pname = "nix-lazy-trees-tests";
@@ -110,6 +115,14 @@ rec {
             # Same for all components; nix-util is an arbitrary pick
             (nix.appendPatches [ pkgs.emptyFile ]).libs.nix-util.src;
         };
+  }
+  # nixpkgs' lib tests run against nixpkgs' own `nixVersions.stable`, built without
+  # aws-sdk-cpp by nixpkgs' `lib/tests/nix-for-tests.nix`. cache.nixos.org only has that
+  # variant for Linux, so on Darwin CI spent about 14 minutes building and testing that
+  # Nix from source.
+  // lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
+    nixpkgsLibTests = hydraJobs.tests.nixpkgsLibTests.${system};
+    nixpkgsLibTestsLazy = hydraJobs.tests.nixpkgsLibTestsLazy.${system};
   };
 
   disable =
