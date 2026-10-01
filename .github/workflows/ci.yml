@@ -33,7 +33,6 @@ jobs:
         extra_nix_config:
           experimental-features = nix-command flakes
         github_token: ${{ github.token }}
-        use_cache: false
     - run: nix flake show --all-systems --json
 
   pre-commit-checks:
@@ -59,8 +58,15 @@ jobs:
         run: |
           exit 1
 
+  # Pull requests run the component tests (unit + functional) and the cheap flake
+  # checks. VM tests, the remaining flake checks, the installer tarball, the
+  # installer tests and flake regressions run on pushes to main, merge queue runs
+  # and manual dispatches. On pull requests they run as optional `extended / ...`
+  # jobs in extended.yml, which are not required status checks.
+  #
+  # The test legs do not wait for the basic checks: a lint failure is reported by
+  # `aggregate basic checks` without holding up the (much longer) test legs.
   tests:
-    needs: basic-checks
     strategy:
       fail-fast: false
       matrix:
@@ -68,24 +74,33 @@ jobs:
           - scenario: on ubuntu
             runs-on: ubuntu-24.04
             os: linux
-            instrumented: false
+            sanitizers: false
             primary: true
             stdenv: stdenv
+            cache: ubuntu-gcc
           - scenario: on macos
             runs-on: macos-14
             os: darwin
-            instrumented: false
+            sanitizers: false
             primary: true
             stdenv: stdenv
+            cache: macos
+          # The name is a required status check, so it stays although coverage
+          # is collected in the `coverage` job.
           - scenario: on ubuntu (with sanitizers / coverage)
             runs-on: ubuntu-24.04
             os: linux
-            instrumented: true
+            sanitizers: true
             primary: false
             stdenv: clangStdenv
+            cache: ubuntu-clang
     name: tests ${{ matrix.scenario }}
     runs-on: ${{ matrix.runs-on }}
-    timeout-minutes: 60
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # Read the catfood installer's run, and delete superseded Nix store caches.
+      actions: write
     steps:
     - uses: actions/checkout@v7
       with:
@@ -100,42 +115,114 @@ jobs:
     # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces
     - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       if: matrix.os == 'linux'
+    # The Nix store is cached as one snapshot per variant in the GitHub Actions
+    # cache. Most of a run is rebuilding third-party dependencies that Tecnix
+    # overrides (wasmtime, boost, libgit2, ...); they only change with flake.lock
+    # and packaging/dependencies.nix, so the key starts with a hash of those.
+    # Restoring the newest snapshot with that prefix also brings in the previous
+    # run's component builds. A pull request restores its own latest snapshot,
+    # then the base branch's. Failures here only cost the cache.
+    - name: Compute the Nix store cache key
+      id: nix-cache-key
+      run: echo "prefix=nix-store-${{ matrix.cache }}-${{ hashFiles('flake.lock', 'packaging/dependencies.nix') }}-" >> "$GITHUB_OUTPUT"
+    - name: Restore the Nix store
+      id: nix-cache
+      uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      continue-on-error: true
+      timeout-minutes: 20
+      with:
+        primary-key: ${{ steps.nix-cache-key.outputs.prefix }}${{ github.sha }}
+        restore-prefixes-first-match: ${{ steps.nix-cache-key.outputs.prefix }}
     - name: Run component tests
       run: |
-        nix build --file ci/gha/tests/wrapper.nix componentTests -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
+        nix build --file ci/gha/tests/wrapper.nix componentTests -L --no-link \
+          --arg withSanitizers ${{ matrix.sanitizers }} \
+          --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
+    # Saved before the heavy later steps (VM tests, flake checks), so the
+    # snapshot holds the dependencies and components, not their closures. Not
+    # saved from forks or merge queue refs, to keep the 10 GB repository quota
+    # for main and for pull requests of this repository.
+    - name: Save the Nix store
+      if: ${{ !cancelled() && github.event_name != 'merge_group' && !github.event.pull_request.head.repo.fork && steps.nix-cache.outputs.hit-primary-key != 'true' }}
+      uses: nix-community/cache-nix-action/save@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      continue-on-error: true
+      timeout-minutes: 20
+      with:
+        primary-key: ${{ steps.nix-cache-key.outputs.prefix }}${{ github.sha }}
+        purge: true
+        purge-prefixes: nix-store-${{ matrix.cache }}-
+        purge-created: 0
+        purge-primary-key: never
+    # Through the flake, whose source is the git-tracked files: packaging-overriding
+    # compares the source tree with the patched one, and the workspace also
+    # holds untracked files (.git, the catfood installer download).
+    - name: Run the cheap flake checks
+      run: |
+        system=$(nix eval --raw --impure --expr builtins.currentSystem)
+        nix build -L --no-link \
+          ".#checks.$system.rl-next" \
+          ".#checks.$system.packaging-overriding" \
+          ".#checks.$system.repl-completion"
+      if: ${{ matrix.primary && github.event_name == 'pull_request' }}
     - name: Run VM tests
       run: |
         nix build --file ci/gha/tests/wrapper.nix vmTests -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
+          --arg withSanitizers ${{ matrix.sanitizers }} \
+          --arg withCoverage false \
           --argstr stdenv "${{ matrix.stdenv }}"
-      if: ${{ matrix.os == 'linux' }}
+      if: ${{ matrix.os == 'linux' && github.event_name != 'pull_request' }}
     - name: Run flake checks and prepare the installer tarball
       run: |
         ci/gha/tests/build-checks
         ci/gha/tests/prepare-installer-for-github-actions
-      if: ${{ matrix.primary }}
-    - name: Collect code coverage
-      run: |
-        nix build --file ci/gha/tests/wrapper.nix codeCoverage.coverageReports -L \
-          --arg withInstrumentation ${{ matrix.instrumented }} \
-          --argstr stdenv "${{ matrix.stdenv }}" \
-          --out-link coverage-reports
-        cat coverage-reports/index.txt >> $GITHUB_STEP_SUMMARY
-      if: ${{ matrix.instrumented }}
-    - name: Upload coverage reports
-      uses: actions/upload-artifact@v7
-      with:
-        name: coverage-reports
-        path: coverage-reports/
-      if: ${{ matrix.instrumented }}
+      if: ${{ matrix.primary && github.event_name != 'pull_request' }}
     - name: Upload installer tarball
       uses: actions/upload-artifact@v7
       with:
         name: installer-${{matrix.os}}
         path: out/*
-      if: ${{ matrix.primary }}
+      if: ${{ matrix.primary && github.event_name != 'pull_request' }}
+
+  # Coverage needs sanitizers and coverage instrumentation together and a build of
+  # every component with it, so it has its own job, and runs when it is not on the
+  # critical path of a pull request. It restores the sanitizer leg's Nix store
+  # snapshot for the dependencies, which are not instrumented.
+  coverage:
+    name: code coverage
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - uses: ./.github/actions/install-nix-action
+      with:
+        github_token: ${{ github.token }}
+        catfood: ${{ github.event_name == 'workflow_dispatch' && inputs.catfood || github.event_name != 'workflow_dispatch' }}
+        extra_nix_config: "sandbox = true"
+    - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+    - name: Restore the Nix store
+      uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      continue-on-error: true
+      timeout-minutes: 20
+      with:
+        primary-key: nix-store-ubuntu-clang-${{ hashFiles('flake.lock', 'packaging/dependencies.nix') }}-${{ github.sha }}
+        restore-prefixes-first-match: nix-store-ubuntu-clang-${{ hashFiles('flake.lock', 'packaging/dependencies.nix') }}-
+        save: false
+    - name: Collect code coverage
+      run: |
+        nix build --file ci/gha/tests/wrapper.nix codeCoverage.coverageReports -L \
+          --arg withInstrumentation true \
+          --argstr stdenv clangStdenv \
+          --out-link coverage-reports
+        cat coverage-reports/index.txt >> $GITHUB_STEP_SUMMARY
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v7
+      with:
+        name: coverage-reports
+        path: coverage-reports/
 
   installer_test:
     needs: [tests]
@@ -161,41 +248,57 @@ jobs:
             rust-installer: true
     name: installer test ${{ matrix.scenario }}
     runs-on: ${{ matrix.runs-on }}
+    # Pull requests don't build the installer tarball, so every step is skipped
+    # there. The condition is on the steps rather than the job: a skipped matrix
+    # job reports under the unexpanded name `installer test ${{ matrix.scenario }}`,
+    # so the required `installer test on ...` checks would never report.
     steps:
     - uses: actions/checkout@v7
+      if: github.event_name != 'pull_request'
     - name: Download installer tarball
+      if: github.event_name != 'pull_request'
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         name: installer-${{matrix.os}}
         path: out
     - name: Looking up the installer tarball URL
+      if: github.event_name != 'pull_request'
       id: installer-tarball-url
       run: echo "installer-url=file://$GITHUB_WORKSPACE/out" >> "$GITHUB_OUTPUT"
     - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      if: ${{ !matrix.rust-installer }}
+      if: ${{ github.event_name != 'pull_request' && (!matrix.rust-installer) }}
       with:
         install_url: ${{ format('{0}/install', steps.installer-tarball-url.outputs.installer-url) }}
         install_options: ${{ format('--tarball-url-prefix {0}', steps.installer-tarball-url.outputs.installer-url) }}
     - name: Run rust installer
-      if: ${{ matrix.rust-installer }}
+      if: ${{ github.event_name != 'pull_request' && (matrix.rust-installer) }}
       run: |
         chmod +x out/nix-installer
         ./out/nix-installer install --no-confirm
       env:
         RUST_BACKTRACE: full
     - run: sudo apt install fish zsh
-      if: matrix.os == 'linux'
+      if: ${{ github.event_name != 'pull_request' && (matrix.os == 'linux') }}
     - run: brew install fish
-      if: matrix.os == 'darwin'
+      if: ${{ github.event_name != 'pull_request' && (matrix.os == 'darwin') }}
     - run: exec bash -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec sh -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec zsh -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec fish -c "nix-instantiate -E 'builtins.currentTime' --eval"
+      if: github.event_name != 'pull_request'
     - run: exec bash -c "nix-channel --add https://releases.nixos.org/nixos/unstable/nixos-23.05pre466020.60c1d71f2ba nixpkgs"
+      if: github.event_name != 'pull_request'
     - run: exec bash -c "nix-channel --update && nix-env -iA nixpkgs.hello && hello"
+      if: github.event_name != 'pull_request'
 
   flake_regressions:
     needs: tests
+    # Not a matrix job, so a job-level condition reports the required check as
+    # skipped, which satisfies it.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout nix
@@ -225,25 +328,3 @@ jobs:
           install_options: ${{ format('--tarball-url-prefix {0}', steps.installer-tarball-url.outputs.installer-url) }}
       - name: Run flake regressions tests
         run: MAX_FLAKES=25 flake-regressions/eval-all.sh
-
-  profile_build:
-    needs: tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    if: >-
-      github.event_name == 'push' &&
-      github.ref_name == 'main'
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-    - uses: ./.github/actions/install-nix-action
-      with:
-        github_token: ${{ github.token }}
-        catfood: ${{ github.event_name == 'workflow_dispatch' && inputs.catfood || github.event_name != 'workflow_dispatch' }}
-        extra_nix_config: |
-          experimental-features = flakes nix-command ca-derivations impure-derivations
-          max-jobs = 1
-    - run: |
-        nix build -L --file ./ci/gha/profile-build buildTimeReport --out-link build-time-report.md
-        cat build-time-report.md >> $GITHUB_STEP_SUMMARY
