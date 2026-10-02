@@ -17,6 +17,12 @@ const std::string & getManifestContent(const EvalState & state);
 const nlohmann::json & getManifestJson(const EvalState & state);
 StorePath getLegacyTectonixZoneStorePath(EvalState & state, std::string_view zonePath);
 ref<SourceAccessor> getTecnixRepoAccessor(EvalState & state);
+/**
+ * `.meta/manifest.json` as the Tecnix repo accessor serves it (the view that
+ * also fingerprints Tecnix dependencies), parsed once per evaluation. The
+ * read records nothing: callers record the part of the manifest they observe.
+ */
+const nlohmann::json & getTecnixManifestJson(EvalState & state);
 
 /** Resolve a checkout's HEAD to a commit SHA (throws if it has none). */
 std::string resolveCheckoutHeadRev(const std::string & checkoutPath);

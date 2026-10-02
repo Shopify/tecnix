@@ -16,6 +16,7 @@
 #include "nix/expr/tecnix/eval-cache.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
 #include "nix/store/store-api.hh"
+#include "nix/util/finally.hh"
 #include "nix/util/strings.hh"
 #include "nix/util/util.hh"
 
@@ -119,6 +120,157 @@ static RegisterPrimOp primop_tecnixInternalSourceDepsList({
       `tecnixInternalSourceDepsScope`.
     )",
     .impl = prim_tecnixInternalSourceDepsList,
+});
+
+// ============================================================================
+// builtins.tecnixMemoize f k
+// `builtins.tecnixMemoize f` is `f`, memoized: calling it with a string `k`
+// returns `f k`, evaluated at most once per EvalState for that `f` and `k`
+// (once under tracking, once without). Under tracking, that evaluation
+// records its source accesses into a label stored alongside the value; every
+// later tracked consumer records that label as a child of its own frame (and
+// inherits the value's label through the value-copy hooks), so all consumers
+// share the same tracked dependencies without re-evaluating `f k`.
+// ============================================================================
+
+/* Calls whose `f k` evaluation is in progress on this thread. Re-entering one
+   (zone A loading itself transitively) can only be a genuine cycle; the guard
+   turns it into a catchable error instead of unbounded recursion. The key
+   views borrow from the calls' own arguments, which outlive their entries. */
+static thread_local std::vector<EvalTecnixMemoizeKey::Lookup> tecnixMemoizeInProgress;
+
+static void prim_tecnixMemoize(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto * function = args[0];
+    auto key = state.forceStringNoCtx(
+        *args[1], pos, "while evaluating the key passed to a function memoized by builtins.tecnixMemoize");
+    EvalTecnixMemoizeKey::Lookup lookup{function, key};
+
+    auto * trackingCtx = currentTecnixThreadState.trackingContext;
+
+    /* A result computed outside tracking carries no label, and the lazy parts
+       of a tracked result must only ever be forced under tracking, so tracked
+       and untracked calls never share a table: a tracked call reusing an
+       untracked result would record none of its sources, and an untracked call
+       forcing part of a tracked result would leave that part unlabelled for
+       every later tracked consumer. Untracked results are still memoized, in
+       their own table: `f` is typically recursive (zone A loads zone B), so
+       building them afresh would re-walk everything they share. */
+    auto & memoCache =
+        trackingCtx ? *state.tecnixEvalData().trackedTecnixMemoizeCache : *state.tecnixEvalData().tecnixMemoizeCache;
+
+    Value * result = nullptr;
+    auto sourceDeps = emptyEvalSourceAccessSetId;
+    if (memoCache.cvisit(lookup, [&](const auto & entry) {
+            result = *entry.second.value;
+            sourceDeps = entry.second.sourceDeps;
+        })) {
+        // Replay into this consumer the sources the entry's evaluation read.
+        if (trackingCtx)
+            recordTrackedSourceAccessSetDependency(*trackingCtx, sourceDeps);
+        v = *result;
+        return;
+    }
+
+    for (auto & inProgress : tecnixMemoizeInProgress)
+        if (EvalTecnixMemoizeKey::Equal{}(inProgress, lookup))
+            // A value that needs itself: fail as infinite recursion does, which
+            // builtins.tryEval cannot catch.
+            state
+                .error<InfiniteRecursionError>("builtins.tecnixMemoize: circular evaluation detected for key '%s'", key)
+                .atPos(pos)
+                .debugThrow();
+
+    tecnixMemoizeInProgress.push_back(lookup);
+    Finally popInProgress([&]() { tecnixMemoizeInProgress.pop_back(); });
+
+    // Evaluate `f k` outside any map bucket lock, so re-entrant misses (zone A
+    // loading zone B) can insert their own entries without deadlock. Under
+    // tracking, scope the evaluation so its accesses intern into one reusable
+    // label that every later consumer records.
+    //
+    // `f` gets a fresh copy of the key, not `args[1]`: that value carries the
+    // label of however this caller computed `k` (already recorded for this
+    // caller by the force above), and `f` forcing it inside the scope would
+    // store that label with the shared entry and replay it into every later
+    // caller. The key is a string without context, so the copy is equal.
+    auto * keyArg = state.allocValue();
+    keyArg->mkString(key, state.mem);
+    result = state.allocValue();
+    if (trackingCtx) {
+        TrackedSourceDepsScope scope(*trackingCtx);
+        state.callFunction(*function, *keyArg, *result, pos);
+        state.forceValue(*result, pos);
+        sourceDeps = scope.finish(result);
+    } else {
+        state.callFunction(*function, *keyArg, *result, pos);
+        state.forceValue(*result, pos);
+    }
+
+    // Insert, but if a parallel evaluation raced ahead, reuse its entry so the
+    // table keeps a single shared value.
+    memoCache.try_emplace_and_cvisit(
+        EvalTecnixMemoizeKey{function, std::string(key)},
+        EvalTecnixMemoizeEntry{},
+        [&](auto & entry) {
+            entry.second.function = RootValue(function);
+            entry.second.value = RootValue(result);
+            entry.second.sourceDeps = sourceDeps;
+        },
+        [&](const auto & entry) {
+            result = *entry.second.value;
+            sourceDeps = entry.second.sourceDeps;
+        });
+
+    if (trackingCtx)
+        recordTrackedSourceAccessSetDependency(*trackingCtx, sourceDeps);
+    v = *result;
+}
+
+static RegisterPrimOp primop_tecnixMemoize({
+    .name = "__tecnixMemoize",
+    .args = {"f", "k"},
+    .doc = R"(
+      Memoize the function `f`: `builtins.tecnixMemoize f` is a function `g`
+      such that `g k` is always `f k`, but each result is computed once and
+      then shared. Bind `g` once and call it wherever `f k` is needed.
+
+      Results are keyed by `f` and `k`. `f` is identified by its value (the
+      same binding), not by what it computes: every `g` made from the same
+      value of `f` shares its results, and a different function (another
+      system's loader, say) never sees them, even for equal keys. `k` must be
+      a string without string context; two keys are equal when they are the
+      same string. `f` is called with a string equal to `k`.
+
+      Results live as long as the evaluator (one `EvalState`) and are never
+      freed. A call whose `f k` throws stores nothing, so the next call
+      evaluates `f k` again.
+
+      Under Tecnix source tracking, the evaluation of `f k` records the
+      sources it reads, and every tracked call that reuses the result records
+      them too, so each target depends on everything the shared value was
+      computed from. The sources a caller read to compute `k` count for that
+      caller only; they are never stored with the shared result. Tracked and
+      untracked calls keep separate results, each computed once: neither kind
+      of call is ever handed the other's, since an untracked result has no
+      sources recorded, and forcing parts of a tracked result outside tracking
+      would lose theirs.
+
+      If computing `f k` calls `g k` again, evaluation fails as it does for
+      infinite recursion, and `builtins.tryEval` cannot catch the error.
+
+      Example:
+
+      ```nix
+      let
+        zone = builtins.tecnixMemoize (zonePath: import ./load-zone.nix zonePath);
+      in
+        [ (zone "//areas/tools/dev") (zone "//areas/tools/dev") ]
+      ```
+
+      evaluates `import ./load-zone.nix "//areas/tools/dev"` once.
+    )",
+    .impl = prim_tecnixMemoize,
 });
 
 // ============================================================================

@@ -5,6 +5,7 @@
 #include "nix/expr/root-value.hh"
 #include "nix/expr/tecnix/access-set-graph.hh"
 
+#include <boost/container_hash/hash.hpp>
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <nlohmann/json.hpp>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace nix {
@@ -46,6 +48,74 @@ struct EvalTecnixModuleCacheEntry
 };
 
 using EvalTecnixModuleCache = boost::concurrent_flat_map<std::string, EvalTecnixModuleCacheEntry>;
+
+/**
+ * A `builtins.tecnixMemoize` table key: the memoized function, identified by
+ * the address of its value, and the key it was called with. `Lookup` is the
+ * non-owning form, so a hit does not copy the key.
+ */
+struct EvalTecnixMemoizeKey
+{
+    const Value * function;
+    std::string key;
+
+    struct Lookup
+    {
+        const Value * function;
+        std::string_view key;
+    };
+
+    struct Hash
+    {
+        using is_transparent = void;
+
+        std::size_t operator()(const Lookup & k) const noexcept
+        {
+            std::size_t seed = 0;
+            boost::hash_combine(seed, k.function);
+            boost::hash_combine(seed, k.key);
+            return seed;
+        }
+
+        std::size_t operator()(const EvalTecnixMemoizeKey & k) const noexcept
+        {
+            return (*this)(Lookup{k.function, k.key});
+        }
+    };
+
+    struct Equal
+    {
+        using is_transparent = void;
+
+        bool operator()(const auto & a, const auto & b) const noexcept
+        {
+            return a.function == b.function && a.key == b.key;
+        }
+    };
+};
+
+/**
+ * A memoized `builtins.tecnixMemoize` result: the shared finished value of
+ * `f k` plus, in the tracked table, the source-access-set label recorded the
+ * one time it was evaluated. Every later tracked consumer records
+ * `sourceDeps` as a child of its own frame (and inherits the value's label
+ * through the normal value-copy hooks), so the shared value's tracked
+ * dependencies propagate to all consumers without re-evaluating `f k`.
+ */
+struct EvalTecnixMemoizeEntry
+{
+    /** Roots `f`, so that while this entry exists no other value can be
+        allocated at `f`'s address and inherit the entry. */
+    RootValue function;
+    RootValue value;
+    EvalSourceAccessSetId sourceDeps = emptyEvalSourceAccessSetId;
+};
+
+using EvalTecnixMemoizeCache = boost::concurrent_flat_map<
+    EvalTecnixMemoizeKey,
+    EvalTecnixMemoizeEntry,
+    EvalTecnixMemoizeKey::Hash,
+    EvalTecnixMemoizeKey::Equal>;
 
 struct EvalState::TecnixEvalData
 {
@@ -106,6 +176,11 @@ struct EvalState::TecnixEvalData
     mutable std::once_flag tecnixRepoAccessorFlag;
     mutable std::optional<ref<SourceAccessor>> tecnixRepoAccessor;
 
+    /** `.meta/manifest.json` as `tecnixRepoAccessor` serves it, parsed
+        (thread-safe via once_flag). */
+    mutable std::once_flag tecnixManifestJsonFlag;
+    mutable std::unique_ptr<nlohmann::json> tecnixManifestJson;
+
     /**
      * Virtual store path where the Tecnix repo-wide accessor is lazily mounted.
      * All repo subtree store paths are subpaths of this mount.
@@ -137,6 +212,20 @@ struct EvalState::TecnixEvalData
      * force in another context picks that label up via `forceValueTracked`.
      */
     const ref<EvalTecnixModuleCache> tecnixModuleCache = make_ref<EvalTecnixModuleCache>();
+
+    /**
+     * Memoization tables for `builtins.tecnixMemoize`, keyed by the memoized
+     * function and the key. Each entry holds the single shared result of
+     * `f k` and, in the tracked table, its recorded source-access-set label,
+     * so the (potentially expensive) `f k` evaluation runs once per EvalState
+     * and every tracked consumer inherits the same tracked dependencies.
+     * Tracked and untracked calls use separate tables, like
+     * `trackedFileEvalCache` and `fileEvalCache`, so a result never crosses
+     * between them. Misses evaluate outside any bucket lock, so re-entrant
+     * misses (zone A loading zone B) never deadlock.
+     */
+    const ref<EvalTecnixMemoizeCache> tecnixMemoizeCache = make_ref<EvalTecnixMemoizeCache>();
+    const ref<EvalTecnixMemoizeCache> trackedTecnixMemoizeCache = make_ref<EvalTecnixMemoizeCache>();
 
     /** Lazy-initialized set of zone IDs in sparse checkout (thread-safe via once_flag) */
     mutable std::once_flag tectonixSparseCheckoutRootsFlag;

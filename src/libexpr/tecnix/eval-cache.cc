@@ -29,6 +29,8 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <nlohmann/json.hpp>
+#include "nix/util/hash.hh"
 #include <vector>
 
 namespace nix {
@@ -47,6 +49,9 @@ struct DependencyFingerprintThreadLocalCache
 {
     uint64_t generation = 0;
     boost::unordered_flat_map<std::string, std::optional<std::string>, StringViewHash, std::equal_to<>> fingerprints;
+    /** Cached parsed manifest JSON for synthetic path fingerprinting (per-batch). */
+    std::optional<nlohmann::json> cachedManifest;
+    bool manifestChecked = false;
 
     DependencyFingerprintThreadLocalCache()
     {
@@ -1349,8 +1354,46 @@ static DependencyFingerprintThreadLocalCache & getDependencyFingerprintThreadCac
     if (threadCache.generation != cache.generation) {
         threadCache.generation = cache.generation;
         threadCache.fingerprints.clear();
+        // The parsed manifest belongs to the accessor this generation reads.
+        threadCache.cachedManifest.reset();
+        threadCache.manifestChecked = false;
     }
     return threadCache;
+}
+
+static std::optional<std::string> manifestPathFingerprint(const nlohmann::json & manifest, std::string_view suffix)
+{
+    constexpr std::string_view keysToken = "keys";
+    if (suffix == keysToken) {
+        // Fingerprint the sorted key list
+        std::vector<std::string> keys;
+        keys.reserve(manifest.size());
+        for (auto & [k, v] : manifest.items())
+            keys.push_back(k);
+        std::sort(keys.begin(), keys.end());
+        std::string concatenated;
+        for (auto & k : keys)
+            concatenated += k + "\n";
+        auto hash = hashString(HashAlgorithm::SHA256, concatenated);
+        return "manifest-keys:" + hash.to_string(HashFormat::Base64, false);
+    }
+    constexpr std::string_view idPrefix = "id/";
+    if (suffix.starts_with(idPrefix)) {
+        auto zoneId = suffix.substr(idPrefix.size());
+        for (auto & [path, value] : manifest.items()) {
+            if (value.contains("id") && value.at("id").is_string() && value.at("id").get<std::string>() == zoneId)
+                return "manifest-id:" + std::string(zoneId) + "=" + path;
+        }
+        return "manifest-id:" + std::string(zoneId) + "=absent";
+    }
+    // suffix is a zone path like "//zone/path"
+    auto it = manifest.find(std::string(suffix));
+    if (it == manifest.end())
+        return "manifest-entry:" + std::string(suffix) + "=absent";
+    // Entries are { "id": "W-xxxxxx" }; fingerprint from the entry JSON
+    auto entryStr = it->dump();
+    auto hash = hashString(HashAlgorithm::SHA256, entryStr);
+    return "manifest-entry:" + std::string(suffix) + "=" + hash.to_string(HashFormat::Base64, false);
 }
 
 static const std::optional<std::string> *
@@ -1362,7 +1405,26 @@ dependencyFingerprintCached(ref<SourceAccessor> accessor, std::string_view path,
     if (it != threadCache.fingerprints.end())
         return &it->second;
 
-    auto [_, fp] = accessor->getFingerprint(CanonPath(path));
+    std::optional<std::string> fp;
+    constexpr std::string_view manifestPrefix = ".meta/manifest.json#";
+    if (path.starts_with(manifestPrefix)) {
+        // Synthetic manifest path: fingerprint from manifest content, not the
+        // filesystem. This lets per-entry tracking avoid whole-file invalidation.
+        if (!threadCache.manifestChecked) {
+            threadCache.manifestChecked = true;
+            try {
+                auto content = accessor->readFile(CanonPath(".meta/manifest.json"));
+                threadCache.cachedManifest = nlohmann::json::parse(content);
+            } catch (...) {
+                threadCache.cachedManifest = std::nullopt;
+            }
+        }
+        if (threadCache.cachedManifest)
+            fp = manifestPathFingerprint(*threadCache.cachedManifest, path.substr(manifestPrefix.size()));
+    } else {
+        auto [_, rawFp] = accessor->getFingerprint(CanonPath(path));
+        fp = std::move(rawFp);
+    }
     auto inserted = threadCache.fingerprints.emplace(std::string(path), std::move(fp)).first;
     return &inserted->second;
 }
