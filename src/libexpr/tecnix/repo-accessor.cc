@@ -11,6 +11,7 @@
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval-settings.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
+#include "nix/expr/tecnix/source-deps.hh"
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/fetchers/git-utils.hh"
 #include "nix/store/store-api.hh"
@@ -25,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include <boost/unordered/concurrent_flat_map.hpp>
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
 
 #include <algorithm>
@@ -157,8 +159,9 @@ static std::string gitFingerprintWithMode(const Hash & oid, uint32_t mode)
 }
 
 /**
- * The dirty (modified, added, deleted, renamed, untracked) repo-relative
- * paths of `checkoutPath`, per `git status --porcelain -z`.
+ * The dirty (modified, added, deleted, renamed, unmerged, untracked)
+ * repo-relative paths of `checkoutPath`, per `git status --porcelain=v2 -z`,
+ * with the staged blob of each path whose content the index holds.
  *
  * Scrubs the git discovery environment (GIT_DIR, GIT_WORK_TREE,
  * GIT_COMMON_DIR, GIT_INDEX_FILE) so an ambient git context — a hook, a
@@ -167,7 +170,7 @@ static std::string gitFingerprintWithMode(const Hash & oid, uint32_t mode)
  * is load-bearing for Tecnix source-closure validity, so callers that can
  * tolerate an unknown dirty state must catch explicitly.
  */
-static std::vector<std::string> gitStatusDirtyPaths(const std::string & checkoutPath)
+static std::vector<GitStatusEntry> gitStatusDirtyEntries(const std::string & checkoutPath)
 {
     StringMap gitEnvironment = getEnv();
     gitEnvironment.erase("GIT_DIR");
@@ -177,13 +180,124 @@ static std::vector<std::string> gitStatusDirtyPaths(const std::string & checkout
 
     auto [status, output] = runProgram(
         {.program = "git",
-         .args = {"-C", checkoutPath, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all"},
+         .args = {"-C", checkoutPath, "--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"},
          .environment = gitEnvironment});
     if (!statusOk(status))
         throw Error("failed to get git status in '%s': program 'git' %s", checkoutPath, statusToString(status));
 
-    return parseGitPorcelainZDirtyPaths(output);
+    return parseGitPorcelainV2ZStatus(output);
 }
+
+/**
+ * Staged content for the dirty paths whose working tree has no change of its
+ * own against the index (`git status` worktree column `.`), read from the
+ * index blobs. Blobs are read raw, like the committed tree: no LFS smudging,
+ * end-of-line conversion or `ident` expansion. So for a materialized file
+ * without such filters this is the same content as the disk, and a filtered
+ * one evaluates as git stores it (an LFS file as its pointer), as it would
+ * once committed. For a skip-worktree entry outside a sparse checkout, which
+ * git stages but never writes (the cleanly merged files of an uncommitted
+ * merge), the blob is the only copy. Serves those paths' files and symlinks
+ * and nothing else.
+ */
+struct GitIndexSourceAccessor : SourceAccessor
+{
+    struct Entry
+    {
+        Hash oid;
+        uint32_t mode;
+    };
+
+    using Entries = boost::unordered_flat_map<std::string, Entry, StringViewHash, std::equal_to<>>;
+
+    using DirectorySet = boost::unordered_flat_set<std::string, StringViewHash, std::equal_to<>>;
+
+    ref<GitRepo> repo;
+    Entries entries;
+    /** Every proper ancestor directory of an entry. */
+    DirectorySet directories;
+
+    GitIndexSourceAccessor(ref<GitRepo> repo, Entries && entries)
+        : repo(std::move(repo))
+        , entries(std::move(entries))
+    {
+        for (auto & [path, _] : this->entries)
+            for (auto p = CanonPath(path); !p.isRoot();) {
+                p.pop();
+                if (p.isRoot() || !directories.emplace(p.rel()).second)
+                    break;
+            }
+    }
+
+    bool containsDirectory(const CanonPath & path) const
+    {
+        return !path.isRoot() && directories.contains(path.rel());
+    }
+
+    const Entry * find(const CanonPath & path) const
+    {
+        if (path.isRoot())
+            return nullptr;
+        auto i = entries.find(path.rel());
+        return i == entries.end() ? nullptr : &i->second;
+    }
+
+    bool contains(const CanonPath & path) const
+    {
+        return find(path);
+    }
+
+    const Entry & need(const CanonPath & path)
+    {
+        if (auto entry = find(path))
+            return *entry;
+        throw Error("'%s' has no staged content in the git index", showPath(path));
+    }
+
+    std::string readBlob(const Entry & entry)
+    {
+        GitAccessorOptions opts{.exportIgnore = false, .smudgeLfs = false};
+        return repo->getAccessor(entry.oid, opts, "index")->readFile(CanonPath::root);
+    }
+
+    std::optional<Stat> maybeLstat(const CanonPath & path) override
+    {
+        auto entry = find(path);
+        if (!entry)
+            return std::nullopt;
+        if (entry->mode == 0120000)
+            return Stat{.type = tSymlink};
+        return Stat{.type = tRegular, .isExecutable = entry->mode == 0100755};
+    }
+
+    void readFile(const CanonPath & path, Sink & sink, fun<void(uint64_t)> sizeCallback) override
+    {
+        auto & entry = need(path);
+        if (entry.mode == 0120000)
+            throw Error("'%s' is not a regular file", showPath(path));
+        auto content = readBlob(entry);
+        sizeCallback(content.size());
+        sink(content);
+    }
+
+    std::string readLink(const CanonPath & path) override
+    {
+        auto & entry = need(path);
+        if (entry.mode != 0120000)
+            throw Error("'%s' is not a symlink", showPath(path));
+        return readBlob(entry);
+    }
+
+    DirEntries readDirectory(const CanonPath & path) override
+    {
+        throw Error("'%s' is not a directory", showPath(path));
+    }
+
+    std::optional<std::filesystem::path> getPhysicalPath(const CanonPath &) override
+    {
+        return std::nullopt;
+    }
+};
 
 /**
  * Read delegation wrapper that preserves the path-fingerprint semantics Tecnix
@@ -224,17 +338,22 @@ struct TecnixSourceAccessor : SourceAccessor
     std::string repoPrefix;
     DirtyPathSet dirtyFiles, dirtyDirs;
 
+    /** The dirty files whose content comes from the git index, not `disk`. */
+    std::shared_ptr<GitIndexSourceAccessor> index;
+
     TecnixSourceAccessor(
         ref<SourceAccessor> clean,
         ref<SourceAccessor> disk,
         std::optional<GitCleanFingerprints> git,
         std::string repoPrefix,
-        DirtyPathSet && dirtyFiles)
+        DirtyPathSet && dirtyFiles,
+        std::shared_ptr<GitIndexSourceAccessor> index = nullptr)
         : clean(std::move(clean))
         , disk(std::move(disk))
         , git(std::move(git))
         , repoPrefix(std::move(repoPrefix))
         , dirtyFiles(std::move(dirtyFiles))
+        , index(std::move(index))
     {
         for (auto & f : this->dirtyFiles) {
             debug("TecnixSourceAccessor: dirty file: '%s'", f);
@@ -269,6 +388,33 @@ struct TecnixSourceAccessor : SourceAccessor
     bool isDirty(const CanonPath & path)
     {
         return dirtyFiles.contains(path.rel());
+    }
+
+    /** Where a dirty file's content lives: the git index or the checkout. */
+    ref<SourceAccessor> dirtySource(const CanonPath & path)
+    {
+        if (index && index->contains(path))
+            return ref<SourceAccessor>(index);
+        return disk;
+    }
+
+    /**
+     * The type of a dirty path. A directory that only the index has (the
+     * merge added it outside the sparse set, possibly replacing a file of the
+     * same name in HEAD) is in neither HEAD nor the working tree.
+     */
+    std::optional<Stat> dirtyLstat(const CanonPath & path)
+    {
+        auto s = dirtySource(path)->maybeLstat(path);
+        if (!s && index && index->containsDirectory(path))
+            s = Stat{.type = tDirectory};
+        return s;
+    }
+
+    /** Where any path's content lives. */
+    ref<SourceAccessor> source(const CanonPath & path)
+    {
+        return isDirty(path) ? dirtySource(path) : clean;
     }
 
     bool tracksEvalAccesses(const CanonPath &) override
@@ -308,11 +454,11 @@ struct TecnixSourceAccessor : SourceAccessor
         if (path.isRoot())
             s = clean->maybeLstat(path);
         else if (isDirty(path))
-            s = disk->maybeLstat(path);
+            s = dirtyLstat(path);
         else {
             s = clean->maybeLstat(path);
             if (!s && dirtyDirs.contains(path.rel()))
-                s = disk->maybeLstat(path);
+                s = dirtyLstat(path);
         }
         return s;
     }
@@ -321,26 +467,26 @@ struct TecnixSourceAccessor : SourceAccessor
     {
         if (dumpPathDepth == 0)
             trackAccess(path);
-        return (isDirty(path) ? disk : clean)->readFile(path, sink, sizeCallback);
+        return source(path)->readFile(path, sink, sizeCallback);
     }
 
     /** `readFile` without recording the access, for a caller that records
         its own, finer-grained observation of the file instead. */
     std::string readFileUnrecorded(const CanonPath & path)
     {
-        return (isDirty(path) ? disk : clean)->readFile(path);
+        return source(path)->readFile(path);
     }
 
     std::string readLink(const CanonPath & path) override
     {
         if (dumpPathDepth == 0)
             trackAccess(path);
-        return (isDirty(path) ? disk : clean)->readLink(path);
+        return source(path)->readLink(path);
     }
 
     std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override
     {
-        return (isDirty(path) ? disk : clean)->getPhysicalPath(path);
+        return source(path)->getPhysicalPath(path);
     }
 
     /** The fingerprint of `path` in the clean tree, before the dirty overlay. */
@@ -384,7 +530,7 @@ struct TecnixSourceAccessor : SourceAccessor
                 dirtyUnderPath.push_back(f);
         }
 
-        if (!path.isRoot() && dirtyFiles.contains(rel) && !disk->maybeLstat(path))
+        if (!path.isRoot() && dirtyFiles.contains(rel) && !dirtyLstat(path))
             return {path, "absent"};
 
         std::string fp = *cleanFp;
@@ -393,15 +539,22 @@ struct TecnixSourceAccessor : SourceAccessor
             HashSink hashSink{HashAlgorithm::SHA256};
             for (auto & f : dirtyUnderPath) {
                 hashSink << f;
-                auto st = disk->maybeLstat(CanonPath(f));
+                auto dirtyPath = CanonPath(f);
+                // Staged content is identified by its blob id, so fingerprinting
+                // a directory never reads the blobs of a large merge.
+                if (auto staged = index ? index->find(dirtyPath) : nullptr) {
+                    hashSink << "G" << gitFingerprintWithMode(staged->oid, staged->mode);
+                    continue;
+                }
+                auto st = dirtyLstat(dirtyPath);
                 if (!st) {
                     hashSink << "D";
                 } else if (st->type == Type::tRegular) {
                     hashSink << (st->isExecutable ? "X" : "F");
-                    hashSink << disk->readFile(CanonPath(f));
+                    hashSink << disk->readFile(dirtyPath);
                 } else if (st->type == Type::tSymlink) {
                     hashSink << "L";
-                    hashSink << disk->readLink(CanonPath(f));
+                    hashSink << disk->readLink(dirtyPath);
                 }
             }
             fp += ";dirty=" + hashSink.finish().hash.to_string(HashFormat::Base16, false);
@@ -416,6 +569,15 @@ struct TecnixSourceAccessor : SourceAccessor
             trackAccess(path);
 
         auto rel = path.isRoot() ? "" : std::string(path.rel());
+
+        // A dirty path that is no longer a directory (a merge replaced the
+        // directory with a file) must not list the old directory's children.
+        if (!path.isRoot() && isDirty(path)) {
+            auto st = dirtyLstat(path);
+            if (!st || st->type != tDirectory)
+                return dirtySource(path)->readDirectory(path);
+        }
+
         if (!path.isRoot() && !dirtyDirs.contains(rel))
             return clean->readDirectory(path);
 
@@ -432,7 +594,8 @@ struct TecnixSourceAccessor : SourceAccessor
             auto rest = std::string_view(f).substr(dirPrefix.size());
             if (rest.find('/') != std::string_view::npos)
                 continue;
-            auto stat = disk->maybeLstat(path / rest);
+            auto child = path / rest;
+            auto stat = dirtyLstat(child);
             if (stat)
                 entries[std::string(rest)] = stat->type;
             else
@@ -750,15 +913,35 @@ ref<SourceAccessor> getTecnixRepoAccessor(EvalState & state)
 
             // Get all dirty files in the repo. This is load-bearing for source
             // closure validity: if we cannot determine the dirty overlay, do
-            // not continue with a clean-tree accessor (gitStatusDirtyPaths
+            // not continue with a clean-tree accessor (gitStatusDirtyEntries
             // throws). Until the daemon exposes a full repo dirty-path RPC,
             // materialized checkouts keep using git status at this boundary.
             TecnixSourceAccessor::DirtyPathSet dirtyFiles;
-            for (auto & path : gitStatusDirtyPaths(checkoutPath))
-                dirtyFiles.insert(std::move(path));
+            GitIndexSourceAccessor::Entries indexEntries;
+            for (auto & entry : gitStatusDirtyEntries(checkoutPath)) {
+                // The worldtree backend has no libgit2 repository to read
+                // blobs from, so its dirty files stay on disk.
+                if (entry.index && gitFingerprints)
+                    indexEntries.insert_or_assign(
+                        entry.path,
+                        GitIndexSourceAccessor::Entry{
+                            .oid = Hash::parseNonSRIUnprefixed(entry.index->oid, HashAlgorithm::SHA1),
+                            .mode = entry.index->mode,
+                        });
+                dirtyFiles.insert(std::move(entry.path));
+            }
+
+            std::shared_ptr<GitIndexSourceAccessor> index;
+            if (!indexEntries.empty())
+                index = std::make_shared<GitIndexSourceAccessor>(gitFingerprints->repo, std::move(indexEntries));
 
             tecnixData(state)->tecnixRepoAccessor = make_ref<TecnixSourceAccessor>(
-                cleanAccessor, makeFSSourceAccessor(checkoutPath), gitFingerprints, "", std::move(dirtyFiles));
+                cleanAccessor,
+                makeFSSourceAccessor(checkoutPath),
+                gitFingerprints,
+                "",
+                std::move(dirtyFiles),
+                std::move(index));
         } else {
             tecnixData(state)->tecnixRepoAccessor = make_ref<TecnixSourceAccessor>(
                 cleanAccessor, cleanAccessor, gitFingerprints, "", TecnixSourceAccessor::DirtyPathSet{});

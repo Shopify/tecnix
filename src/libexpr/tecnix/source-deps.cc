@@ -5,6 +5,8 @@
 #include "nix/util/util.hh"
 
 #include <algorithm>
+#include <charconv>
+#include <optional>
 #include <span>
 
 #include <sys/mman.h>
@@ -61,38 +63,93 @@ void tecnixValueLabelOutOfRange(const void * value)
     abort();
 }
 
-std::vector<std::string> parseGitPorcelainZDirtyPaths(std::string_view output)
+std::vector<GitStatusEntry> parseGitPorcelainV2ZStatus(std::string_view output)
 {
-    std::vector<std::string> paths;
+    std::vector<GitStatusEntry> entries;
     size_t pos = 0;
-    while (pos < output.size()) {
+
+    auto nextRecord = [&]() -> std::optional<std::string_view> {
         auto nulPos = output.find('\0', pos);
         if (nulPos == std::string_view::npos)
-            break;
-
-        auto entry = output.substr(pos, nulPos - pos);
+            return std::nullopt;
+        auto record = output.substr(pos, nulPos - pos);
         pos = nulPos + 1;
+        return record;
+    };
 
-        // Git porcelain v1 -z format is "XY PATH\0", with an extra
-        // original-path record only when the X column is R/C. Keep both names
-        // dirty so source reads of either side see the checkout overlay.
-        if (entry.size() < 4 || entry[2] != ' ')
+    // Splits off `count` space-separated header fields and returns the rest of
+    // the record: the path, which may itself contain spaces.
+    std::vector<std::string_view> fields;
+    auto splitFields = [&](std::string_view record, size_t count) -> std::optional<std::string_view> {
+        fields.clear();
+        for (size_t i = 0; i < count; ++i) {
+            auto space = record.find(' ');
+            if (space == std::string_view::npos)
+                return std::nullopt;
+            fields.push_back(record.substr(0, space));
+            record.remove_prefix(space + 1);
+        }
+        if (record.empty())
+            return std::nullopt;
+        return record;
+    };
+
+    auto parseMode = [](std::string_view field) -> std::optional<uint32_t> {
+        uint32_t mode = 0;
+        auto [end, ec] = std::from_chars(field.data(), field.data() + field.size(), mode, 8);
+        if (ec != std::errc{} || end != field.data() + field.size())
+            return std::nullopt;
+        return mode;
+    };
+
+    while (auto record = nextRecord()) {
+        if (record->size() < 3 || (*record)[1] != ' ')
             continue;
 
-        paths.emplace_back(entry.substr(3));
+        switch ((*record)[0]) {
+        case '1':
+        case '2': {
+            // 1 XY sub mH mI mW hH hI path
+            // 2 XY sub mH mI mW hH hI Xscore path NUL origPath
+            bool renamed = (*record)[0] == '2';
+            auto path = splitFields(*record, renamed ? 9 : 8);
+            std::optional<std::string_view> originalPath;
+            if (renamed && !(originalPath = nextRecord()))
+                return entries;
+            if (!path)
+                continue;
 
-        if (entry[0] == 'R' || entry[0] == 'C') {
-            auto nextNul = output.find('\0', pos);
-            if (nextNul == std::string_view::npos)
-                break;
+            GitStatusEntry entry{.path = std::string(*path)};
+            auto xy = fields[1];
+            auto indexMode = parseMode(fields[4]);
+            if (xy.size() == 2 && xy[1] == '.' && xy[0] != 'D' && indexMode
+                && (*indexMode == 0100644 || *indexMode == 0100755 || *indexMode == 0120000))
+                entry.index = GitIndexBlob{.oid = std::string(fields[7]), .mode = *indexMode};
+            entries.push_back(std::move(entry));
 
-            auto originalPath = output.substr(pos, nextNul - pos);
-            pos = nextNul + 1;
-            if (!originalPath.empty())
-                paths.emplace_back(originalPath);
+            // A rename removes its original path; a copy (status.renames=copies)
+            // leaves its source unchanged, so the source is not dirty. The
+            // score field says which it is, for index- and worktree-side
+            // records alike (`C.` and `.C`).
+            if (originalPath && !originalPath->empty() && !fields[8].starts_with('C'))
+                entries.push_back({.path = std::string(*originalPath)});
+            break;
+        }
+        case 'u': {
+            // u XY sub m1 m2 m3 mW h1 h2 h3 path
+            if (auto path = splitFields(*record, 10))
+                entries.push_back({.path = std::string(*path)});
+            break;
+        }
+        case '?':
+        case '!':
+            entries.push_back({.path = std::string(record->substr(2))});
+            break;
+        default:
+            break;
         }
     }
-    return paths;
+    return entries;
 }
 
 static uint64_t hashSourceAccessIds(std::span<const EvalSourceAccessId> items)

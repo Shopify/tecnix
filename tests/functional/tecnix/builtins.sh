@@ -1524,4 +1524,158 @@ assert_jq "$export_ignore_deps" '.reader."secret.txt" | startswith("git:")' \
 assert_jq "$export_ignore_deps" '.reader | has(".gitattributes") | not' \
     "git attributes are inert in the raw-tree view and should not enter the closure"
 
+# An uncommitted merge in a sparse checkout stages the cleanly merged files
+# outside the sparse set but never writes them (skip-worktree). The index holds
+# their content, so evaluation must read it from there, not from the disk.
+echo "Testing staged files outside a sparse checkout..."
+# create_sparse_merge_world DIR [SPARSE-CHECKOUT-SET-FLAGS...]
+create_sparse_merge_world() {
+    local dir="$1"
+    shift
+    createGitRepo "$dir"
+    (
+        cd "$dir"
+        mkdir lib zone
+        echo '"base"' > lib/marker.nix
+        echo "file" > lib/swap
+        mkdir lib/olddir
+        echo '"old"' > lib/olddir/default.nix
+        echo "zone file" > zone/README
+        cat > resolve.nix << 'RESOLVE_EOF'
+args: {
+  allTargetNames = [ "reader" "lister" ];
+  resolve = id: if id == "lister" then {
+    olddir = builtins.readDir ./lib/olddir;
+    drvPath = "/nix/store/00000000000000000000000000000000-${id}.drv";
+  } else rec {
+    marker = import ./lib/marker.nix;
+    newdir = if builtins.pathExists ./lib/newdir then import ./lib/newdir else "missing";
+    linkType = if builtins.pathExists ./lib/link.nix then builtins.readFileType ./lib/link.nix else "missing";
+    viaLink = if linkType == "missing" then "missing" else import ./lib/link.nix;
+    swap = if builtins.readFileType ./lib/swap == "directory" then import ./lib/swap else "file";
+    olddir = if builtins.readFileType ./lib/olddir == "regular" then import ./lib/olddir else "directory";
+    lib = builtins.readDir ./lib;
+    # Copying the directory into the store reads it through the same overlay.
+    copied = let libCopy = builtins.path { path = ./lib; name = "sparse-lib"; }; in {
+      marker = import (libCopy + "/marker.nix");
+      newdir = import (libCopy + "/newdir");
+      swap = import (libCopy + "/swap");
+      olddir = import (libCopy + "/olddir");
+      link = builtins.readFileType (libCopy + "/link.nix");
+      listing = builtins.readDir libCopy;
+    };
+    # Forced through drvPath so the listing is a recorded dependency.
+    drvPath = "/nix/store/00000000000000000000000000000000-${marker}-${builtins.hashString "sha256" (builtins.toJSON lib)}-${id}.drv";
+  };
+}
+RESOLVE_EOF
+        git add -A
+        git commit -m "sparse merge world"
+        git checkout -b upstream
+        echo '"merged"' > lib/marker.nix
+        mkdir lib/newdir
+        echo '"newdir"' > lib/newdir/default.nix
+        ln -s marker.nix lib/link.nix
+        git rm -q lib/swap
+        mkdir lib/swap
+        echo '"swapped"' > lib/swap/default.nix
+        git rm -q -r lib/olddir
+        echo '"flattened"' > lib/olddir
+        git add -A
+        git commit -m "change and add files outside the sparse set"
+        git checkout -
+        echo "zone change" > zone/README
+        git commit -am "change inside the sparse set"
+        git sparse-checkout set "$@" zone
+        git merge --no-commit --no-ff upstream
+    )
+}
+
+SPARSE_WORLD="$TEST_ROOT/tecnix-sparse-merge-world"
+create_sparse_merge_world "$SPARSE_WORLD"
+[[ ! -e "$SPARSE_WORLD/lib/marker.nix" ]] || fail "precondition: lib/marker.nix should not be on disk"
+git -C "$SPARSE_WORLD" ls-files -v lib/marker.nix | grepQuiet '^S ' \
+    || fail "precondition: lib/marker.nix should be skip-worktree"
+SPARSE_HEAD=$(get_head_sha "$SPARSE_WORLD")
+
+sparse_args="{ gitDir = \"$SPARSE_WORLD/.git\"; resolver = \"resolve.nix\"; args = { }; rev = \"$SPARSE_HEAD\"; checkoutPath = \"$SPARSE_WORLD\"; }"
+
+sparse_targets=$(tecnix_eval_json_no_cache "builtins.tecnixTargets (($sparse_args) // { targets = [ \"reader\" ]; })")
+assert_jq "$sparse_targets" '.reader.marker == "merged"' \
+    "a staged file outside the sparse checkout should evaluate with its staged content"
+assert_jq "$sparse_targets" '.reader.newdir == "newdir"' \
+    "a directory the merge added outside the sparse checkout should exist and import"
+assert_jq "$sparse_targets" '.reader.linkType == "symlink" and .reader.viaLink == "merged"' \
+    "a symlink the merge added outside the sparse checkout should resolve through the index"
+assert_jq "$sparse_targets" '.reader.swap == "swapped"' \
+    "a file the merge replaced with a directory outside the sparse checkout should be that directory"
+assert_jq "$sparse_targets" '.reader.olddir == "flattened"' \
+    "a directory the merge replaced with a file outside the sparse checkout should be that file"
+assert_jq "$sparse_targets" '.reader.lib == { "link.nix": "symlink", "marker.nix": "regular", "newdir": "directory", "olddir": "regular", "swap": "directory" }' \
+    "listing a directory outside the sparse checkout should combine HEAD and the index"
+assert_jq "$sparse_targets" '.reader.copied == { marker: "merged", newdir: "newdir", swap: "swapped", olddir: "flattened", link: "symlink", listing: .reader.lib }' \
+    "copying a directory outside the sparse checkout into the store should take its staged content"
+
+sparse_deps=$(tecnix_eval_json_no_cache "tecnixTargetDependencyPathSet (($sparse_args) // { targets = [ \"reader\" ]; })")
+assert_jq "$sparse_deps" '.reader."lib/marker.nix" | contains("dirty=")' \
+    "a staged file outside the sparse checkout should carry a dirty fingerprint"
+assert_jq "$sparse_deps" '.reader.lib | contains("dirty=")' \
+    "a directory holding staged files outside the sparse checkout should carry a dirty fingerprint"
+
+# Listing a directory the merge replaced with a file must fail, not list nothing.
+expect_sparse_listing_fails() {
+    local args="$1"
+    local err="$TEST_ROOT/tecnix-sparse-lister.err"
+    local expr
+    expr=$(rewrite_tecnix_test_expr "builtins.tecnixTargets (($args) // { targets = [ \"lister\" ]; })")
+    expect 1 nix eval --json \
+        --extra-experimental-features 'nix-command' \
+        --option lazy-trees true \
+        --option tecnix-eval-cache false \
+        --expr "$expr" \
+        >/dev/null 2>"$err"
+    grepQuiet "not a directory" < "$err" || fail "readDir of a file should fail with 'not a directory': $(cat "$err")"
+}
+expect_sparse_listing_fails "$sparse_args"
+
+# Materializing everything must not change what the staged files evaluate to
+# or how they fingerprint, and a full checkout must fail the same readDir.
+git -C "$SPARSE_WORLD" sparse-checkout disable
+[[ -e "$SPARSE_WORLD/lib/marker.nix" && -e "$SPARSE_WORLD/lib/swap/default.nix" ]] \
+    || fail "precondition: disabling the sparse checkout should materialize the staged files"
+full_targets=$(tecnix_eval_json_no_cache "builtins.tecnixTargets (($sparse_args) // { targets = [ \"reader\" ]; })")
+assert_json_equal "$full_targets" "$sparse_targets" \
+    "staged files should evaluate the same whether or not they are materialized"
+full_deps=$(tecnix_eval_json_no_cache "tecnixTargetDependencyPathSet (($sparse_args) // { targets = [ \"reader\" ]; })")
+assert_json_equal "$full_deps" "$sparse_deps" \
+    "staged files should fingerprint the same whether or not they are materialized"
+expect_sparse_listing_fails "$sparse_args"
+
+# Once the merge is committed the file is clean again, and its content is the same.
+git -C "$SPARSE_WORLD" commit -m "merge upstream"
+SPARSE_MERGED_HEAD=$(get_head_sha "$SPARSE_WORLD")
+merged_args="{ gitDir = \"$SPARSE_WORLD/.git\"; resolver = \"resolve.nix\"; args = { }; rev = \"$SPARSE_MERGED_HEAD\"; checkoutPath = \"$SPARSE_WORLD\"; }"
+merged_targets=$(tecnix_eval_json_no_cache "builtins.tecnixTargets (($merged_args) // { targets = [ \"reader\" ]; })")
+assert_json_equal "$merged_targets" "$sparse_targets" \
+    "committing the merge should not change what the staged files evaluated to"
+expect_sparse_listing_fails "$merged_args"
+
+# World checkouts use a sparse index. git status reports the same entries with
+# one, and Tecnix never reads the index through libgit2 (which rejects its
+# `sdir` extension), so evaluation must not change.
+echo "Testing staged files outside a sparse checkout with a sparse index..."
+SPARSE_INDEX_WORLD="$TEST_ROOT/tecnix-sparse-index-merge-world"
+create_sparse_merge_world "$SPARSE_INDEX_WORLD" --sparse-index
+[[ "$(git -C "$SPARSE_INDEX_WORLD" config index.sparse)" == true ]] \
+    || fail "precondition: the checkout should use a sparse index"
+[[ ! -e "$SPARSE_INDEX_WORLD/lib/marker.nix" ]] || fail "precondition: lib/marker.nix should not be on disk"
+sparse_index_args="{ gitDir = \"$SPARSE_INDEX_WORLD/.git\"; resolver = \"resolve.nix\"; args = { }; rev = \"$(get_head_sha "$SPARSE_INDEX_WORLD")\"; checkoutPath = \"$SPARSE_INDEX_WORLD\"; }"
+sparse_index_targets=$(tecnix_eval_json_no_cache "builtins.tecnixTargets (($sparse_index_args) // { targets = [ \"reader\" ]; })")
+assert_json_equal "$sparse_index_targets" "$sparse_targets" \
+    "a sparse index should not change what staged files evaluate to"
+sparse_index_deps=$(tecnix_eval_json_no_cache "tecnixTargetDependencyPathSet (($sparse_index_args) // { targets = [ \"reader\" ]; })")
+assert_json_equal "$sparse_index_deps" "$sparse_deps" \
+    "a sparse index should not change how staged files fingerprint"
+expect_sparse_listing_fails "$sparse_index_args"
+
 echo "Tecnix builtin tests passed!"

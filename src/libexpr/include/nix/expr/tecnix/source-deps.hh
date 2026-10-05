@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -46,7 +47,41 @@ void mergeUnpublishedTrackedSourceDepsFrame(TrackedSourceDepsFrame & frame);
 [[gnu::always_inline]] inline void
 forceValueTracked(EvalState & state, Value & v, PosIdx pos, TrackingContext & trackingCtx);
 
-std::vector<std::string> parseGitPorcelainZDirtyPaths(std::string_view output);
+/** The staged blob of a dirty path, per `git status --porcelain=v2`. */
+struct GitIndexBlob
+{
+    /** Hex object id of the blob in the index. */
+    std::string oid;
+    /** Git file mode of the index entry: 0100644, 0100755 or 0120000. */
+    uint32_t mode;
+
+    bool operator==(const GitIndexBlob &) const = default;
+};
+
+/** One path `git status` reports as differing from HEAD. */
+struct GitStatusEntry
+{
+    std::string path;
+
+    /**
+     * Set when the working tree has no change of its own against the index,
+     * so the index entry is the authoritative content of `path`. The file
+     * need not be on disk: git stages, but never writes, the cleanly merged
+     * files of an uncommitted merge that lie outside a sparse checkout
+     * (skip-worktree entries).
+     */
+    std::optional<GitIndexBlob> index = std::nullopt;
+
+    bool operator==(const GitStatusEntry &) const = default;
+};
+
+/**
+ * Parse `git status --porcelain=v2 -z` output. Every changed, renamed (both
+ * names), copied (the copy only), unmerged or untracked path yields an
+ * entry. `index` is set only for ordinary, renamed and copied entries whose
+ * worktree column is `.` and whose index entry is a regular file or symlink.
+ */
+std::vector<GitStatusEntry> parseGitPorcelainV2ZStatus(std::string_view output);
 
 /**
  * A stack-resident accumulator for one bracketed region of evaluation: the
