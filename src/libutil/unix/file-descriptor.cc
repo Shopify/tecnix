@@ -5,7 +5,12 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <span>
+#include <array>
 #include <atomic>
+
+#ifdef __APPLE__
+#  include <libproc.h>
+#endif
 
 #include "util-unix-config-private.hh"
 #include "../file-descriptor-private.hh"
@@ -97,6 +102,49 @@ static int unix_close_range(unsigned int first, unsigned int last, int flags)
 }
 #endif
 
+#ifdef __APPLE__
+/**
+ * Close every open descriptor above stderr, listing them with
+ * `proc_pidinfo(PROC_PIDLISTFDS)` instead of calling close() on every
+ * number up to the open-files limit. launchd starts the nix-daemon with a
+ * soft limit of 1048576, so that loop costs ~0.1 s per child, and it runs
+ * before the build child signals readiness.
+ *
+ * The listing is one syscall into a buffer on the stack: it allocates
+ * nothing and opens nothing (`opendir("/dev/fd")` would do both, and its
+ * own descriptor would show up in the listing). It is a snapshot, so closing
+ * descriptors does not disturb it. The kernel lists descriptors in
+ * ascending order and truncates to the buffer size; if the buffer comes
+ * back full, close what was listed and ask again.
+ *
+ * @return false if listing failed or stopped making progress; the caller
+ * must fall back to the loop.
+ */
+static bool closeExtraFDsByListing()
+{
+    std::array<struct proc_fdinfo, 256> fds;
+    const pid_t self = getpid();
+    while (true) {
+        int bytes = proc_pidinfo(self, PROC_PIDLISTFDS, 0, fds.data(), sizeof(fds));
+        if (bytes <= 0)
+            return false;
+        size_t listed = size_t(bytes) / sizeof(struct proc_fdinfo);
+        size_t closed = 0;
+        for (size_t i = 0; i < listed; ++i) {
+            int fd = fds[i].proc_fd;
+            if (fd <= STDERR_FILENO)
+                continue;
+            if (::close(fd) == 0)
+                ++closed;
+        }
+        if (listed < fds.size())
+            return true;
+        if (closed == 0)
+            return false;
+    }
+}
+#endif
+
 void unix::closeExtraFDs()
 {
     constexpr int MAX_KEPT_FD = 2;
@@ -110,6 +158,11 @@ void unix::closeExtraFDs()
     if (unix_close_range(MAX_KEPT_FD + 1, ~0U, 0) == 0) {
         return;
     }
+#endif
+
+#ifdef __APPLE__
+    if (closeExtraFDsByListing())
+        return;
 #endif
 
 #ifdef __linux__
