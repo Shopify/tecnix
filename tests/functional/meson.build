@@ -62,6 +62,7 @@ suites = [
       'experimental-features.sh',
       'fetchMercurial.sh',
       'gc-auto.sh',
+      'nix-copy-auto-gc.sh',
       'user-envs.sh',
       'user-envs-migration.sh',
       'cli-characterisation.sh',

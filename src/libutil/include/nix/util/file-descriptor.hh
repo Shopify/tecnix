@@ -11,6 +11,7 @@
 
 #include "nix/util/canon-path.hh"
 #include "nix/util/error.hh"
+#include "nix/util/fun.hh"
 #include "nix/util/os-string.hh"
 
 #ifdef _WIN32
@@ -128,6 +129,27 @@ void copyFdRange(Descriptor fd, off_t offset, size_t nbytes, Sink & sink);
 void readFull(Descriptor fd, char * buf, size_t count);
 
 void writeFull(Descriptor fd, std::string_view s, bool allowInterrupts = true);
+
+/**
+ * Write all of `s` to `fd`, like `writeFull`, but keep servicing
+ * `drainFd` while the write would block: whenever `fd` is not
+ * writable and `drainFd` becomes readable (or hangs up), `drain` is
+ * called before the write is retried.
+ *
+ * Use this when the peer behind `fd` may itself block on sending us
+ * data that we haven't read yet (typically `drainFd` is the other
+ * direction of the same connection), since a plain blocking write
+ * would then deadlock with it.
+ *
+ * `fd` is put in non-blocking mode only while writing, and `drain`
+ * is called with it blocking again, so `drain` can rely on blocking
+ * reads even when `drainFd` is the same open file description. An
+ * exception from `drain` propagates immediately, leaving an
+ * unspecified prefix of `s` written.
+ *
+ * On Windows this is just `writeFull`.
+ */
+void writeFullWhileDraining(Descriptor fd, std::string_view s, Descriptor drainFd, const fun<void()> & drain);
 
 /**
  * Read a line from an unbuffered file descriptor.

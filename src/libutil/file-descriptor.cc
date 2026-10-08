@@ -1,6 +1,7 @@
 #include "nix/util/serialise.hh"
 #include "nix/util/util.hh"
 #include "nix/util/signals.hh"
+#include "nix/util/finally.hh"
 
 #include <span>
 #include <fcntl.h>
@@ -112,6 +113,60 @@ void writeFull(Descriptor fd, std::string_view s, bool allowInterrupts)
         if (res > 0)
             s.remove_prefix(res);
     }
+}
+
+void writeFullWhileDraining(Descriptor fd, std::string_view s, Descriptor drainFd, const fun<void()> & drain)
+{
+#ifdef _WIN32
+    writeFull(fd, s);
+#else
+    /* O_NONBLOCK lives on the open file description, which `drain`
+       may read from expecting to block, so only set it while we're
+       writing, and leave it alone if it was already set. */
+    auto flags = fcntl(fd, F_GETFL);
+    if (flags == -1)
+        throw SysError("getting file descriptor flags");
+    bool toggle = !(flags & O_NONBLOCK);
+    auto setNonBlocking = [&](bool nonBlocking) {
+        if (toggle && fcntl(fd, F_SETFL, nonBlocking ? flags | O_NONBLOCK : flags) == -1)
+            throw SysError("setting file descriptor flags");
+    };
+    setNonBlocking(true);
+    Finally restore([&]() { setNonBlocking(false); });
+
+    while (!s.empty()) {
+        checkInterrupt();
+
+        try {
+            s.remove_prefix(write(fd, {reinterpret_cast<const std::byte *>(s.data()), s.size()}, true));
+            continue;
+        } catch (SystemError & e) {
+            if (!e.is(std::errc::resource_unavailable_try_again) && !e.is(std::errc::operation_would_block))
+                throw;
+        }
+
+        /* The write would block. Wait until it can make progress, but
+           also wait for input from the peer, which may be blocked on
+           sending to us and so never get around to reading from us. */
+        struct pollfd pfds[2];
+        pfds[0].fd = fd;
+        pfds[0].events = POLLOUT;
+        pfds[0].revents = 0;
+        pfds[1].fd = drainFd;
+        pfds[1].events = POLLIN;
+        pfds[1].revents = 0;
+        if (poll(pfds, 2, -1) == -1) {
+            if (errno == EINTR)
+                continue;
+            throw SysError("poll on file descriptor failed");
+        }
+        if (pfds[1].revents & (POLLIN | POLLHUP | POLLERR)) {
+            setNonBlocking(false);
+            drain();
+            setNonBlocking(true);
+        }
+    }
+#endif
 }
 
 void writeLine(Descriptor fd, std::string s)
