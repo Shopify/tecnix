@@ -944,12 +944,48 @@ std::shared_ptr<SourceAccessor> RemoteStore::getFSAccessor(const StorePath & pat
     return getRemoteFSAccessor(requireValidPath)->accessObject(path);
 }
 
+/**
+ * Writes to the daemon connection, reading the daemon's stderr
+ * messages whenever a write would block.
+ *
+ * The daemon (or a thread of it, such as an auto-GC logging every
+ * path it deletes) can block on sending us a message while we block
+ * on sending it data. Once both socket buffers are full, reading only
+ * between frames, as `FramedSink` does, is a deadlock.
+ *
+ * A daemon error can't be consumed here mid-frame, since the daemon
+ * drains our frames before reporting it, so an exception from reading
+ * only ever means the connection is broken.
+ */
+struct DrainingSink : BufferedSink
+{
+    FdSink & to;
+    FdSource & from;
+    fun<void()> drain;
+
+    DrainingSink(FdSink & to, FdSource & from, fun<void()> drain)
+        : to(to)
+        , from(from)
+        , drain(std::move(drain))
+    {
+    }
+
+    void writeUnbuffered(std::string_view data) override
+    {
+        to.written += data.size();
+        writeFullWhileDraining(to.fd, data, from.fd, drain);
+    }
+};
+
 void RemoteStore::ConnectionHandle::withFramedSink(fun<void(Sink & sink)> sendData)
 {
     (*this)->to.flush();
 
+    /* Outlives the FramedSink, whose destructor sends the terminator through it. */
+    DrainingSink to((*this)->to, (*this)->from, [&]() { processStderr(nullptr, nullptr, false, false); });
+
     {
-        FramedSink sink((*this)->to, [&]() {
+        FramedSink sink(to, [&]() {
             /* Periodically process stderr messages and exceptions
                from the daemon. */
             processStderr(nullptr, nullptr, false, false);

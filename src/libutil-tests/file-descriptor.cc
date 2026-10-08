@@ -6,10 +6,12 @@
 #include "nix/util/signals.hh"
 
 #include <cstring>
+#include <thread>
 
 #ifndef _WIN32
 #  include <fcntl.h>
 #  include <stdlib.h>
+#  include <sys/socket.h>
 #endif
 
 namespace nix {
@@ -321,5 +323,62 @@ TEST(WriteFull, RespectsAllowInterrupts)
     FdSource source(pipe.readSide.get());
     EXPECT_EQ(source.readLine(/*eofOk=*/true), "hello");
 }
+
+#ifndef _WIN32
+TEST(WriteFullWhileDraining, DrainsPeerWhileBlocked)
+{
+    int fds[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    AutoCloseFD ours(fds[0]), theirs(fds[1]);
+
+    // Far more than fits in a socket buffer in either direction.
+    const size_t size = 8 * 1024 * 1024;
+    std::string toPeer(size, 'a'), fromPeer(size, 'b');
+
+    // Like a daemon stuck logging to us: the peer sends everything
+    // before it reads anything, so a plain writeFull() from our side
+    // would deadlock with it.
+    std::string peerGot;
+    std::thread peer([&]() {
+        writeFull(theirs.get(), fromPeer, /*allowInterrupts=*/false);
+        peerGot = drainFD(theirs.get());
+        theirs.close();
+    });
+
+    std::string drained;
+    writeFullWhileDraining(ours.get(), toPeer, ours.get(), [&]() {
+        std::array<char, 64 * 1024> buf;
+        auto n = nix::read(ours.get(), {reinterpret_cast<std::byte *>(buf.data()), buf.size()});
+        drained.append(buf.data(), n);
+    });
+
+    // The descriptor must be blocking again afterwards.
+    EXPECT_EQ(fcntl(ours.get(), F_GETFL) & O_NONBLOCK, 0);
+
+    shutdown(ours.get(), SHUT_WR);
+    drained += drainFD(ours.get());
+    peer.join();
+
+    EXPECT_EQ(peerGot.size(), size);
+    EXPECT_TRUE(peerGot == toPeer);
+    EXPECT_EQ(drained.size(), size);
+    EXPECT_TRUE(drained == fromPeer);
+}
+
+TEST(WriteFullWhileDraining, PropagatesDrainException)
+{
+    int fds[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    AutoCloseFD ours(fds[0]), theirs(fds[1]);
+
+    // Something to drain, and nobody reading our end, so the write blocks.
+    writeFull(theirs.get(), "x", /*allowInterrupts=*/false);
+
+    std::string big(8 * 1024 * 1024, 'a');
+    EXPECT_THROW(writeFullWhileDraining(ours.get(), big, ours.get(), []() { throw Error("drain failed"); }), Error);
+
+    EXPECT_EQ(fcntl(ours.get(), F_GETFL) & O_NONBLOCK, 0);
+}
+#endif
 
 } // namespace nix
