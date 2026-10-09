@@ -39,6 +39,7 @@ headers = [ config_pub_h ] + files(
   'derived-path-map.hh',
   'derived-path.hh',
   'downstream-placeholder.hh',
+  'drv-hash-cache.hh',
   'dummy-store-impl.hh',
   'dummy-store.hh',
   'export-import.hh',

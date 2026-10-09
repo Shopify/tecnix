@@ -528,6 +528,16 @@ struct EvalSettings : Config
           cache (`nix copy --derivation`) or those targets are re-evaluated.
         )"};
 
+    Setting<bool> tecnixPersistentMemo{
+        this,
+        true,
+        "tecnix-persistent-memo",
+        R"(
+          Whether `builtins.tecnixPersistentMemo` keeps results in the Tecnix
+          evaluation cache (when `tecnix-eval-cache` is on). When disabled, it
+          is just `f key`.
+        )"};
+
     Setting<unsigned> tecnixEvalCacheHistory{
         this,
         32,
