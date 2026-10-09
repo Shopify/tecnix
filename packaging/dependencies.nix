@@ -215,6 +215,15 @@ scope: {
         # packbuilder is freed.
         # TODO: we can probably drop this patch since we're not finding deltas anymore.
         ./patches/libgit2-packbuilder-dont-fail-on-thread-create-error.patch
+
+        # Tecnix: `GIT_RMDIR_EMPTY_PARENTS` calls rmdir() on parent paths
+        # with a trailing slash, which on macOS resolves a symlink in that
+        # position and acts on its target (deleting an unrelated empty
+        # directory, or failing with EINVAL on macOS 27 for a link to an
+        # ancestor). The upstream test suite trips over it on any
+        # case-insensitive filesystem on macOS 27, i.e. the default Nix
+        # store volume. To be submitted upstream.
+        ./patches/libgit2-rmdir-empty-parent-trailing-slash.patch
       ];
       separateDebugInfo = true;
       # Nixpkgs derives `meta.changelog` from `src.tag`, which is null
