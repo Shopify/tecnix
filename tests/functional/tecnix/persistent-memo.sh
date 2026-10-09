@@ -13,6 +13,7 @@ echo '{ "//zones/a": { "id": "W-000001" } }' > "$WORLD/.meta/manifest.json"
 
 echo "inside one" > "$WORLD/inside.txt"
 echo "outside one" > "$WORLD/outside.txt"
+echo "a" > "$WORLD/flag.txt"
 
 # The memoized function's code lives in its own file, imported before the
 # call: editing it must invalidate the row though `f` never reads the file
@@ -46,9 +47,20 @@ let
   # this target's evaluation began, and the lambda reads nothing. Only the
   # stored Nix files make an edit here invalidate its row.
   inline = k: builtins.trace "computing inline ${k}" { m = 1; };
+  # Functions chosen by reading a data file, forced before the memo call: the
+  # read labels the attribute set, not the functions in it.
+  picked =
+    let fns = v: { compute = k: { inherit v; }; project = x: x; load = x: x; }; in
+    if builtins.readFile ./flag.txt == "a\n" then fns "a" else fns "b";
+  # The projecting form: the value holds a function; what is stored is data.
+  projecting = {
+    compute = k: builtins.trace "computing proj ${k}" { n = 1; f = x: x + 1; };
+    project = v: { inherit (v) n; };
+    load = d: builtins.trace "loading proj" { inherit (d) n; f = x: x + 1; };
+  };
 in
 {
-  allTargetNames = [ "t" "fn" "inline" ];
+  allTargetNames = [ "t" "fn" "inline" "picked" "proj" ];
   resolve = name:
     let
       # Read outside the memo, so editing it re-evaluates the target but
@@ -66,6 +78,12 @@ in
         };
       in
       builtins.trace "result ${rendered}" (drv name (outside + rendered))
+    else if name == "picked" then
+      let r = builtins.seq picked (builtins.tecnixPersistentMemo "picked" "a" picked); in
+      builtins.trace "picked ${r.v}" (drv name (outside + r.v))
+    else if name == "proj" then
+      let r = builtins.tecnixPersistentMemo "proj" "a" projecting; in
+      builtins.trace "proj ${toString (r.f r.n)}" (drv name (outside + toString r.n))
     else if name == "inline" then
       let r = builtins.tecnixPersistentMemo "inline" "a" inline; in
       builtins.trace "inline ${toString r.m}" (drv name (outside + toString r.m))
@@ -168,6 +186,30 @@ sed -i.bak 's/m = 1;/m = 2;/' "$WORLD/resolve.nix" && rm "$WORLD/resolve.nix.bak
 REV8=$(commit_world "inline code")
 eval_at "$REV8" '[ "inline" ]' "$TEST_ROOT/memo10.err"
 grepQuiet "trace: inline 2" "$TEST_ROOT/memo10.err" || fail "an edit to the memoized lambda's code served a stale row ($(cat "$TEST_ROOT/memo10.err"))"
+
+echo "A function forced before the call still counts what it read"
+REV9=$REV8
+eval_at "$REV9" '[ "picked" ]' "$TEST_ROOT/memo11.err"
+grepQuiet "trace: picked a" "$TEST_ROOT/memo11.err" || fail "unexpected picked value"
+echo "b" > "$WORLD/flag.txt"
+REV10=$(commit_world "flag")
+eval_at "$REV10" '[ "picked" ]' "$TEST_ROOT/memo12.err"
+grepQuiet "trace: picked b" "$TEST_ROOT/memo12.err" || fail "a change to what chose the function served a stale row ($(cat "$TEST_ROOT/memo12.err"))"
+
+echo "The projecting form stores project's data and returns load's value on a hit"
+eval_at "$REV10" '[ "proj" ]' "$TEST_ROOT/memo13.err"
+[[ "$(computed "$TEST_ROOT/memo13.err" "proj a")" == 1 ]] || fail "proj should be computed on a miss"
+grepQuiet "trace: proj 2" "$TEST_ROOT/memo13.err" || fail "a miss returns compute's value"
+! grepQuiet "trace: loading proj" "$TEST_ROOT/memo13.err" || fail "a miss should not call load"
+echo "outside six" > "$WORLD/outside.txt"
+REV11=$(commit_world "outside six")
+eval_at "$REV11" '[ "proj" ]' "$TEST_ROOT/memo14.err"
+[[ "$(computed "$TEST_ROOT/memo14.err" "proj a")" == 0 ]] || fail "proj should hit"
+grepQuiet "trace: loading proj" "$TEST_ROOT/memo14.err" || fail "a hit returns load's value"
+grepQuiet "trace: proj 2" "$TEST_ROOT/memo14.err" || fail "load's value should behave like compute's"
+out=$(nix eval --raw --extra-experimental-features 'nix-command' \
+    --expr 'toString (builtins.tecnixPersistentMemo "ns" "k" { compute = k: 3; project = throw "no"; load = throw "no"; })')
+[[ "$out" == "3" ]] || fail "outside cached evaluation the projecting form is compute key, got '$out'"
 
 echo "Outside cached target evaluation it is just f key"
 out=$(nix eval --raw --extra-experimental-features 'nix-command' \

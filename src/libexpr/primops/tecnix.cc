@@ -433,13 +433,45 @@ static void storePersistentMemo(
     upsertDependencyClosures(TecnixCacheScope{family.resolver, family.argsKey}, upserts, family.historyLimit);
 }
 
+/**
+ * What a `tecnixPersistentMemo` call computes, stores and returns. The plain
+ * form (`f`) stores and returns `f key` itself; the projecting form
+ * (`{ compute, project, load }`) computes the real value, stores `project`
+ * of it as data, and turns stored data back into a value with `load`.
+ */
+struct TecnixMemoFunctions
+{
+    Value * compute;
+    Value * project = nullptr;
+    Value * load = nullptr;
+};
+
+static TecnixMemoFunctions parseTecnixMemoFunctions(EvalState & state, const PosIdx pos, Value & arg)
+{
+    state.forceValue(arg, pos);
+    if (arg.type() != nAttrs)
+        return {.compute = &arg};
+    auto get = [&](std::string_view name) {
+        auto * attr = arg.attrs()->get(state.symbols.create(name));
+        if (!attr)
+            state
+                .error<EvalError>(
+                    "builtins.tecnixPersistentMemo: the attribute set form needs 'compute', 'project' and 'load'; '%s' is missing",
+                    name)
+                .atPos(pos)
+                .debugThrow();
+        return attr->value;
+    };
+    return {.compute = get("compute"), .project = get("project"), .load = get("load")};
+}
+
 static void prim_tecnixPersistentMemo(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     auto ns =
         state.forceStringNoCtx(*args[0], pos, "while evaluating the namespace passed to builtins.tecnixPersistentMemo");
     auto key =
         state.forceStringNoCtx(*args[1], pos, "while evaluating the key passed to builtins.tecnixPersistentMemo");
-    auto * function = args[2];
+    auto functions = parseTecnixMemoFunctions(state, pos, *args[2]);
 
     // A fresh key, for the same reason as in tecnixMemoize: `f` must not
     // inherit the label of however the caller computed it.
@@ -449,8 +481,9 @@ static void prim_tecnixPersistentMemo(EvalState & state, const PosIdx pos, Value
     auto * trackingCtx = currentTecnixThreadState.trackingContext;
     auto memoTarget = currentTecnixMemoTarget;
     if (!trackingCtx || !memoTarget.family) {
-        // Not inside a cached target evaluation: just `f key`.
-        state.callFunction(*function, *keyArg, v, pos);
+        // Not inside a cached target evaluation: just the value, with no
+        // projection to pay for.
+        state.callFunction(*functions.compute, *keyArg, v, pos);
         return;
     }
     auto & family = *memoTarget.family;
@@ -466,22 +499,39 @@ static void prim_tecnixPersistentMemo(EvalState & state, const PosIdx pos, Value
     }
 
     auto sourceDeps = emptyEvalSourceAccessSetId;
-    Value * result = lookupPersistentMemo(state, *trackingCtx, family, rowKey, sourceDeps);
-    if (result) {
+    Value * result = nullptr;
+    if (auto * stored = lookupPersistentMemo(state, *trackingCtx, family, rowKey, sourceDeps)) {
         printTalkative("tecnixPersistentMemo: hit for '%s' / '%s' in '%s'", ns, key, memoTarget.target);
         recordTrackedSourceAccessSetDependency(*trackingCtx, sourceDeps);
+        if (functions.load) {
+            result = state.allocValue();
+            state.callFunction(*functions.load, *stored, *result, pos);
+        } else
+            result = stored;
     } else {
         printTalkative("tecnixPersistentMemo: miss for '%s' / '%s' in '%s'", ns, key, memoTarget.target);
         result = state.allocValue();
+        auto * data = result;
         {
             TrackedSourceDepsScope scope(*trackingCtx);
-            state.callFunction(*function, *keyArg, *result, pos);
-            // Deeply, so the closure is complete and the result is data.
-            state.forceValueDeep(*result);
+            // The functions were forced before this scope began (to tell the
+            // two forms apart); whatever their own evaluation read belongs to
+            // this result too.
+            for (auto * fn : {args[2], functions.compute, functions.project, functions.load})
+                if (fn)
+                    if (auto set = fn->trackedSourceAccessSet(); set != emptyEvalSourceAccessSetId)
+                        recordTrackedSourceAccessSetDependency(*trackingCtx, set);
+            state.callFunction(*functions.compute, *keyArg, *result, pos);
+            if (functions.project) {
+                data = state.allocValue();
+                state.callFunction(*functions.project, *result, *data, pos);
+            }
+            // Deeply, so the closure is complete and the stored value is data.
+            state.forceValueDeep(*data);
             // Records the closure into this caller's frame too.
             sourceDeps = scope.finish(result);
         }
-        storePersistentMemo(state, family, rowKey, *result, sourceDeps);
+        storePersistentMemo(state, family, rowKey, *data, sourceDeps);
     }
 
     {
@@ -499,7 +549,8 @@ static RegisterPrimOp primop_tecnixPersistentMemo({
       provably the same value.
 
       Outside a cached `builtins.tecnixTargets` evaluation (pure evaluation
-      with `tecnix-eval-cache`), this is just `f key`.
+      with `tecnix-eval-cache` and `tecnix-persistent-memo`), this is just
+      `f key`.
 
       Inside one, the result is looked up under the target being evaluated,
       `ns` and `key` (both strings without context). A stored result is used
@@ -514,11 +565,16 @@ static RegisterPrimOp primop_tecnixPersistentMemo({
       Otherwise `f key` is evaluated, forced deeply, and stored, provided it
       is data: null, booleans, numbers, strings (with their contexts), lists
       and attribute sets. A result holding a function or a path is returned
-      as usual and not stored. Project such values to data before memoizing
-      them; a derivation's `drvPath` and output paths, for example, are
-      strings with context and are stored fine.
+      as usual and not stored.
 
-      `ns` and `key` together must name what `f` computes for this target:
+      For a value that isn't data (a derivation, say), pass
+      `{ compute, project, load }` as `f` instead: the value is `compute key`;
+      what is stored is `project` of it, which must be data; and a stored
+      result comes back as `load` of the stored data. Outside a cached target
+      evaluation, and on a miss, it is `compute key` itself, so `project` and
+      `load` must agree with it on whatever the caller reads.
+
+      `ns` and `key` together must name what is computed for this target:
       two calls in one target with the same `ns` and `key` share one result.
     )",
     .impl = prim_tecnixPersistentMemo,
