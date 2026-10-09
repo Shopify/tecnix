@@ -102,6 +102,29 @@ INSTANTIATE_TEST_SUITE_P(
                 .writable = true,
             },
             "nested_path_with_write",
+        },
+        ParsedGcsURLTestCase{
+            "gs://bucket/key?endpoint=http://localhost:4443",
+            {
+                .bucket = "bucket",
+                .key = {"key"},
+                .endpoint =
+                    ParsedURL{
+                        .scheme = "http",
+                        .authority = ParsedURL::Authority{.host = "localhost", .port = 4443},
+                        .path = {""},
+                    },
+            },
+            "with_absolute_endpoint_uri",
+        },
+        ParsedGcsURLTestCase{
+            "gs://bucket/key?endpoint=gcs.internal:4443",
+            {
+                .bucket = "bucket",
+                .key = {"key"},
+                .endpoint = ParsedURL::Authority{.host = "gcs.internal", .port = 4443},
+            },
+            "with_endpoint_authority",
         }),
     [](const ::testing::TestParamInfo<ParsedGcsURLTestCase> & info) { return info.param.description; });
 
@@ -133,7 +156,11 @@ INSTANTIATE_TEST_SUITE_P(
         InvalidGcsURLTestCase{
             "gs://127.0.0.1/key", "error: URI has a missing or invalid bucket name", "ip_address_bucket"},
         InvalidGcsURLTestCase{"gs://", "error: URI has a missing or invalid bucket name", "completely_empty"},
-        InvalidGcsURLTestCase{"gs://bucket", "error: URI has a missing or invalid key", "missing_key"}),
+        InvalidGcsURLTestCase{"gs://bucket", "error: URI has a missing or invalid key", "missing_key"},
+        InvalidGcsURLTestCase{
+            "gs://bucket/key?endpoint=ftp://example.com", "is not an http(s) URL with a host", "endpoint_not_http"},
+        InvalidGcsURLTestCase{
+            "gs://bucket/key?endpoint=http:///nohost", "is not an http(s) URL with a host", "endpoint_without_host"}),
     [](const ::testing::TestParamInfo<InvalidGcsURLTestCase> & info) { return info.param.description; });
 
 // =============================================================================
@@ -205,6 +232,58 @@ INSTANTIATE_TEST_SUITE_P(
             },
             "https://storage.googleapis.com/bucket/path/to/deep/object.txt",
             "deeply_nested_path_conversion",
+        },
+        GcsToHttpsConversionTestCase{
+            ParsedGcsURL{
+                .bucket = "bucket",
+                .key = {"key"},
+                .endpoint = ParsedURL::Authority{.host = "gcs.internal", .port = 4443},
+            },
+            ParsedURL{
+                .scheme = "https",
+                .authority = ParsedURL::Authority{.host = "gcs.internal", .port = 4443},
+                .path = {"", "bucket", "key"},
+            },
+            "https://gcs.internal:4443/bucket/key",
+            "endpoint_authority_conversion",
+        },
+        GcsToHttpsConversionTestCase{
+            ParsedGcsURL{
+                .bucket = "bucket",
+                .key = {"nar", "x.nar.xz"},
+                .endpoint =
+                    ParsedURL{
+                        .scheme = "http",
+                        .authority = ParsedURL::Authority{.host = "localhost", .port = 4443},
+                        .path = {""},
+                    },
+            },
+            ParsedURL{
+                .scheme = "http",
+                .authority = ParsedURL::Authority{.host = "localhost", .port = 4443},
+                .path = {"", "bucket", "nar", "x.nar.xz"},
+            },
+            "http://localhost:4443/bucket/nar/x.nar.xz",
+            "endpoint_url_conversion",
+        },
+        GcsToHttpsConversionTestCase{
+            ParsedGcsURL{
+                .bucket = "bucket",
+                .key = {"key"},
+                .endpoint =
+                    ParsedURL{
+                        .scheme = "http",
+                        .authority = ParsedURL::Authority{.host = "proxy"},
+                        .path = {"", "gcs", ""},
+                    },
+            },
+            ParsedURL{
+                .scheme = "http",
+                .authority = ParsedURL::Authority{.host = "proxy"},
+                .path = {"", "gcs", "bucket", "key"},
+            },
+            "http://proxy/gcs/bucket/key",
+            "endpoint_url_with_path_conversion",
         }),
     [](const ::testing::TestParamInfo<GcsToHttpsConversionTestCase> & info) { return info.param.description; });
 
