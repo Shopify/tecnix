@@ -69,6 +69,7 @@ sources = files(
   'tecnix-dependency-tracking.cc',
   'tecnix-eval-cache-row.cc',
   'tecnix-manifest-fingerprint.cc',
+  'tecnix-memo-value.cc',
   'tecnix-worldtree.cc',
   'tectonix.cc',
   'trivial.cc',

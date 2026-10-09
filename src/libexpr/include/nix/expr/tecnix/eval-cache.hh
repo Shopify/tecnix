@@ -99,6 +99,9 @@ public:
         target's evaluated drvPath/outputName result), if any. */
     std::optional<std::string_view> payload() const;
 
+    /** The matched candidate's dependency paths, copied out of the row. */
+    std::vector<std::string> paths() const;
+
 private:
     const Impl & impl;
 };
