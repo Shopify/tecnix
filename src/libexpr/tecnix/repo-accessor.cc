@@ -185,6 +185,15 @@ static std::vector<std::string> gitStatusDirtyPaths(const std::string & checkout
     return parseGitPorcelainZDirtyPaths(output);
 }
 
+const std::vector<std::string> & getTecnixCheckoutDirtyPaths(const EvalState & state)
+{
+    auto & data = state.tecnixEvalData();
+    std::call_once(data.tecnixCheckoutDirtyPathsFlag, [&]() {
+        data.tecnixCheckoutDirtyPaths = gitStatusDirtyPaths(state.settings.tectonixCheckoutPath.get());
+    });
+    return data.tecnixCheckoutDirtyPaths;
+}
+
 /**
  * Read delegation wrapper that preserves the path-fingerprint semantics Tecnix
  * historically used with libgit2: fingerprints are the git object id at the
@@ -750,12 +759,13 @@ ref<SourceAccessor> getTecnixRepoAccessor(EvalState & state)
 
             // Get all dirty files in the repo. This is load-bearing for source
             // closure validity: if we cannot determine the dirty overlay, do
-            // not continue with a clean-tree accessor (gitStatusDirtyPaths
+            // not continue with a clean-tree accessor (getTecnixCheckoutDirtyPaths
             // throws). Until the daemon exposes a full repo dirty-path RPC,
-            // materialized checkouts keep using git status at this boundary.
+            // materialized checkouts keep using git status at this boundary;
+            // dirty-zone detection reads the same result.
             TecnixSourceAccessor::DirtyPathSet dirtyFiles;
-            for (auto & path : gitStatusDirtyPaths(checkoutPath))
-                dirtyFiles.insert(std::move(path));
+            for (auto & path : getTecnixCheckoutDirtyPaths(state))
+                dirtyFiles.insert(path);
 
             tecnixData(state)->tecnixRepoAccessor = make_ref<TecnixSourceAccessor>(
                 cleanAccessor, makeFSSourceAccessor(checkoutPath), gitFingerprints, "", std::move(dirtyFiles));
