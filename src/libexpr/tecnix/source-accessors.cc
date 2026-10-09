@@ -540,11 +540,15 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & getTectonixDirtyZones(co
         gitEnvironment.erase("GIT_COMMON_DIR");
 
         // Get dirty files via git status with -z for NUL-separated output
-        // This handles filenames with special characters correctly
+        // This handles filenames with special characters correctly.
+        // --untracked-files=all lists each untracked file: by default git
+        // collapses an untracked directory to one `dir/` entry, which
+        // DirtyOverlaySourceAccessor (it overlays listed files) would drop, so
+        // a new directory in a checkout was invisible to the zone's source.
         auto checkoutPath = state.settings.tectonixCheckoutPath.get();
         auto [gitStatusCode, gitStatusOutput] = runProgram(
             {.program = "git",
-             .args = {"-C", checkoutPath, "status", "--porcelain", "-z"},
+             .args = {"-C", checkoutPath, "status", "--porcelain", "-z", "--untracked-files=all"},
              .environment = gitEnvironment});
         if (!statusOk(gitStatusCode)) {
             // If git status fails, treat all zones as clean (fallback)

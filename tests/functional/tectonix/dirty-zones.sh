@@ -56,4 +56,29 @@ if [[ "$clean_zone_dirty" == "true" ]]; then
     fail "Unmodified zone should not be dirty"
 fi
 
+# A dirty zone's source is the commit's tree with the checkout's changes over
+# it: modified files, untracked files, and files in untracked directories (git
+# status collapses those to one `dir/` entry unless asked to list them), but
+# not ignored files.
+mkdir -p "$TEST_WORLD/areas/tools/dev/newdir/deeper" "$TEST_WORLD/areas/tools/dev/build-out"
+echo "in an untracked dir" > "$TEST_WORLD/areas/tools/dev/newdir/deeper/x.txt"
+echo "untracked file" > "$TEST_WORLD/areas/tools/dev/new.txt"
+echo "ignored" > "$TEST_WORLD/areas/tools/dev/build-out/junk"
+echo "/areas/tools/dev/build-out/" >> "$TEST_WORLD/.git/info/exclude"
+
+zone_src_expr='let src = builtins.unsafeTectonixInternalZoneSrc "//areas/tools/dev"; in {
+  modified = builtins.readFile "${src}/zone.nix";
+  untrackedFile = builtins.readFile "${src}/new.txt";
+  untrackedDir = builtins.readFile "${src}/newdir/deeper/x.txt";
+  ignored = builtins.pathExists "${src}/build-out/junk";
+}'
+zone_src=$(tectonix_eval_json "$TEST_WORLD/.git" "$HEAD_SHA" "$zone_src_expr" \
+    --option tectonix-checkout-path "$TEST_WORLD")
+echo "Dirty zone source: $zone_src"
+
+echo "$zone_src" | grepQuiet '"modified":"[^"]*Modified content' || fail "zone source should carry the modified file"
+echo "$zone_src" | grepQuiet '"untrackedFile":"untracked file' || fail "zone source should carry an untracked file"
+echo "$zone_src" | grepQuiet '"untrackedDir":"in an untracked dir' || fail "zone source should carry files in an untracked directory"
+echo "$zone_src" | grepQuiet '"ignored":false' || fail "zone source should not carry ignored files"
+
 echo "Dirty zone tests passed!"
