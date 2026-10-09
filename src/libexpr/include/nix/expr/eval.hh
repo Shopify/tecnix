@@ -1215,11 +1215,13 @@ public:
      * Create a work item that propagates the current evaluation context.
      *
      * Tecnix tracked evaluation must not spawn work: work items capture only
-     * owned state, but a tracking context is a non-owning pointer into
-     * another thread's stack, and contexts are thread-confined by design (the
-     * only cross-thread dependency channel is the published label on a
-     * finished value). Detached prefetch sites skip spawning under tracking;
-     * anything else fails loudly here instead of dangling.
+     * owned state, but a tracking context is a non-owning pointer into the
+     * spawner's stack, and contexts are confined to the fiber or thread that
+     * created them by design (`Executor::runFiber()` swaps
+     * `currentTecnixThreadState` on every fiber switch; the only cross-fiber
+     * dependency channel is the published label on a finished value).
+     * Detached prefetch sites skip spawning under tracking; anything else
+     * fails loudly here instead of dangling.
      */
     template<typename T>
     auto makeWork(T && t)

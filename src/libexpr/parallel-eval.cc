@@ -72,6 +72,16 @@ struct Executor::Fiber
      */
     EvalState::EvalContext evalContext;
 
+    /**
+     * Tecnix: this fiber's dependency-tracking state while it's not
+     * running. Like `evalContext`, `runFiber()` swaps it with the
+     * thread-local `currentTecnixThreadState` on every switch-in/out:
+     * the tracking context and source-deps frames are pointers into
+     * the fiber's own stack, so they must not be visible to the other
+     * fibers interleaved on the same thread.
+     */
+    TecnixThreadState tecnixThreadState;
+
     std::promise<void> promise;
 
     work_t work;
@@ -447,6 +457,7 @@ bool Executor::runFiber(FiberPtr fiber)
     myEvalThreadId = fib->evalThreadId;
     CallDepth::callDepth = fib->callDepth;
     std::swap(EvalState::evalContext, fib->evalContext);
+    std::swap(currentTecnixThreadState, fib->tecnixThreadState);
 
 #if NIX_USE_BOEHMGC
     /* Make this thread's stack scannable by the GC while the fiber
@@ -472,6 +483,7 @@ bool Executor::runFiber(FiberPtr fiber)
     fib->callDepth = CallDepth::callDepth;
     CallDepth::callDepth = savedCallDepth;
     std::swap(EvalState::evalContext, fib->evalContext);
+    std::swap(currentTecnixThreadState, fib->tecnixThreadState);
 
     if (fib->ctx) {
         /* The fiber suspended itself in `waitOnThunk()`. We are still

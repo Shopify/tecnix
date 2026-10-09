@@ -134,11 +134,17 @@ static RegisterPrimOp primop_tecnixInternalSourceDepsList({
 // share the same tracked dependencies without re-evaluating `f k`.
 // ============================================================================
 
-/* Calls whose `f k` evaluation is in progress on this thread. Re-entering one
-   (zone A loading itself transitively) can only be a genuine cycle; the guard
-   turns it into a catchable error instead of unbounded recursion. The key
-   views borrow from the calls' own arguments, which outlive their entries. */
-static thread_local std::vector<EvalTecnixMemoizeKey::Lookup> tecnixMemoizeInProgress;
+/* Calls whose `f k` evaluation is in progress in the current evaluation
+   (fiber or thread; see `TecnixThreadState`), as a chain of frames on its
+   stack. Re-entering one (zone A loading itself transitively) can only be a
+   genuine cycle; the guard turns it into a catchable error instead of
+   unbounded recursion. The key views borrow from the calls' own arguments,
+   which outlive their frames. */
+struct TecnixMemoizeInProgressFrame
+{
+    EvalTecnixMemoizeKey::Lookup lookup;
+    TecnixMemoizeInProgressFrame * next;
+};
 
 static void prim_tecnixMemoize(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
@@ -173,8 +179,8 @@ static void prim_tecnixMemoize(EvalState & state, const PosIdx pos, Value ** arg
         return;
     }
 
-    for (auto & inProgress : tecnixMemoizeInProgress)
-        if (EvalTecnixMemoizeKey::Equal{}(inProgress, lookup))
+    for (auto * frame = currentTecnixThreadState.tecnixMemoizeInProgress; frame; frame = frame->next)
+        if (EvalTecnixMemoizeKey::Equal{}(frame->lookup, lookup))
             // A value that needs itself: fail as infinite recursion does, which
             // builtins.tryEval cannot catch.
             state
@@ -182,8 +188,9 @@ static void prim_tecnixMemoize(EvalState & state, const PosIdx pos, Value ** arg
                 .atPos(pos)
                 .debugThrow();
 
-    tecnixMemoizeInProgress.push_back(lookup);
-    Finally popInProgress([&]() { tecnixMemoizeInProgress.pop_back(); });
+    TecnixMemoizeInProgressFrame inProgress{lookup, currentTecnixThreadState.tecnixMemoizeInProgress};
+    currentTecnixThreadState.tecnixMemoizeInProgress = &inProgress;
+    Finally popInProgress([&]() { currentTecnixThreadState.tecnixMemoizeInProgress = inProgress.next; });
 
     // Evaluate `f k` outside any map bucket lock, so re-entrant misses (zone A
     // loading zone B) can insert their own entries without deadlock. Under
