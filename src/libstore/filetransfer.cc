@@ -1610,21 +1610,4 @@ void FileTransfer::download(
 
 void FileTransferError::anchor() {}
 
-template<typename... Args>
-FileTransferError::FileTransferError(
-    FileTransfer::Error error, std::optional<std::string> response, const Args &... args)
-    : CloneableError(args...)
-    , error(error)
-    , response(response)
-{
-    const auto hf = HintFmt(args...);
-    // FIXME: Due to https://github.com/NixOS/nix/issues/3841 we don't know how
-    // to print different messages for different verbosity levels. For now
-    // we add some heuristics for detecting when we want to show the response.
-    if (response && (response->size() < 1024 || response->find("<html>") != std::string::npos))
-        err.msg = HintFmt("%1%\n\nresponse body:\n\n%2%", Uncolored(hf.str()), chomp(*response));
-    else
-        err.msg = hf;
-}
-
 } // namespace nix
