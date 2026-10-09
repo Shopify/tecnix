@@ -1545,7 +1545,7 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
         auto preparedResolve = prepareTrackedResolveFunction(state, pos, args);
 
         std::optional<TecnixMemoRowFamily> memoFamily;
-        if (useCache)
+        if (useCache && state.settings.tecnixPersistentMemo)
             memoFamily.emplace(args.resolver, args.argsKey, fingerprintCache, state.settings.tecnixEvalCacheHistory);
 
         auto evalMiss = [&](size_t i) {
