@@ -190,7 +190,7 @@ TYPED_TEST(DerivationAdvancedAttrsBothTest, advancedAttributes_defaults)
 
         EXPECT_EQ(options, advancedAttributes_defaults);
 
-        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings()), true);
+        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings(), /*buildableHere=*/true), true);
         EXPECT_EQ(options.useUidRange(got), false);
     });
 };
@@ -238,7 +238,10 @@ TYPED_TEST(DerivationAdvancedAttrsBothTest, advancedAttributes)
 
         EXPECT_EQ(options, expected);
 
-        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings()), false);
+        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings(), /*buildableHere=*/true), false);
+        // `allowSubstitutes = false` doesn't stop a machine that can't build the
+        // derivation from fetching it.
+        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings(), /*buildableHere=*/false), true);
         EXPECT_EQ(options.useUidRange(got), true);
     });
 };
@@ -330,7 +333,7 @@ TYPED_TEST(DerivationAdvancedAttrsBothTest, advancedAttributes_structuredAttrs_d
 
         EXPECT_EQ(options, advancedAttributes_structuredAttrs_defaults);
 
-        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings()), true);
+        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings(), /*buildableHere=*/true), true);
         EXPECT_EQ(options.useUidRange(got), false);
     });
 };
@@ -395,7 +398,10 @@ TYPED_TEST(DerivationAdvancedAttrsBothTest, advancedAttributes_structuredAttrs)
 
         EXPECT_EQ(options, expected);
 
-        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings()), false);
+        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings(), /*buildableHere=*/true), false);
+        // `allowSubstitutes = false` doesn't stop a machine that can't build the
+        // derivation from fetching it.
+        EXPECT_EQ(options.substitutesAllowed(settings.getWorkerSettings(), /*buildableHere=*/false), true);
         EXPECT_EQ(options.useUidRange(got), true);
     });
 };
@@ -619,5 +625,31 @@ TEST_JSON_OPTIONS(DerivationAdvancedAttrsTest, StorePath, structuredAttrs_defaul
 TEST_JSON_OPTIONS(DerivationAdvancedAttrsTest, StorePath, structuredAttrs_all_set, sp_structuredAttrs_all_set)
 
 #undef TEST_JSON_OPTIONS
+
+/**
+ * The platform test behind `substitutesAllowed`'s `buildableHere`: the
+ * derivation's own platform, `extra-platforms`, `wasm32-wasip1` and builtins
+ * build here; any other platform doesn't, remote builders or not.
+ */
+TEST_F(DerivationAdvancedAttrsTest, canBuildLocally)
+{
+    this->readTest("advanced-attributes.drv", [&](auto encoded) {
+        auto drv = parseDerivation(*this->store, std::move(encoded), "foo", this->mockXpSettings);
+        ASSERT_EQ(drv.platform, "my-system");
+
+        EXPECT_TRUE(canBuildLocally(drv, "my-system", {}));
+        EXPECT_FALSE(canBuildLocally(drv, "other-system", {}));
+        EXPECT_TRUE(canBuildLocally(drv, "other-system", {"my-system"}));
+        EXPECT_FALSE(canBuildLocally(drv, "other-system", {"third-system"}));
+
+        auto wasm = drv;
+        wasm.platform = "wasm32-wasip1";
+        EXPECT_TRUE(canBuildLocally(wasm, "other-system", {}));
+
+        auto builtin = drv;
+        builtin.builder = "builtin:fetchurl";
+        EXPECT_TRUE(canBuildLocally(builtin, "other-system", {}));
+    });
+}
 
 } // namespace nix

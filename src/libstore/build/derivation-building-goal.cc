@@ -417,8 +417,7 @@ Goal::Co DerivationBuildingGoal::tryToBuild(StorePathSet inputPaths)
 
         WrongLocalStore wrongStore;
 
-        if (drv->platform != settings.thisSystem.get() && drv->platform != "wasm32-wasip1"
-            && !settings.extraPlatforms.get().count(drv->platform) && !drv->isBuiltin())
+        if (!canBuildLocally(*drv))
             wrongStore.badPlatform = WrongLocalStore::Pair<std::string>{drv->platform, settings.thisSystem.get()};
 
         {

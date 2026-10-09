@@ -265,6 +265,8 @@ public:
         "always-allow-substitutes",
         R"(
           If set to `true`, Nix ignores the [`allowSubstitutes`](@docroot@/language/advanced-attributes.md) attribute in derivations and always attempt to use [available substituters](#conf-substituters).
+
+          Either way, a derivation this machine can't build itself (its `system` is neither [`system`](#conf-system) nor one of [`extra-platforms`](#conf-extra-platforms), and it isn't a builtin) is always substituted when it can be: remote builders don't count, and refusing would only turn a download into a "required system" failure.
         )"};
 
     Setting<bool> buildersUseSubstitutes{

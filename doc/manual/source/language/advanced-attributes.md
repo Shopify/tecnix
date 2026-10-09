@@ -182,16 +182,14 @@ See the [corresponding section in the derivation output page](@docroot@/store/de
     This is useful for derivations that are cheapest to build locally.
 
   - [`allowSubstitutes`]{#adv-attr-allowSubstitutes}\
-    If this attribute is set to `false`, then Nix will always build this derivation (locally or remotely); it will not try to substitute its outputs.
+    If this attribute is set to `false`, then Nix will build this derivation (locally or remotely) instead of substituting its outputs, when this machine can build it.
     This is useful for derivations that are cheaper to build than to substitute.
 
     This attribute can be ignored by setting [`always-allow-substitutes`](@docroot@/command-ref/conf-file.md#conf-always-allow-substitutes) to `true`.
 
     > **Note**
     >
-    > If set to `false`, the [`builder`] should be able to run on the system type specified in the [`system` attribute](./derivations.md#attr-system), since the derivation cannot be substituted.
-
-    [`builder`]: ./derivations.md#attr-builder
+    > It doesn't apply on a machine that can't build the derivation itself: one whose [`system`](@docroot@/command-ref/conf-file.md#conf-system) and [`extra-platforms`](@docroot@/command-ref/conf-file.md#conf-extra-platforms) don't include the [`system` attribute](./derivations.md#attr-system), for a derivation that isn't a builtin. There Nix still tries substituters first; remote builders don't count.
 
 - [`requiredSystemFeatures`]{#adv-attr-requiredSystemFeatures}\
   If a derivation has the `requiredSystemFeatures` attribute, then Nix will only build it on a machine that has the corresponding features set in its [`system-features` configuration](@docroot@/command-ref/conf-file.md#conf-system-features).

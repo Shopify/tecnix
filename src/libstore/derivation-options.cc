@@ -4,6 +4,7 @@
 #include "nix/store/derivations.hh"
 #include "nix/store/derived-path.hh"
 #include "nix/store/store-api.hh"
+#include "nix/store/globals.hh"
 #include "nix/util/types.hh"
 #include "nix/util/util.hh"
 
@@ -370,9 +371,20 @@ StringSet DerivationOptions<Input>::getRequiredSystemFeatures(const BasicDerivat
 }
 
 template<typename Input>
-bool DerivationOptions<Input>::substitutesAllowed(const WorkerSettings & workerSettings) const
+bool DerivationOptions<Input>::substitutesAllowed(const WorkerSettings & workerSettings, bool buildableHere) const
 {
-    return workerSettings.alwaysAllowSubstitutes ? true : allowSubstitutes;
+    return workerSettings.alwaysAllowSubstitutes || allowSubstitutes || !buildableHere;
+}
+
+bool canBuildLocally(const BasicDerivation & drv, std::string_view thisSystem, const StringSet & extraPlatforms)
+{
+    return drv.platform == thisSystem || drv.platform == "wasm32-wasip1" || extraPlatforms.contains(drv.platform)
+           || drv.isBuiltin();
+}
+
+bool canBuildLocally(const BasicDerivation & drv)
+{
+    return canBuildLocally(drv, settings.thisSystem.get(), settings.extraPlatforms.get());
 }
 
 template<typename Input>

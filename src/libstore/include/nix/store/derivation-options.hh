@@ -182,7 +182,17 @@ struct DerivationOptions
      */
     StringSet getRequiredSystemFeatures(const BasicDerivation & drv) const;
 
-    bool substitutesAllowed(const WorkerSettings & workerSettings) const;
+    /**
+     * Whether to try substituters for the derivation's outputs before
+     * building it.
+     *
+     * `allowSubstitutes = false` asks Nix to build the derivation instead of
+     * fetching it, and `always-allow-substitutes` overrides that. Neither
+     * applies when this machine can't build the derivation itself
+     * (`buildableHere` false, see `canBuildLocally`): refusing to substitute
+     * it would only turn a download into a "required system" failure.
+     */
+    bool substitutesAllowed(const WorkerSettings & workerSettings, bool buildableHere) const;
 
     /**
      * @param drv See note on `getRequiredSystemFeatures`
@@ -192,6 +202,21 @@ struct DerivationOptions
 
 extern template struct DerivationOptions<StorePath>;
 extern template struct DerivationOptions<SingleDerivedPath>;
+
+/**
+ * Whether this machine's own builder can build `drv`: its platform is
+ * `thisSystem`, one of `extraPlatforms` or `wasm32-wasip1`, or the
+ * derivation is a builtin. Remote builders don't count. This is the platform
+ * test the local build path applies before it refuses a derivation with
+ * "required system".
+ */
+bool canBuildLocally(const BasicDerivation & drv, std::string_view thisSystem, const StringSet & extraPlatforms);
+
+/**
+ * `canBuildLocally` against the global `system` and `extra-platforms`
+ * settings.
+ */
+bool canBuildLocally(const BasicDerivation & drv);
 
 struct DerivationOutput;
 

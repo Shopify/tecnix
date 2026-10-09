@@ -87,7 +87,7 @@ Goal::Co DerivationGoal::haveDerivation(bool storeDerivation)
         /* We are first going to try to create the invalid output paths
            through substitutes.  If that doesn't work, we'll build
            them. */
-        if (worker.settings.useSubstitutes && drvOptions.substitutesAllowed(worker.settings)) {
+        if (worker.settings.useSubstitutes && drvOptions.substitutesAllowed(worker.settings, canBuildLocally(*drv))) {
             if (!checkResult) {
                 DrvOutput id{drvPath, wantedOutput};
                 auto g = worker.makeDrvOutputSubstitutionGoal(id);
