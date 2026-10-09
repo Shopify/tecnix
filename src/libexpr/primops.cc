@@ -1,4 +1,5 @@
 #include "nix/store/derivations.hh"
+#include "nix/store/drv-hash-cache.hh"
 #include "nix/store/downstream-placeholder.hh"
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval.hh"
@@ -1894,6 +1895,7 @@ static void derivationStrictInternal(
        read them later. */
     {
         auto h = hashDerivationModulo(*state.store, drv, false);
+        recordPersistentDrvHash(*state.store, drvPath, h);
         drvHashes.insert_or_assign(drvPath, std::move(h));
     }
 
