@@ -9,6 +9,7 @@ suites += {
     'ingestion-stats.sh',
     'memoize.sh',
     'persistent-memo.sh',
+    'drv-hash-cache.sh',
   ],
   'workdir' : meson.current_source_dir(),
 }
