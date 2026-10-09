@@ -1,8 +1,6 @@
 #include "nix/expr/attr-set.hh"
 #include "nix/expr/eval-error.hh"
-#include "nix/util/configuration.hh"
 #include "nix/expr/eval.hh"
-#include "nix/store/globals.hh"
 #include "nix/store/path.hh"
 #include "nix/expr/primops.hh"
 #include "nix/expr/value.hh"
@@ -13,7 +11,6 @@
 #include "nix_api_util_internal.h"
 #include "nix_api_store_internal.h"
 #include "nix_api_value.h"
-#include "nix/expr/value/context.hh"
 
 // Internal helper functions to check [in] and [out] `Value *` parameters
 static const nix::Value & check_value_not_null(const nix_value * value)
@@ -159,7 +156,7 @@ PrimOp * nix_alloc_primop(
                     .name = name,
                     .args = {},
                     .arity = (size_t) arity,
-                    .doc = doc,
+                    .doc = doc ? std::optional<std::string>{doc} : std::nullopt,
                     .impl = std::bind(nix_c_primop_wrapper, fun, user_data, arity, _1, _2, _3, _4)};
         if (args)
             for (size_t i = 0; args[i]; i++)

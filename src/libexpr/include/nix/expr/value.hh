@@ -1556,13 +1556,6 @@ public:
 #include "nix/expr/tecnix/value-layout-tripwire.hh"
 
 typedef std::vector<Value *, traceable_allocator<Value *>> ValueVector;
-typedef boost::unordered_flat_map<
-    Symbol,
-    Value *,
-    std::hash<Symbol>,
-    std::equal_to<Symbol>,
-    traceable_allocator<std::pair<const Symbol, Value *>>>
-    ValueMap;
 
 void forceNoNullByte(std::string_view s, std::function<Pos()> = nullptr);
 } // namespace nix

@@ -42,6 +42,7 @@ enum struct ExperimentalFeature {
     WasmDerivations,
     Provenance,
     CNSA,
+    BakedDerivations,
 };
 
 extern std::set<std::string> stabilizedFeatures;
@@ -87,6 +88,8 @@ std::set<ExperimentalFeature> parseFeatures(const StringSet &);
  */
 class MissingExperimentalFeature final : public CloneableError<MissingExperimentalFeature, Error>
 {
+    void anchor() override;
+
 public:
     /**
      * The experimental feature that was required but not enabled.

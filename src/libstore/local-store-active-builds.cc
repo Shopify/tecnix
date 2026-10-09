@@ -220,11 +220,11 @@ std::vector<ActiveBuildInfo> LocalStore::queryActiveBuilds()
             try {
 #  ifdef __linux__
                 if (info.cgroup) {
-                    for (auto pid : getPidsInCgroup(*info.cgroup))
+                    for (auto pid : linux::getPidsInCgroup(*info.cgroup))
                         info.processes.push_back(getProcessInfo(pid));
 
                     /* Read CPU statistics from the cgroup. */
-                    auto stats = getCgroupStats(*info.cgroup);
+                    auto stats = linux::getCgroupStats(*info.cgroup);
                     info.utime = stats.cpuUser;
                     info.stime = stats.cpuSystem;
                 } else
@@ -262,7 +262,10 @@ LocalStore::BuildHandle LocalStore::buildStarted(const ActiveBuild & build)
     // Lock the file to denote that the build is active.
     lockFile(infoFd.get(), ltWrite, true);
 
-    writeFile(infoFilePath, nlohmann::json(build).dump(), 0600, FsSync::Yes);
+    // Don't fsync: the lock above is what marks the build as active, and queryActiveBuilds() deletes any file it
+    // can lock, so durability buys nothing here. An fsync (F_FULLFSYNC on macOS) would also delay the parent
+    // between starting the builder and reading its setup messages.
+    writeFile(infoFilePath, nlohmann::json(build).dump(), 0600, FsSync::No);
 
     activeBuilds.lock()->emplace(
         id,

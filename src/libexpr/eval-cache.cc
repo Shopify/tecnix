@@ -10,6 +10,8 @@
 
 namespace nix::eval_cache {
 
+void CachedEvalError::anchor() {}
+
 CachedEvalError::CachedEvalError(ref<AttrCursor> cursor, Symbol attr)
     : CloneableError(cursor->root->state, "cached failure of attribute '%s'", cursor->getAttrPathStr(attr))
     , cursor(cursor)
@@ -56,6 +58,9 @@ struct AttrDb
         SQLiteStmt insertAttributeWithContext;
         SQLiteStmt queryAttribute;
         SQLiteStmt queryAttributes;
+        SQLiteStmt upsertAttribute;
+        SQLiteStmt insertAttributeIfNotExists;
+        SQLiteStmt deleteMissingChildren;
         std::unique_ptr<SQLiteTxn> txn;
     };
 
@@ -90,6 +95,17 @@ struct AttrDb
 
         state->queryAttributes.create(state->db, "select name from Attributes where parent = ?");
 
+        state->upsertAttribute.create(
+            state->db,
+            "insert into Attributes(parent, name, type, value) values (?, ?, ?, ?) "
+            "on conflict(parent, name) do update set type = excluded.type, value = excluded.value "
+            "returning rowid");
+
+        state->insertAttributeIfNotExists.create(
+            state->db, "insert or ignore into Attributes(parent, name, type, value) values (?, ?, ?, ?)");
+
+        state->deleteMissingChildren.create(state->db, "delete from Attributes where parent = ? and type = 3");
+
         state->txn = std::make_unique<SQLiteTxn>(state->db);
     }
 
@@ -106,7 +122,7 @@ struct AttrDb
     }
 
     template<typename F>
-    AttrId doSQLite(F && fun)
+    AttrId doSQLite(const F & fun)
     {
         if (failed)
             return 0;
@@ -124,18 +140,20 @@ struct AttrDb
         return doSQLite([&]() {
             auto state(_state->lock());
 
-            state->insertAttribute.use()
-                .apply(key.first)
-                .apply(symbols[key.second])
-                .apply(AttrType::FullAttrs)
-                .apply(0, false)
-                .exec();
-
-            AttrId rowId = state->db.getLastInsertedRowId();
+            // Seal the attribute names: we now know the complete set.
+            auto upsertAttribute(state->upsertAttribute.use()
+                                     .apply(key.first)
+                                     .apply(symbols[key.second])
+                                     .apply(AttrType::FullAttrs)
+                                     .apply(0, false));
+            upsertAttribute.next();
+            auto rowId = (AttrId) upsertAttribute.getInt(0);
             assert(rowId);
+            state->deleteMissingChildren.use().apply(rowId).exec();
 
+            // Insert children as placeholders, but don't replace existing entries
             for (auto & attr : attrs)
-                state->insertAttribute.use()
+                state->insertAttributeIfNotExists.use()
                     .apply(rowId)
                     .apply(symbols[attr])
                     .apply(AttrType::Placeholder)
@@ -349,22 +367,49 @@ static std::shared_ptr<AttrDb> makeAttrDb(const StoreDirConfig & cfg, const Hash
     }
 }
 
+/**
+ * An expression that evaluates to the root value of an `EvalCache` by
+ * calling its root loader. See `EvalCache::rootLoaderExpr`.
+ */
+struct ExprRootLoader : Expr
+{
+    EvalCache::RootLoader rootLoader;
+
+    ExprRootLoader(EvalCache::RootLoader rootLoader)
+        : rootLoader(std::move(rootLoader))
+    {
+    }
+
+    void eval(EvalState & state, Env & env, Value & v) override;
+
+    void show(const SymbolTable & symbols, std::ostream & str) const override
+    {
+        str << "<root value>";
+    }
+};
+
+void ExprRootLoader::eval(EvalState & state, Env & env, Value & v)
+{
+    debug("getting root value");
+    auto res = rootLoader();
+    state.forceValue(*res, noPos);
+    v = *res;
+}
+
 EvalCache::EvalCache(
     std::optional<std::reference_wrapper<const Hash>> useCache, EvalState & state, RootLoader rootLoader)
     : db(useCache ? makeAttrDb(*state.store, *useCache, state.symbols) : nullptr)
     , state(state)
-    , rootLoader(rootLoader)
+    , rootLoaderExpr(std::make_unique<ExprRootLoader>(std::move(rootLoader)))
+    , rootValue(state.allocValue())
 {
+    (*rootValue)->mkThunk(&state.baseEnv, rootLoaderExpr.get());
 }
 
 Value * EvalCache::getRootValue()
 {
-    auto value(this->value.lock());
-    if (!*value) {
-        debug("getting root value");
-        *value = RootValue(rootLoader());
-    }
-    return **value;
+    state.forceValue(**rootValue, noPos);
+    return *rootValue;
 }
 
 ref<AttrCursor> EvalCache::getRoot()
@@ -395,22 +440,34 @@ AttrKey AttrCursor::getKey()
 
 Value & AttrCursor::getValue()
 {
-    /* Note: this lock is held while the value is being evaluated,
-       so concurrent calls block until the value is available. Lock
-       ordering is strictly child -> parent, so this cannot
-       deadlock. */
-    auto value(_value.lock());
-    if (!*value) {
-        if (parent) {
-            auto & vParent = parent->first->getValue();
-            root->state.forceAttrs(vParent, noPos, "while searching for an attribute");
-            auto attr = vParent.attrs()->get(parent->second);
-            if (!attr)
-                throw Error("attribute '%s' is unexpectedly missing", getAttrPathStr());
-            *value = RootValue(attr->value);
-        } else
-            *value = RootValue(root->getRootValue());
+    {
+        auto value(_value.lock());
+        if (*value)
+            return ***value;
     }
+
+    /* Note: the lock must not be held while the value is being
+       evaluated: the evaluation may suspend the current fiber, and
+       another fiber on the same thread blocking on the lock would
+       then deadlock the fiber scheduler (fibers are pinned to their
+       thread, see `Executor::Worker`). Concurrent calls may therefore
+       both force the parent, which the thunk machinery deduplicates
+       (by suspending the fiber rather than blocking the thread), and
+       both look up the attribute, which is idempotent. */
+    Value * v;
+    if (parent) {
+        auto & vParent = parent->first->getValue();
+        root->state.forceAttrs(vParent, noPos, "while searching for an attribute");
+        auto attr = vParent.attrs()->get(parent->second);
+        if (!attr)
+            throw Error("attribute '%s' is unexpectedly missing", getAttrPathStr());
+        v = attr->value;
+    } else
+        v = root->getRootValue();
+
+    auto value(_value.lock());
+    if (!*value)
+        *value = RootValue(v);
     return ***value;
 }
 
@@ -475,9 +532,13 @@ Value & AttrCursor::forceValue()
     }
 
     if (root->db && (!cachedValue || std::get_if<placeholder_t>(&cachedValue->second))) {
-        if (v.type() == nString)
-            cachedValue = {root->db->setString(getKey(), v.string_view(), v.context()), string_t{v.string_view(), {}}};
-        else if (v.type() == nPath) {
+        if (v.type() == nString) {
+            NixStringContext context;
+            copyContext(v, context);
+            cachedValue = {
+                root->db->setString(getKey(), v.string_view(), v.context()),
+                string_t{v.string_view(), std::move(context)}};
+        } else if (v.type() == nPath) {
             auto path = v.path().path;
             cachedValue = {root->db->setString(getKey(), path.abs()), string_t{path.abs(), {}}};
         } else if (v.type() == nBool)
@@ -783,6 +844,7 @@ StorePath AttrCursor::forceDerivation()
         // Evaluation may have queued this derivation. Do not let a concurrent
         // validity lookup cache a missing path after the writer invalidates it.
         root->state.waitForPath(drvPath);
+        root->state.store->addTempRoot(drvPath);
         if (!root->state.store->isValidPath(drvPath)) {
             /* The eval cache contains 'drvPath', but the actual path has
                been garbage-collected. So force it to be regenerated. */

@@ -20,8 +20,8 @@ TEST_F(nix_api_expr_test, nix_eval_state_lookup_path)
     auto delTmpDir = std::make_unique<nix::AutoDelete>(tmpDir, true);
     auto nixpkgs = tmpDir / "pkgs";
     auto nixos = tmpDir / "cfg";
-    std::filesystem::create_directories(nixpkgs);
-    std::filesystem::create_directories(nixos);
+    nix::createDirs(nixpkgs);
+    nix::createDirs(nixos);
 
     std::string nixpkgsEntry = "nixpkgs=" + nixpkgs.string();
     std::string nixosEntry = "nixos-config=" + nixos.string();
@@ -242,6 +242,16 @@ primop_square(void * user_data, nix_c_context * context, EvalState * state, nix_
     assert(user_data == &SAMPLE_USER_DATA);
     auto i = nix_get_int(context, args[0]);
     nix_init_int(context, ret, i * i);
+}
+
+TEST_F(nix_api_expr_test, nix_alloc_primop_without_doc)
+{
+    PrimOp * primop = nix_alloc_primop(ctx, primop_square, 1, "undocumented", nullptr, nullptr, nullptr);
+    assert_ctx_ok();
+    ASSERT_NE(nullptr, primop);
+
+    nix_gc_decref(ctx, primop);
+    assert_ctx_ok();
 }
 
 TEST_F(nix_api_expr_test, nix_expr_primop)

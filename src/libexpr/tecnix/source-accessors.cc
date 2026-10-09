@@ -1,6 +1,8 @@
 #include "nix/expr/eval.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
 #include "tecnix/eval-data.hh"
+#include "nix/util/mounted-source-accessor.hh"
+#include "nix/util/users.hh"
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/fetchers/git-utils.hh"
 #include "nix/store/store-api.hh"
@@ -866,6 +868,8 @@ static StorePath mountLegacyTectonixZoneByTreeSha(EvalState & state, const Hash 
  */
 struct DirtyOverlaySourceAccessor : SourceAccessor
 {
+    void anchor() override;
+
     ref<SourceAccessor> base, disk;
     boost::unordered_flat_set<std::string> dirtyFiles, dirtyDirs;
 
@@ -953,6 +957,8 @@ struct DirtyOverlaySourceAccessor : SourceAccessor
         return entries;
     }
 };
+
+void DirtyOverlaySourceAccessor::anchor() {}
 
 static StorePath getLegacyTectonixZoneFromCheckout(
     EvalState & state, std::string_view zonePath, const boost::unordered_flat_set<std::string> * dirtyFiles)

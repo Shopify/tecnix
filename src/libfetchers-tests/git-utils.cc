@@ -11,13 +11,12 @@
 #include <gtest/gtest.h>
 #include "nix/util/fs-sink.hh"
 #include "nix/util/serialise.hh"
-#include "nix/fetchers/git-lfs-fetch.hh"
 
 #include <git2/blob.h>
 #include <git2/tree.h>
 #include <fstream>
 
-namespace nix {
+namespace nix::fetchers {
 
 class GitUtilsTest : public ::testing::Test
 {
@@ -424,4 +423,4 @@ TEST(GitUtils, isLegalRefName)
     ASSERT_FALSE(isLegalRefName(""));
 }
 
-} // namespace nix
+} // namespace nix::fetchers

@@ -1,5 +1,8 @@
 #include "nix/expr/primops.hh"
 #include "nix/expr/eval-inline.hh"
+#include "nix/expr/parallel-eval.hh"
+#include "nix/util/users.hh"
+#include "nix/util/file-system.hh"
 
 #include <wasmtime.hh>
 #include <boost/unordered/concurrent_flat_map.hpp>
@@ -18,12 +21,41 @@ T unwrap(Result<T, E> && res)
     throw Error(res.err().message());
 }
 
+/**
+ * Enable wasmtime's compilation cache, so that a module is only compiled
+ * once per machine rather than once per process. The cache lives in Nix's
+ * cache directory; wasmtime is configured through a TOML file, which we
+ * write there as well.
+ */
+static void enableCompilationCache(wasmtime::Config & config)
+{
+    try {
+        auto cacheDir = getCacheDir() / "wasmtime";
+        createDirs(cacheDir);
+
+        // TOML literal strings cannot contain single quotes.
+        auto dir = cacheDir.string();
+        if (dir.find('\'') != std::string::npos)
+            throw Error("cache directory '%s' contains a single quote", dir);
+
+        auto configFile = cacheDir / "config.toml";
+        auto contents = fmt("[cache]\ndirectory = '%s'\n", dir);
+        writeFile(configFile, contents);
+
+        unwrap(config.cache_load(configFile.string()));
+    } catch (Error & e) {
+        // Not being able to cache is not fatal.
+        warn("unable to enable the Wasm compilation cache: %s", e.msg());
+    }
+}
+
 static Engine & getEngine()
 {
     static Engine engine = []() {
         wasmtime::Config config;
         config.pooling_allocation_strategy(PoolAllocationConfig());
         config.memory_init_cow(true);
+        enableCompilationCache(config);
         return Engine(std::move(config));
     }();
     return engine;
@@ -37,14 +69,6 @@ static std::span<uint8_t> string2span(std::string_view s)
 static std::string_view span2string(std::span<uint8_t> s)
 {
     return std::string_view((char *) s.data(), s.size());
-}
-
-template<typename T>
-static std::span<T> subspan(std::span<uint8_t> s, size_t len)
-{
-    if (s.size() < len * sizeof(T))
-        throw Error("Wasm memory access out of bounds");
-    return std::span((T *) s.data(), len);
 }
 
 // FIXME: move to wasmtime C++ wrapper.
@@ -132,6 +156,8 @@ struct NixWasmInstance
     wasmtime::Store::Context wasmCtx;
     Instance instance;
     Memory memory_;
+    // The guest's allocator, if it exports one (see `allocInGuest`).
+    std::optional<Func> allocFn;
 
     ValueVector values;
     std::exception_ptr ex;
@@ -152,6 +178,23 @@ struct NixWasmInstance
         , logPrefix(pre->name)
     {
         wasmCtx.set_data(this);
+
+        if (auto ext = instance.get(wasmCtx, "nix_wasm_alloc")) {
+            auto fun = std::get_if<Func>(&*ext);
+            if (!fun)
+                throw Error("export 'nix_wasm_alloc' of Wasm module '%s' is not a function", pre->name);
+            auto type = fun->type(wasmCtx);
+            auto params = type->params().begin();
+            auto results = type->results().begin();
+            auto i32Type = ValType::i32();
+            ValType::Ref i32(i32Type);
+            if (type->params().size() != 2 || type->results().size() != 1 || params[0] != i32 || params[1] != i32
+                || results[0] != i32)
+                throw Error(
+                    "export 'nix_wasm_alloc' of Wasm module '%s' does not have type '(size: i32, align: i32) -> i32'",
+                    pre->name);
+            allocFn = *fun;
+        }
 
         /* Reserve value ID 0 so it can be used in functions like get_attr() to denote a missing attribute. */
         values.push_back(nullptr);
@@ -201,14 +244,40 @@ struct NixWasmInstance
         return memory_.data(wasmCtx);
     }
 
+    /**
+     * A view of `len` bytes of guest memory at `ptr`, checked against the current size of the memory. All accesses
+     * to guest memory with guest-supplied offsets must go through this, since `std::span::subspan` does not check
+     * bounds. The memory is fetched afresh each time, since it may have grown (e.g. by `allocInGuest`).
+     */
+    std::span<uint8_t> guestSpan(uint32_t ptr, size_t len)
+    {
+        auto mem = memory();
+        if (ptr > mem.size() || len > mem.size() - ptr)
+            throw Error(
+                "Wasm memory access out of bounds (offset %d, length %d, memory size %d)", ptr, len, mem.size());
+        return mem.subspan(ptr, len);
+    }
+
+    /**
+     * Like `guestSpan`, for an array of `count` values of type `T`.
+     */
+    template<typename T>
+    std::span<T> guestSpan(uint32_t ptr, size_t count)
+    {
+        if (count > std::numeric_limits<size_t>::max() / sizeof(T))
+            throw Error("Wasm memory access out of bounds (offset %d, count %d)", ptr, count);
+        auto s = guestSpan(ptr, count * sizeof(T));
+        return std::span((T *) s.data(), count);
+    }
+
     std::monostate panic(uint32_t ptr, uint32_t len)
     {
-        throw Error("Wasm panic: %s", Uncolored(span2string(memory().subspan(ptr, len))));
+        throw Error("Wasm panic: %s", Uncolored(span2string(guestSpan(ptr, len))));
     }
 
     std::monostate warn(uint32_t ptr, uint32_t len)
     {
-        doWarn(span2string(memory().subspan(ptr, len)));
+        doWarn(span2string(guestSpan(ptr, len)));
         return {};
     }
 
@@ -264,7 +333,7 @@ struct NixWasmInstance
     ValueId make_string(uint32_t ptr, uint32_t len)
     {
         auto [valueId, value] = allocValue();
-        value.mkString(span2string(memory().subspan(ptr, len)), state.mem);
+        value.mkString(span2string(guestSpan(ptr, len)), state.mem);
         return valueId;
     }
 
@@ -272,7 +341,7 @@ struct NixWasmInstance
     {
         auto s = state.forceString(getValue(valueId), noPos, "while evaluating a value from Wasm");
         if (s.size() <= maxLen) {
-            auto buf = memory().subspan(ptr, maxLen);
+            auto buf = guestSpan(ptr, maxLen);
             memcpy(buf.data(), s.data(), s.size());
         }
         return s.size();
@@ -287,7 +356,7 @@ struct NixWasmInstance
         auto base = baseValue.path();
 
         auto [valueId, value] = allocValue();
-        value.mkPath({base.accessor, CanonPath(span2string(memory().subspan(ptr, len)), base.path)}, state.mem);
+        value.mkPath({base.accessor, CanonPath(span2string(guestSpan(ptr, len)), base.path)}, state.mem);
         return valueId;
     }
 
@@ -300,7 +369,7 @@ struct NixWasmInstance
         auto path = v.path().path;
         auto s = path.abs();
         if (s.size() <= maxLen) {
-            auto buf = memory().subspan(ptr, maxLen);
+            auto buf = guestSpan(ptr, maxLen);
             memcpy(buf.data(), s.data(), s.size());
         }
         return s.size();
@@ -323,7 +392,7 @@ struct NixWasmInstance
 
     ValueId make_list(uint32_t ptr, uint32_t len)
     {
-        auto vs = subspan<ValueId>(memory().subspan(ptr), len);
+        auto vs = guestSpan<ValueId>(ptr, len);
 
         auto [valueId, value] = allocValue();
 
@@ -341,7 +410,7 @@ struct NixWasmInstance
         state.forceList(value, noPos, "while getting a list from Wasm");
 
         if (value.listSize() <= maxLen) {
-            auto out = subspan<ValueId>(memory().subspan(ptr), value.listSize());
+            auto out = guestSpan<ValueId>(ptr, value.listSize());
 
             for (const auto & [n, elem] : enumerate(value.listView()))
                 out[n] = addValue(elem);
@@ -352,8 +421,6 @@ struct NixWasmInstance
 
     ValueId make_attrset(uint32_t ptr, uint32_t len)
     {
-        auto mem = memory();
-
         struct Attr
         {
             // FIXME: endianness
@@ -362,19 +429,23 @@ struct NixWasmInstance
             ValueId value;
         };
 
-        auto attrs = subspan<Attr>(mem.subspan(ptr), len);
+        auto attrs = guestSpan<Attr>(ptr, len);
 
         auto [valueId, value] = allocValue();
         auto builder = state.buildBindings(len);
         for (auto & attr : attrs)
             builder.insert(
-                state.symbols.create(span2string(mem.subspan(attr.attrNamePtr, attr.attrNameLen))),
+                state.symbols.create(span2string(guestSpan(attr.attrNamePtr, attr.attrNameLen))),
                 &getValue(attr.value));
         value.mkAttrs(builder);
 
         return valueId;
     }
 
+    /**
+     * Deprecated: requires a `copy_attrname` call per attribute and does not return the attributes in
+     * lexicographically sorted order. Use `get_attrset`.
+     */
     uint32_t copy_attrset(ValueId valueId, uint32_t ptr, uint32_t maxLen)
     {
         auto & value = getValue(valueId);
@@ -388,9 +459,8 @@ struct NixWasmInstance
                 uint32_t nameLen;
             };
 
-            auto buf = subspan<Attr>(memory().subspan(ptr), maxLen);
+            auto buf = guestSpan<Attr>(ptr, maxLen);
 
-            // FIXME: for determinism, we should return attributes in lexicographically sorted order.
             for (const auto & [n, attr] : enumerate(*value.attrs())) {
                 buf[n].value = addValue(attr.value);
                 buf[n].nameLen = state.symbols[attr.name].size();
@@ -410,19 +480,75 @@ struct NixWasmInstance
         if ((size_t) attrIdx >= attrs.size())
             throw Error("copy_attrname: attribute index out of bounds");
 
-        std::string_view name = state.symbols[attrs[attrIdx].name];
+        /* Note: `Bindings::operator[]` is not supported for layered
+           bindings (e.g. the result of `//`), so iterate instead. This
+           has to match the iteration order used by `copy_attrset`.
+
+           Deprecated: since this function is called once per attribute,
+           copying an attrset is O(n^2) (and n host calls). Use
+           `get_attrset`. */
+        std::string_view name = state.symbols[std::next(attrs.begin(), attrIdx)->name];
 
         if ((size_t) len != name.size())
             throw Error("copy_attrname: buffer length does not match attribute name length");
 
-        memcpy(memory().subspan(ptr, len).data(), name.data(), name.size());
+        memcpy(guestSpan(ptr, len).data(), name.data(), name.size());
 
         return {};
     }
 
+    /**
+     * Copy an attrset into Wasm memory in one go. The buffer consists of the number of attributes `n` (a `u32`), the
+     * `n` `ValueId`s of the attributes in lexicographically sorted order of their names, and the `n` attribute names
+     * in the same order, each terminated by a null byte. The buffer is aligned to 4 bytes.
+     *
+     * If this fits in the `len` bytes at `ptr`, that buffer is used; otherwise a buffer is allocated in the guest via
+     * `nix_wasm_alloc`. Returns the pointer of the buffer that was used in the low 32 bits and the number of bytes
+     * written in the high 32 bits (see `read_file_v2`).
+     */
+    uint64_t get_attrset(ValueId valueId, uint32_t ptr, uint32_t len)
+    {
+        if (ptr % alignof(uint32_t))
+            throw Error("get_attrset: buffer is not aligned to %d bytes", alignof(uint32_t));
+
+        auto & value = getValue(valueId);
+        state.forceAttrs(value, noPos, "while copying an attrset into Wasm");
+
+        auto attrs = value.attrs()->lexicographicOrder(state.symbols);
+
+        size_t namesOffset = (1 + attrs.size()) * sizeof(uint32_t);
+        size_t size = namesOffset;
+        for (auto attr : attrs)
+            size += state.symbols[attr->name].size() + 1;
+
+        if (size > std::numeric_limits<uint32_t>::max())
+            throw Error("attrset is too large to process in Wasm (size: %d)", size);
+
+        auto bufPtr = size <= len ? ptr : allocInGuest(size, alignof(uint32_t));
+
+        // Note: the allocation may have grown the memory; `guestSpan` fetches it afresh.
+        auto buf = guestSpan(bufPtr, size);
+
+        // FIXME: endianness.
+        auto ints = guestSpan<uint32_t>(bufPtr, 1 + attrs.size());
+        ints[0] = attrs.size();
+        for (const auto & [n, attr] : enumerate(attrs))
+            ints[n + 1] = addValue(attr->value);
+
+        auto out = buf.data() + namesOffset;
+        for (auto attr : attrs) {
+            std::string_view name = state.symbols[attr->name];
+            memcpy(out, name.data(), name.size());
+            out += name.size();
+            *out++ = 0;
+        }
+
+        return ((uint64_t) size << 32) | bufPtr;
+    }
+
     ValueId get_attr(ValueId valueId, uint32_t ptr, uint32_t len)
     {
-        auto attrName = span2string(memory().subspan(ptr, len));
+        auto attrName = span2string(guestSpan(ptr, len));
 
         auto & value = getValue(valueId);
         state.forceAttrs(value, noPos, "while getting an attribute from Wasm");
@@ -438,7 +564,7 @@ struct NixWasmInstance
         state.forceFunction(fun, noPos, "while calling a function from Wasm");
 
         ValueVector args;
-        for (auto argId : subspan<ValueId>(memory().subspan(ptr), len))
+        for (auto argId : guestSpan<ValueId>(ptr, len))
             args.push_back(&getValue(argId));
 
         auto [valueId, value] = allocValue();
@@ -453,7 +579,7 @@ struct NixWasmInstance
         if (!len)
             return funId;
 
-        auto args = subspan<ValueId>(memory().subspan(ptr), len);
+        auto args = guestSpan<ValueId>(ptr, len);
 
         auto res = &getValue(funId);
 
@@ -469,8 +595,30 @@ struct NixWasmInstance
     }
 
     /**
+     * Allocate `size` bytes with alignment `align` (a power of two) in the guest by calling its `nix_wasm_alloc`
+     * export. The guest is responsible for freeing the buffer (e.g. by reconstructing a `Vec` with that size and
+     * alignment from it).
+     */
+    uint32_t allocInGuest(uint32_t size, uint32_t align)
+    {
+        if (!allocFn)
+            throw Error("Wasm module '%s' does not export 'nix_wasm_alloc'", pre->name);
+        auto res = unwrap(allocFn->call(wasmCtx, {(int32_t) size, (int32_t) align}));
+        if (res.size() != 1 || res[0].kind() != ValKind::I32)
+            throw Error("'nix_wasm_alloc' of Wasm module '%s' did not return an i32", pre->name);
+        auto ptr = (uint32_t) res[0].i32();
+        if (ptr % align)
+            throw Error("'nix_wasm_alloc' of Wasm module '%s' returned a misaligned pointer", pre->name);
+        state.nrWasmGuestAllocs++;
+        state.wasmGuestAllocBytes += size;
+        return ptr;
+    }
+
+    /**
      * Read the contents of a file into Wasm memory. This is like calling `builtins.readFile`, except that it can handle
      * binary files that cannot be represented as Nix strings.
+     *
+     * Deprecated: the guest has to guess the buffer size, so the file may be read twice. Use `read_file_v2`.
      */
     uint32_t read_file(ValueId pathId, uint32_t ptr, uint32_t len)
     {
@@ -482,13 +630,35 @@ struct NixWasmInstance
         if (contents.size() > std::numeric_limits<uint32_t>::max())
             throw Error("file '%s' is too large to process in Wasm (size: %d)", path, contents.size());
 
-        // FIXME: this is an inefficient interface since it may cause the file to be read twice.
         if (contents.size() <= len) {
-            auto buf = memory().subspan(ptr, len);
+            auto buf = guestSpan(ptr, len);
             memcpy(buf.data(), contents.data(), contents.size());
         }
 
         return contents.size();
+    }
+
+    /**
+     * Read the contents of a file into a buffer allocated in the guest via `nix_wasm_alloc`, so that the file is read
+     * and copied only once. Returns the buffer pointer in the low 32 bits and its length in the high 32 bits (Rust's
+     * C ABI cannot express Wasm multi-value returns, so pack both into one `u64`).
+     */
+    uint64_t read_file_v2(ValueId pathId)
+    {
+        auto & pathValue = getValue(pathId);
+        auto path = state.realisePath(noPos, pathValue);
+
+        auto contents = path.readFile();
+
+        if (contents.size() > std::numeric_limits<uint32_t>::max())
+            throw Error("file '%s' is too large to process in Wasm (size: %d)", path, contents.size());
+
+        auto ptr = allocInGuest(contents.size(), 1);
+
+        // Note: the allocation may have grown the memory; `guestSpan` fetches it afresh.
+        memcpy(guestSpan(ptr, contents.size()).data(), contents.data(), contents.size());
+
+        return ((uint64_t) contents.size() << 32) | ptr;
     }
 };
 
@@ -528,10 +698,12 @@ static void regFuns(Linker & linker, bool useWasi)
     regFun(linker, "make_attrset", &NixWasmInstance::make_attrset);
     regFun(linker, "copy_attrset", &NixWasmInstance::copy_attrset);
     regFun(linker, "copy_attrname", &NixWasmInstance::copy_attrname);
+    regFun(linker, "get_attrset", &NixWasmInstance::get_attrset);
     regFun(linker, "get_attr", &NixWasmInstance::get_attr);
     regFun(linker, "call_function", &NixWasmInstance::call_function);
     regFun(linker, "make_app", &NixWasmInstance::make_app);
     regFun(linker, "read_file", &NixWasmInstance::read_file);
+    regFun(linker, "read_file_v2", &NixWasmInstance::read_file_v2);
 
     if (useWasi) {
         unwrap(linker.func_wrap(
@@ -620,6 +792,13 @@ static void prim_wasm(EvalState & state, const PosIdx pos, Value ** args, Value 
 
     // Second argument is the value to pass to the function
     auto argValue = args[1];
+
+    /* wasmtime keeps a per-thread stack of active Wasm calls, so the
+       host functions below (which may have to wait for values being
+       evaluated by other threads) must not suspend this fiber: another
+       fiber's Wasm call could then be interleaved on this thread, or
+       we could be resumed on another thread. */
+    FiberNoSuspend noSuspend;
 
     try {
         auto instance = pathAttr ? instantiateWasm(state, state.realisePath(pos, *pathAttr->value))

@@ -1,12 +1,11 @@
 #include "nix/util/util.hh"
+#include "nix/util/ref.hh"
 #include "nix/util/fmt.hh"
-#include "nix/util/file-path.hh"
 #include "nix/util/signals.hh"
 
 #include <array>
 #include <cctype>
-#include <iostream>
-#include <regex>
+#include <new>
 
 #include <openssl/crypto.h>
 #include <sodium.h>
@@ -18,6 +17,10 @@
 #endif
 
 namespace nix {
+
+void FormatError::anchor() {}
+
+bad_ref_cast::~bad_ref_cast() {}
 
 void initLibUtil()
 {
@@ -61,6 +64,11 @@ void initLibUtil()
        effect. */
     if (OPENSSL_init_crypto(OPENSSL_INIT_NO_ATEXIT, nullptr) != 1)
         throw Error("could not initialise OpenSSL");
+
+    /* Make sure that failing memory allocations don't result in an
+       opaque abort() (e.g. from mimalloc's `operator new` override,
+       which cannot throw `std::bad_alloc`). */
+    std::set_new_handler(outOfMemory);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -103,14 +111,18 @@ std::string replaceStrings(std::string res, std::string_view from, std::string_v
     return res;
 }
 
-std::string rewriteStrings(std::string s, const StringMap & rewrites)
+std::string
+rewriteStrings(std::string s, const StringMap & rewrites, std::set<uint64_t> * matches, uint64_t offsetShift)
 {
     for (auto & i : rewrites) {
         if (i.first == i.second)
             continue;
         size_t j = 0;
-        while ((j = s.find(i.first, j)) != s.npos)
+        while ((j = s.find(i.first, j)) != s.npos) {
+            if (matches)
+                matches->insert(j + offsetShift);
             s.replace(j, i.first.size(), i.second);
+        }
     }
     return s;
 }
@@ -267,6 +279,10 @@ void logExceptionExceptInterrupt(std::string_view prefix, Verbosity lvl)
     try {
         throw;
     } catch (const Interrupted & e) {
+        throw;
+    } catch (const Cancelled & e) {
+        /* Morally the same as Interrupted, just not triggered by a user but some other
+           cancellation. */
         throw;
     } catch (Error & e) {
         printMsg(lvl, ANSI_RED "%s" ANSI_NORMAL "%s", prefix, e.info().msg);

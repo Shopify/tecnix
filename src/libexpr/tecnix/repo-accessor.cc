@@ -8,6 +8,7 @@
  */
 
 #include "eval-data.hh"
+#include "nix/util/mounted-source-accessor.hh"
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval-settings.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
@@ -209,6 +210,8 @@ static std::vector<std::string> gitStatusDirtyPaths(const std::string & checkout
  */
 struct TecnixSourceAccessor : SourceAccessor
 {
+    void anchor() override;
+
     struct GitCleanFingerprints
     {
         ref<GitRepo> repo;
@@ -451,6 +454,8 @@ struct TecnixSourceAccessor : SourceAccessor
     }
 };
 
+void TecnixSourceAccessor::anchor() {}
+
 // ============================================================================
 // Tecnix repo-wide accessor (the tracked evaluation path)
 // ============================================================================
@@ -471,6 +476,8 @@ struct TecnixSourceAccessor : SourceAccessor
  */
 struct WorldtreeFuseSourceAccessor : SourceAccessor
 {
+    void anchor() override;
+
     std::filesystem::path revisionRoot;
 
     /** Blob fingerprint memo; the projection is immutable, so entries stay
@@ -709,6 +716,8 @@ struct WorldtreeFuseSourceAccessor : SourceAccessor
         return std::nullopt;
     }
 };
+
+void WorldtreeFuseSourceAccessor::anchor() {}
 
 ref<SourceAccessor> getTecnixRepoAccessor(EvalState & state)
 {

@@ -16,6 +16,10 @@ struct Settings;
  */
 struct GitFileSystemObjectSink : ExtendedFileSystemObjectSink
 {
+private:
+    void anchor() override;
+
+public:
     /**
      * Flush builder and return a final Git hash.
      */
@@ -27,6 +31,13 @@ struct GitAccessorOptions
     bool exportIgnore = false;
     bool smudgeLfs = false;
     bool submodules = false; // Currently implemented in GitInputScheme rather than GitAccessor
+
+    /**
+     * Whether to export the repository using Nix < 2.20 semantics, i.e. using `git archive` or
+     * `git checkout` (which apply Git filters, `export-ignore` and `export-subst`) rather than
+     * libgit2. Currently implemented in GitInputScheme rather than GitAccessor.
+     */
+    bool legacy = false;
 
     /**
      * Commit OID for git_attr_get_ext with GIT_ATTR_CHECK_INCLUDE_COMMIT.
@@ -58,13 +69,19 @@ struct GitPathInfo
 
 struct GitRepo
 {
-    virtual ~GitRepo() {}
+    virtual ~GitRepo();
 
     struct Options
     {
         bool create = false;
         bool bare = false;
         bool packfilesOnly = false;
+        /**
+         * Whether to avoid finding deltas when writing packfiles. It's an
+         * expensive operation, which should be avoided if no benefit is
+         * expected from possible deduplication in the same packfile.
+         */
+        bool dontFindDeltas = false;
     };
 
     static ref<GitRepo> openRepo(const std::filesystem::path & path, Options options);
@@ -115,6 +132,9 @@ struct GitRepo
     virtual WorkdirInfo getWorkdirInfo() = 0;
 
     static WorkdirInfo getCachedWorkdirInfo(const std::filesystem::path & path);
+
+    /* Drop all entries from the getCachedWorkdirInfo() cache. */
+    static void invalidateWorkdirInfoCache();
 
     /* Get the ref that HEAD points to. */
     virtual std::optional<std::string> getWorkdirRef() = 0;

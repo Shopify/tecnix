@@ -274,6 +274,8 @@ createServiceAccountJwt(const std::string & clientEmail, const std::string & pri
 class GcsCredentialProviderImpl : public GcsCredentialProvider
 {
 public:
+    ~GcsCredentialProviderImpl() override;
+
     std::string getAccessToken(bool writable) override
     {
         // First, check cache under lock
@@ -460,6 +462,12 @@ private:
         }
     }
 };
+
+void GcsAuthError::anchor() {}
+
+GcsCredentialProvider::~GcsCredentialProvider() {}
+
+GcsCredentialProviderImpl::~GcsCredentialProviderImpl() {}
 
 std::optional<std::string> GcsCredentialProvider::maybeGetAccessToken(bool writable)
 {

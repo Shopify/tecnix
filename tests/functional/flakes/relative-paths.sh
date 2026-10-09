@@ -9,7 +9,6 @@ subflake0="$rootFlake/sub0"
 subflake1="$rootFlake/sub1"
 subflake2="$rootFlake/sub2"
 
-rm -rf "$rootFlake"
 mkdir -p "$rootFlake" "$subflake0" "$subflake1" "$subflake2"
 
 cat > "$rootFlake/flake.nix" <<EOF
@@ -65,9 +64,12 @@ git -C "$rootFlake" add flake.nix sub2/flake.nix
 
 [[ $(nix eval "$subflake2#y") = 15 ]]
 
-# Make sure that this still works after commiting the lock file.
+# Make sure that this still works after committing the lock file.
 git -C "$rootFlake" add sub2/flake.lock
 [[ $(nix eval "$subflake2#y") = 15 ]]
+
+# Relative path inputs must not make prefetch-inputs fail.
+nix flake prefetch-inputs "$subflake2"
 
 [[ $(jq --indent 0 --compact-output . < "$subflake2/flake.lock") =~ ^'{"nodes":{"root":{"inputs":{"root":"root_2","sub1":"sub1"}},"root_2":{"inputs":{"sub0":"sub0"},"locked":{"path":"..","type":"path"},"original":{"path":"..","type":"path"},"parent":[]},"root_3":{"inputs":{"sub0":"sub0_2"},"locked":{"path":"../","type":"path"},"original":{"path":"../","type":"path"},"parent":["sub1"]},"sub0":{"locked":{"path":"sub0","type":"path"},"original":{"path":"sub0","type":"path"},"parent":["root"]},"sub0_2":{"locked":{"path":"sub0","type":"path"},"original":{"path":"sub0","type":"path"},"parent":["sub1","root"]},"sub1":{"inputs":{"root":"root_3"},"locked":{"path":"../sub1","type":"path"},"original":{"path":"../sub1","type":"path"},"parent":[]}},"root":"root","version":7}'$ ]]
 

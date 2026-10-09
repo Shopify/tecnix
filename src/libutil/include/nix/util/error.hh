@@ -111,6 +111,10 @@ std::ostream & showErrorInfo(std::ostream & out, const ErrorInfo & einfo, bool s
  */
 class BaseError : public std::exception
 {
+    /* VTable anchor to avoid weak linkage of the vtable - it breaks
+       dynamic_cast across shared libraries on Darwin. */
+    virtual void anchor();
+
 protected:
     mutable ErrorInfo err;
 
@@ -126,7 +130,7 @@ protected:
 public:
     BaseError(const BaseError &) = default;
     BaseError & operator=(const BaseError &) = default;
-    BaseError & operator=(BaseError &&) = default;
+    BaseError & operator=(BaseError &&) noexcept = default;
 
     template<typename... Args>
     BaseError(unsigned int status, Args &&... args)
@@ -250,8 +254,10 @@ public:
 template<typename Derived, typename Base>
 class CloneableError : public Base
 {
-public:
+    friend Derived;
+    CloneableError() = default;
     using Base::Base;
+public:
 
     /**
      * Rethrow a copy of this exception. Useful when the exception can get
@@ -266,6 +272,7 @@ public:
 #define MakeError(newClass, superClass)                             \
     class newClass : public CloneableError<newClass, superClass>    \
     {                                                               \
+        void anchor() override;                                     \
     public:                                                         \
         using CloneableError<newClass, superClass>::CloneableError; \
     }
@@ -283,6 +290,8 @@ class SystemError : public CloneableError<SystemError, Error>
 {
     std::error_code errorCode;
     std::string errorDetails;
+
+    void anchor() override;
 
 protected:
 
@@ -375,6 +384,8 @@ public:
  */
 class SysError final : public CloneableError<SysError, SystemError>
 {
+    void anchor() override;
+
 public:
     int errNo;
 
@@ -460,6 +471,22 @@ void throwExceptionSelfCheck();
 void panic(std::string_view msg);
 
 /**
+ * The exit status of the process when it runs out of memory. This is
+ * the value of `ENOMEM` on Linux.
+ */
+constexpr int outOfMemoryExitStatus = 12;
+
+/**
+ * Print an error message and exit with status
+ * `outOfMemoryExitStatus`. Installed as the `std::new_handler` so
+ * that failing memory allocations produce a clear "out of memory"
+ * error instead of an opaque abort (in particular when `operator new`
+ * is overridden by mimalloc, which cannot throw `std::bad_alloc`).
+ */
+[[noreturn]]
+void outOfMemory();
+
+/**
  * Log the current exception (if any) and call abort().
  */
 [[noreturn]]
@@ -503,6 +530,8 @@ namespace windows {
  */
 class WinError : public CloneableError<WinError, SystemError>
 {
+    void anchor() override;
+
 public:
     DWORD lastError;
 

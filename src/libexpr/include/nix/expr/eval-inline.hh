@@ -22,7 +22,7 @@ inline void * EvalMemory::allocBytes(size_t n)
     p = calloc(n, 1);
 #endif
     if (!p)
-        throw std::bad_alloc();
+        outOfMemory();
     return p;
 }
 
@@ -42,7 +42,7 @@ Value * EvalMemory::allocValue()
     if (!*valueAllocCache) {
         *valueAllocCache = GC_malloc_many(sizeof(Value));
         if (!*valueAllocCache)
-            throw std::bad_alloc();
+            outOfMemory();
     }
 
     /* GC_NEXT is a convenience macro for accessing the first word of an object.
@@ -76,7 +76,7 @@ Env & EvalMemory::allocEnv(size_t size)
         if (!*env1AllocCache) {
             *env1AllocCache = GC_malloc_many(sizeof(Env) + sizeof(Value *));
             if (!*env1AllocCache)
-                throw std::bad_alloc();
+                outOfMemory();
         }
 
         void * p = *env1AllocCache;
@@ -189,10 +189,10 @@ inline void EvalState::forceList(Value & v, const PosIdx pos, std::string_view e
 [[gnu::always_inline]]
 inline CallDepth EvalState::addCallDepth(const PosIdx pos)
 {
-    if (callDepth > settings.maxCallDepth)
+    if (CallDepth::callDepth > settings.maxCallDepth)
         error<StackOverflowError>().atPos(pos).debugThrow();
 
-    return CallDepth(callDepth);
+    return CallDepth();
 };
 
 } // namespace nix

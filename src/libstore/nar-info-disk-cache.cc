@@ -2,6 +2,7 @@
 #include "nix/util/users.hh"
 #include "nix/util/sync.hh"
 #include "nix/store/sqlite.hh"
+#include "nix/store/pathlocks.hh"
 #include "nix/store/globals.hh"
 #include "nix/store/provenance.hh"
 
@@ -43,12 +44,23 @@ create table if not exists NARs (
     foreign key (cache) references BinaryCaches(id) on delete cascade
 );
 
-create table if not exists Realisations (
+-- Used by the periodic purge of expired entries. Without it, the
+-- purge is a full table scan, which on a multi-GiB cache can hold the
+-- SQLite write lock for minutes.
+create index if not exists NARsExpiry on NARs(present, timestamp);
+
+create table if not exists BuildTrace (
     cache integer not null,
-    outputId text not null,
-    content blob, -- Json serialisation of the realisation, or null if the realisation is absent
+
+    drvPath text not null,
+    outputName text not null,
+
+    -- The following are null if the realisation is absent
+    outputPath text,
+    sigs text,
+
     timestamp        integer not null,
-    primary key (cache, outputId),
+    primary key (cache, drvPath, outputName),
     foreign key (cache) references BinaryCaches(id) on delete cascade
 );
 
@@ -61,8 +73,17 @@ create table if not exists LastPurge (
 
 struct NarInfoDiskCacheImpl : NarInfoDiskCache
 {
+private:
+    void anchor() override;
+public:
     /* How often to purge expired entries from the cache. */
     const int purgeInterval = 24 * 3600;
+
+    /* How many expired entries to delete per transaction when
+       purging. Each chunk is committed separately so that the SQLite
+       write lock is never held for long and progress is not lost if
+       the process is killed. */
+    const int purgeChunkSize = 1000;
 
     struct Cache
     {
@@ -83,7 +104,7 @@ struct NarInfoDiskCacheImpl : NarInfoDiskCache
     NarInfoDiskCacheImpl(
         const Settings & settings,
         SQLiteSettings sqliteSettings,
-        std::filesystem::path dbPath = getCacheDir() / "binary-cache-detsys-v2.sqlite")
+        std::filesystem::path dbPath = getCacheDir() / "binary-cache-detsys-v4.sqlite")
         : NarInfoDiskCache{settings}
     {
         auto state(_state.lock());
@@ -118,52 +139,85 @@ struct NarInfoDiskCacheImpl : NarInfoDiskCache
         state->insertRealisation.create(
             state->db,
             R"(
-                insert or replace into Realisations(cache, outputId, content, timestamp)
-                    values (?, ?, ?, ?)
+                insert or replace into BuildTrace(cache, drvPath, outputName, outputPath, sigs, timestamp)
+                    values (?, ?, ?, ?, ?, ?)
             )");
 
         state->insertMissingRealisation.create(
             state->db,
             R"(
-                insert or replace into Realisations(cache, outputId, timestamp)
-                    values (?, ?, ?)
+                insert or replace into BuildTrace(cache, drvPath, outputName, timestamp)
+                    values (?, ?, ?, ?)
             )");
 
         state->queryRealisation.create(
             state->db,
             R"(
-                select content from Realisations
-                    where cache = ? and outputId = ?  and
-                        ((content is null and timestamp > ?) or
-                         (content is not null and timestamp > ?))
+                select outputPath, sigs from BuildTrace
+                    where cache = ? and drvPath = ? and outputName = ? and
+                        ((outputPath is null and timestamp > ?) or
+                         (outputPath is not null and timestamp > ?))
             )");
 
         /* Periodically purge expired entries from the database. */
-        retrySQLite<void>([&]() {
-            auto now = time(nullptr);
+        auto now = time(nullptr);
 
+        auto purgeDue = retrySQLite<bool>([&]() {
             SQLiteStmt queryLastPurge(state->db, "select value from LastPurge");
             auto queryLastPurge_(queryLastPurge.use());
-
-            if (!queryLastPurge_.next() || queryLastPurge_.getInt(0) < now - purgeInterval) {
-                SQLiteStmt(
-                    state->db,
-                    "delete from NARs where ((present = 0 and timestamp < ?) or (present = 1 and timestamp < ?))")
-                    .use()
-                    // Use a minimum TTL to prevent --refresh from
-                    // nuking the entire disk cache.
-                    .apply(now - std::max(settings.ttlNegative.get(), 3600U))
-                    .apply(now - std::max(settings.ttlPositive.get(), 30 * 24 * 3600U))
-                    .exec();
-
-                debug("deleted %d entries from the NAR info disk cache", sqlite3_changes(state->db));
-
-                SQLiteStmt(state->db, "insert or replace into LastPurge(dummy, value) values ('', ?)")
-                    .use()
-                    .apply(now)
-                    .exec();
-            }
+            return !queryLastPurge_.next() || queryLastPurge_.getInt(0) < now - purgeInterval;
         });
+
+        if (purgeDue) {
+            /* Processes that start around the same time will all
+               find the purge due, so take a lock to ensure only one
+               of them does it. The others skip the purge. Since
+               LastPurge is only updated once the purge completes, if
+               the purging process is killed, the next process to open
+               the cache will take over. */
+            auto purgeLock = openLockFile(dbPath.string() + ".purge-lock", true);
+            if (!lockFile(purgeLock.get(), ltWrite, false)) {
+                debug("skipping purge of the NAR info disk cache because another process is doing it");
+            } else {
+                /* Delete in chunks, each in its own autocommit
+                   transaction, so that the write lock is released
+                   between chunks and concurrent processes are only
+                   ever blocked for the duration of one chunk. If this
+                   process is killed, the chunks already committed stay
+                   deleted and the next purge continues where we left
+                   off. */
+                SQLiteStmt purge(
+                    state->db,
+                    "delete from NARs where rowid in (select rowid from NARs where ((present = 0 and timestamp < ?) or (present = 1 and timestamp < ?)) limit ?)");
+
+                uint64_t deleted = 0;
+                while (true) {
+                    auto n = retrySQLite<int>([&]() {
+                        purge
+                            .use()
+                            // Use a minimum TTL to prevent --refresh from
+                            // nuking the entire disk cache.
+                            .apply(now - std::max(settings.ttlNegative.get(), 3600U))
+                            .apply(now - std::max(settings.ttlPositive.get(), 30 * 24 * 3600U))
+                            .apply(purgeChunkSize)
+                            .exec();
+                        return sqlite3_changes(state->db);
+                    });
+                    deleted += n;
+                    if (n < purgeChunkSize)
+                        break;
+                }
+
+                debug("deleted %d entries from the NAR info disk cache", deleted);
+
+                retrySQLite<void>([&]() {
+                    SQLiteStmt(state->db, "insert or replace into LastPurge(dummy, value) values ('', ?)")
+                        .use()
+                        .apply(now)
+                        .exec();
+                });
+            }
+        }
     }
 
     Cache & getCache(State & state, const std::string & uri)
@@ -271,7 +325,7 @@ public:
                 auto narInfo = make_ref<NarInfo>(
                     cache.storeDir, StorePath(hashPart + "-" + namePart), Hash::parseAnyPrefixed(queryNAR.getStr(6)));
                 narInfo->url = queryNAR.getStr(2);
-                narInfo->compression = queryNAR.getStr(3);
+                narInfo->compression = parseCompressionAlgo(queryNAR.getStr(3));
                 if (!queryNAR.isNull(4))
                     narInfo->fileHash = Hash::parseAnyPrefixed(queryNAR.getStr(4));
                 narInfo->fileSize = queryNAR.getInt(5);
@@ -303,23 +357,29 @@ public:
 
                 auto queryRealisation(state->queryRealisation.use()
                                           .apply(cache.info.id)
-                                          .apply(id.to_string())
+                                          .apply(id.drvPath.to_string())
+                                          .apply(id.outputName)
                                           .apply(now - settings.ttlNegative)
                                           .apply(now - settings.ttlPositive));
 
                 if (!queryRealisation.next())
-                    return {oUnknown, 0};
+                    return {oUnknown, nullptr};
 
                 if (queryRealisation.isNull(0))
-                    return {oInvalid, 0};
+                    return {oInvalid, nullptr};
 
                 try {
                     return {
                         oValid,
-                        std::make_shared<Realisation>(nlohmann::json::parse(queryRealisation.getStr(0))),
+                        std::make_shared<Realisation>(
+                            UnkeyedRealisation{
+                                .outPath = StorePath{queryRealisation.getStr(0)},
+                                .signatures = nlohmann::json::parse(queryRealisation.getStr(1)),
+                            },
+                            id),
                     };
                 } catch (Error & e) {
-                    e.addTrace({}, "while parsing the local disk cache");
+                    e.addTrace({}, "reading build trace key-value from the local disk cache");
                     throw;
                 }
             });
@@ -344,7 +404,11 @@ public:
                     .apply(hashPart)
                     .apply(std::string(info->path.name()))
                     .apply(narInfo ? narInfo->url : "", narInfo != 0)
-                    .apply(narInfo ? narInfo->compression : "", narInfo != 0)
+                    .apply(
+                        /* TODO: Revisit the whole conditional on nullopt compression. This shouldn't happen. .narinfo
+                           parsing treats empty strings as bzip2 while other code treats it as "none"... */
+                        narInfo && narInfo->compression ? showCompressionAlgo(*narInfo->compression) : "",
+                        narInfo != 0)
                     .apply(
                         narInfo && narInfo->fileHash ? narInfo->fileHash->to_string(HashFormat::Nix32, true) : "",
                         narInfo && narInfo->fileHash)
@@ -376,8 +440,10 @@ public:
 
             state->insertRealisation.use()
                 .apply(cache.info.id)
-                .apply(realisation.id.to_string())
-                .apply(static_cast<nlohmann::json>(realisation).dump())
+                .apply(realisation.id.drvPath.to_string())
+                .apply(realisation.id.outputName)
+                .apply(realisation.outPath.to_string())
+                .apply(static_cast<nlohmann::json>(realisation.signatures).dump())
                 .apply(time(nullptr))
                 .exec();
         });
@@ -391,12 +457,17 @@ public:
             auto & cache(getCache(*state, uri));
             state->insertMissingRealisation.use()
                 .apply(cache.info.id)
-                .apply(id.to_string())
+                .apply(id.drvPath.to_string())
+                .apply(id.outputName)
                 .apply(time(nullptr))
                 .exec();
         });
     }
 };
+
+void NarInfoDiskCache::anchor() {}
+
+void NarInfoDiskCacheImpl::anchor() {}
 
 ref<NarInfoDiskCache> NarInfoDiskCache::get(const Settings & settings, SQLiteSettings sqliteSettings)
 {

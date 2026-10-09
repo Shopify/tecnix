@@ -1,3 +1,4 @@
+#include "nix/cmd/command.hh"
 #include "nix/cmd/common-eval-args.hh"
 #include "nix/main/common-args.hh"
 #include "nix/main/shared.hh"
@@ -5,6 +6,7 @@
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval-settings.hh"
 #include "nix/expr/get-drvs.hh"
+#include "nix/store/derived-path.hh"
 #include "nix/util/os-string.hh"
 #include "nix/util/signals.hh"
 #include "nix/store/store-open.hh"
@@ -34,9 +36,7 @@
 // FIXME is this supposed to be private or not?
 #include "flake-command.hh"
 
-using namespace nix;
-using namespace nix::flake;
-using json = nlohmann::json;
+namespace nix {
 
 struct CmdFlakeUpdate;
 
@@ -56,7 +56,7 @@ FlakeRef FlakeCommand::getFlakeRef()
     return parseFlakeRef(fetchSettings, flakeUrl, std::filesystem::current_path().string()); // FIXME
 }
 
-LockedFlake FlakeCommand::lockFlake()
+flake::LockedFlake FlakeCommand::lockFlake()
 {
     return flake::lockFlake(flakeSettings, *getEvalState(), getFlakeRef(), lockFlags);
 }
@@ -93,7 +93,7 @@ public:
             .optional = true,
             .handler = {[&](std::vector<std::string> inputsToUpdate) {
                 for (const auto & inputToUpdate : inputsToUpdate) {
-                    std::optional<NonEmptyInputAttrPath> inputAttrPath;
+                    std::optional<flake::NonEmptyInputAttrPath> inputAttrPath;
                     try {
                         inputAttrPath = flake::NonEmptyInputAttrPath::parse(inputToUpdate);
                         if (!inputAttrPath)
@@ -256,12 +256,10 @@ struct CmdFlakeMetadata : FlakeCommand, MixJSON
             if (!lockedFlake.lockFile.root->inputs.empty())
                 logger->cout(ANSI_BOLD "Inputs:" ANSI_NORMAL);
 
-            std::set<ref<Node>> visited{lockedFlake.lockFile.root};
+            std::set<ref<flake::Node>> visited{lockedFlake.lockFile.root};
 
-            [&](this const auto & recurse, const Node & node, const std::string & prefix) -> void {
-                for (const auto & [i, input] : enumerate(node.inputs)) {
-                    bool last = i + 1 == node.inputs.size();
-
+            [&](this const auto & recurse, const flake::Node & node, const std::string & prefix) -> void {
+                for (const auto & [last, input] : markLast(node.inputs)) {
                     if (auto lockedNode = std::get_if<0>(&input.second)) {
                         std::string lastModifiedStr = "";
                         if (auto lastModified = (*lockedNode)->lockedRef.input.getLastModified())
@@ -282,7 +280,7 @@ struct CmdFlakeMetadata : FlakeCommand, MixJSON
                             "%s" ANSI_BOLD "%s" ANSI_NORMAL " follows input '%s'",
                             prefix + (last ? treeLast : treeConn),
                             input.first,
-                            printInputAttrPath(*follows));
+                            flake::printInputAttrPath(*follows));
                     }
                 }
             }(*lockedFlake.lockFile.root, "");
@@ -300,28 +298,42 @@ struct CmdFlakeInfo : CmdFlakeMetadata
 };
 
 /**
- * Log the current exception, after forcing cached evaluation errors.
+ * Log the exception `error`, after forcing cached evaluation errors.
+ *
+ * Note: this must not be called from inside a catch handler.
+ * `CachedEvalError::force()` evaluates the original attribute, which
+ * may have to wait on a thunk owned by another fiber, and a fiber
+ * must not suspend while an exception is being handled.
  */
-static void logEvalError()
+static void logEvalError(std::exception_ptr error)
 {
+    std::optional<eval_cache::CachedEvalError> cached;
     try {
-        try {
-            throw;
-        } catch (eval_cache::CachedEvalError & e) {
-            e.force();
-        }
+        std::rethrow_exception(error);
+    } catch (eval_cache::CachedEvalError & e) {
+        cached.emplace(e);
+    } catch (Error & e) {
+        logError(e.info());
+        return;
+    }
+
+    assert(!std::current_exception());
+
+    try {
+        cached->force();
     } catch (Error & e) {
         logError(e.info());
     }
 }
 
-struct CmdFlakeCheck : FlakeCommand, MixFlakeSchemas
+struct CmdFlakeCheck : FlakeCommand, MixPrintOutPaths, MixOutLinkBase, MixFlakeSchemas
 {
     bool build = true;
     bool buildAll = false;
     bool checkAllSystems = false;
 
     CmdFlakeCheck()
+        : MixOutLinkBase(std::nullopt)
     {
         addFlag({
             .longName = "no-build",
@@ -337,6 +349,15 @@ struct CmdFlakeCheck : FlakeCommand, MixFlakeSchemas
             .longName = "all-systems",
             .description = "Check the outputs for all systems.",
             .handler = {&checkAllSystems, true},
+        });
+        addFlag({
+            .longName = "out-link",
+            .shortName = 'o',
+            .description =
+                "Use *path* as prefix for the symlinks to the check results. By default, no out links are created.",
+            .labels = {"path"},
+            .handler = {&outLink},
+            .completer = completePath,
         });
     }
 
@@ -362,7 +383,7 @@ struct CmdFlakeCheck : FlakeCommand, MixFlakeSchemas
         auto state = getEvalState();
 
         lockFlags.applyNixConfig = true;
-        auto flake = std::make_shared<LockedFlake>(lockFlake());
+        auto flake = std::make_shared<flake::LockedFlake>(lockFlake());
         auto localSystem = std::string(settings.thisSystem.get());
 
         auto cache = flake_schemas::call(*state, flake, getDefaultFlakeSchemas());
@@ -389,6 +410,10 @@ struct CmdFlakeCheck : FlakeCommand, MixFlakeSchemas
                 flake->flake.provenance,
 
                 [&](const flake_schemas::Leaf & leaf) {
+                    /* Set if the check failed and we're in `--keep-going`
+                       mode. Logged below, outside the catch handler. */
+                    std::exception_ptr error;
+
                     try {
                         bool done = true;
                         bool buildSkipped = false;
@@ -440,11 +465,14 @@ struct CmdFlakeCheck : FlakeCommand, MixFlakeSchemas
                     } catch (Error & e) {
                         printError("❌ " ANSI_RED "%s" ANSI_NORMAL, leaf.node->getAttrPathStr());
                         if (settings.getWorkerSettings().keepGoing) {
-                            logEvalError();
+                            error = std::current_exception();
                             hasErrors = true;
                         } else
                             throw;
                     }
+
+                    if (error)
+                        logEvalError(error);
                 },
 
                 [&](std::function<void(flake_schemas::ForEachChild)> forEachChild) {
@@ -494,25 +522,30 @@ struct CmdFlakeCheck : FlakeCommand, MixFlakeSchemas
             // via substitution, as `nix flake check` only needs to verify buildability,
             // not actually produce the outputs.
             state->waitForAllPaths();
-            auto missing = store->queryMissing(*drvPaths);
 
             std::vector<DerivedPath> toBuild;
-            std::set<DerivedPath> toBuildSet;
-            for (auto & path : missing.willBuild) {
-                auto derivedPath = DerivedPath::Built{
-                    .drvPath = makeConstantStorePathRef(path),
-                    .outputs = OutputsSpec::All{},
-                };
-                toBuild.emplace_back(derivedPath);
-                toBuildSet.insert(std::move(derivedPath));
-            }
 
-            for (auto & [derivedPath, attrPaths] : *derivedPathToAttrPaths)
-                if (!toBuildSet.contains(derivedPath))
-                    for (auto & attrPath : attrPaths)
-                        notice(
-                            "✅ " ANSI_BOLD "%s" ANSI_NORMAL ANSI_ITALIC ANSI_FAINT " (previously built)" ANSI_NORMAL,
-                            attrPath.to_string(*state));
+            if (printOutputPaths || outLink) {
+                toBuild = *drvPaths;
+            } else {
+                std::set<DerivedPath> toBuildSet;
+                for (auto & path : store->queryMissing(*drvPaths).willBuild) {
+                    auto derivedPath = DerivedPath::Built{
+                        .drvPath = makeConstantStorePathRef(path),
+                        .outputs = OutputsSpec::All{},
+                    };
+                    toBuild.emplace_back(derivedPath);
+                    toBuildSet.insert(std::move(derivedPath));
+                }
+
+                for (auto & [derivedPath, attrPaths] : *derivedPathToAttrPaths)
+                    if (!toBuildSet.contains(derivedPath))
+                        for (auto & attrPath : attrPaths)
+                            notice(
+                                "✅ " ANSI_BOLD "%s" ANSI_NORMAL ANSI_ITALIC ANSI_FAINT
+                                " (previously built)" ANSI_NORMAL,
+                                attrPath.to_string(*state));
+            }
 
             // FIXME: should start building while evaluating.
             Activity act(*logger, lvlInfo, actUnknown, fmt("running %d flake checks", toBuild.size()));
@@ -540,6 +573,15 @@ struct CmdFlakeCheck : FlakeCommand, MixFlakeSchemas
                     for (auto & attrPath : (*derivedPathToAttrPaths)[buildResult.path])
                         notice("✅ " ANSI_BOLD "%s" ANSI_NORMAL, attrPath.to_string(*state));
             }
+
+            auto builtPaths =
+                buildResults | std::views::filter([](auto & result) { return result.tryGetSuccess(); })
+                | std::views::transform([&](auto & result) { return toBuiltPath(result, getEvalStore(), store); })
+                | std::ranges::to<BuiltPaths>();
+
+            printOutPathsMaybe(builtPaths, store);
+
+            createOutLinksMaybe(builtPaths, store);
         }
 
         if (!omittedSystems.lock()->empty()) {
@@ -560,7 +602,7 @@ struct CmdFlakeInitCommon : virtual Args, EvalCommand, MixFlakeSchemas
     std::string templateUrl = "https://flakehub.com/f/DeterminateSystems/flake-templates/0.1";
     std::filesystem::path destDir;
 
-    const LockFlags lockFlags{.writeLockFile = false};
+    const flake::LockFlags lockFlags{.writeLockFile = false};
 
     CmdFlakeInitCommon()
     {
@@ -796,9 +838,9 @@ struct CmdFlakeArchive : FlakeCommand, MixJSON, MixDryRun, MixNoCheckSigs
         sources.insert(storePath);
 
         // FIXME: use graph output, handle cycles.
-        std::function<nlohmann::json(const Node & node)> traverse;
-        traverse = [&](const Node & node) {
-            nlohmann::json jsonObj2 = json ? json::object() : nlohmann::json(nullptr);
+        auto traverse =
+            [&, json = json, dryRun = dryRun](this const auto & self, const flake::Node & node) -> nlohmann::json {
+            nlohmann::json jsonObj2 = json ? nlohmann::json::object() : nlohmann::json(nullptr);
             for (auto & [inputName, input] : node.inputs) {
                 if (auto inputNode = std::get_if<0>(&input)) {
                     std::optional<StorePath> storePath;
@@ -812,9 +854,9 @@ struct CmdFlakeArchive : FlakeCommand, MixJSON, MixDryRun, MixNoCheckSigs
                         auto & jsonObj3 = jsonObj2[inputName];
                         if (storePath)
                             jsonObj3["path"] = store->printStorePath(*storePath);
-                        jsonObj3["inputs"] = traverse(**inputNode);
+                        jsonObj3["inputs"] = self(**inputNode);
                     } else
-                        traverse(**inputNode);
+                        self(**inputNode);
                 }
             }
             return jsonObj2;
@@ -840,38 +882,34 @@ struct CmdFlakeArchive : FlakeCommand, MixJSON, MixDryRun, MixNoCheckSigs
 
 struct CmdFlakeShow : FlakeCommand, MixJSON, MixFlakeSchemas
 {
-    bool showLegacy = false;
-    bool showAllSystems = false;
-    bool showOutputPaths = false;
-    bool showDrvPaths = false;
-    bool showDrvNames = false;
+    flake_schemas::FlakeInventoryOptions options;
 
     CmdFlakeShow()
     {
         addFlag({
             .longName = "legacy",
             .description = "Show the contents of the `legacyPackages` output.",
-            .handler = {&showLegacy, true},
+            .handler = {&options.showLegacy, true},
         });
         addFlag({
             .longName = "all-systems",
             .description = "Show the contents of outputs for all systems.",
-            .handler = {&showAllSystems, true},
+            .handler = {&options.showAllSystems, true},
         });
         addFlag({
             .longName = "output-paths",
             .description = "Include the store paths of derivation outputs in the JSON output.",
-            .handler = {&showOutputPaths, true},
+            .handler = {&options.showOutputPaths, true},
         });
         addFlag({
             .longName = "drv-paths",
             .description = "Include the store paths of derivations in the JSON output.",
-            .handler = {&showDrvPaths, true},
+            .handler = {&options.showDrvPaths, true},
         });
         addFlag({
             .longName = "drv-names",
             .description = "Show the names and versions of derivations.",
-            .handler = {&showDrvNames, true},
+            .handler = {&options.showDrvNames, true},
         });
     }
 
@@ -889,115 +927,21 @@ struct CmdFlakeShow : FlakeCommand, MixJSON, MixFlakeSchemas
 
     void run(nix::ref<nix::Store> store) override
     {
-        if (showOutputPaths && !json)
+        if (options.showOutputPaths && !json)
             throw UsageError("The '--output-paths' flag requires '--json'.");
 
-        if (showDrvPaths && !json)
+        if (options.showDrvPaths && !json)
             throw UsageError("The '--drv-paths' flag requires '--json'.");
 
+        if (json)
+            options.showDrvNames = true;
+
         auto state = getEvalState();
-        auto flake = make_ref<LockedFlake>(lockFlake());
-        auto localSystem = std::string(settings.thisSystem.get());
+        auto flake = make_ref<flake::LockedFlake>(lockFlake());
 
         auto cache = flake_schemas::call(*state, flake, getDefaultFlakeSchemas());
 
-        auto inventory = cache->getRoot()->getAttr("inventory");
-        auto outputs = cache->getRoot()->getAttr("outputs");
-
-        FutureVector futures(*state->executor);
-
-        std::function<void(ref<eval_cache::AttrCursor> node, nlohmann::json & obj)> visit;
-
-        visit = [&](ref<eval_cache::AttrCursor> node, nlohmann::json & obj) {
-            flake_schemas::visit(
-                showAllSystems ? std::optional<std::string>() : localSystem,
-                showLegacy,
-                node,
-                flake->flake.provenance,
-
-                [&](const flake_schemas::Leaf & leaf) {
-                    if (auto what = leaf.what())
-                        obj.emplace("what", *what);
-
-                    if (auto shortDescription = leaf.shortDescription())
-                        obj.emplace("shortDescription", *shortDescription);
-
-                    if (auto drv = leaf.derivation(outputs)) {
-                        auto drvObj = nlohmann::json::object();
-
-                        if (json || showDrvNames)
-                            drvObj.emplace("name", drv->getAttr(state->s.name)->getString());
-
-                        if (showDrvPaths) {
-                            auto drvPath = drv->forceDerivation();
-                            drvObj.emplace("path", store->printStorePath(drvPath));
-                        }
-
-                        if (showOutputPaths) {
-                            auto outputs = nlohmann::json::object();
-                            auto drvPath = drv->forceDerivation();
-                            auto drv = getEvalStore()->derivationFromPath(drvPath);
-                            for (auto & i : drv.outputsAndOptPaths(*store)) {
-                                if (auto outPath = i.second.second)
-                                    outputs.emplace(i.first, store->printStorePath(*outPath));
-                                else
-                                    outputs.emplace(i.first, nullptr);
-                            }
-                            drvObj.emplace("outputs", std::move(outputs));
-                        }
-
-                        obj.emplace("derivation", std::move(drvObj));
-                    }
-
-                    if (auto forSystems = leaf.forSystems())
-                        obj.emplace("forSystems", *forSystems);
-                },
-
-                [&](std::function<void(flake_schemas::ForEachChild)> forEachChild) {
-                    auto children = nlohmann::json::object();
-                    forEachChild([&](Symbol attrName, ref<eval_cache::AttrCursor> node, bool isLast) {
-                        auto & j = children.emplace(state->symbols[attrName], nlohmann::json::object()).first.value();
-                        state->spawn(futures, 1, [&visit, &j, node]() {
-                            try {
-                                visit(node, j);
-                            } catch (EvalError & e) {
-                                // FIXME: make it a flake schema attribute whether to ignore evaluation errors.
-                                if (node->root->state.symbols[node->getAttrPath()[0]] == "legacyPackages")
-                                    j.emplace("failed", true);
-                                else
-                                    throw;
-                            }
-                        });
-                    });
-                    obj.emplace("children", std::move(children));
-                },
-
-                [&](ref<eval_cache::AttrCursor> node, const std::vector<std::string> & systems) {
-                    obj.emplace("filtered", true);
-                },
-
-                [&](ref<eval_cache::AttrCursor> node) { obj.emplace("isLegacy", true); });
-        };
-
-        auto inv = nlohmann::json::object();
-
-        flake_schemas::forEachOutput(
-            inventory,
-            [&](Symbol outputName,
-                std::shared_ptr<eval_cache::AttrCursor> output,
-                const std::string & doc,
-                bool isLast) {
-                auto & j = inv.emplace(state->symbols[outputName], nlohmann::json::object()).first.value();
-
-                if (output) {
-                    j.emplace("doc", doc);
-                    auto & j2 = j.emplace("output", nlohmann::json::object()).first.value();
-                    state->spawn(futures, 1, [&visit, output, &j2]() { visit(ref(output), j2); });
-                } else
-                    j.emplace("unknown", true);
-            });
-
-        futures.finishAll();
+        auto inv = flake_schemas::getFlakeInventory(*state, *getEvalStore(), *flake, cache, options);
 
         if (json) {
             auto res = nlohmann::json{{"version", 2}, {"inventory", std::move(inv)}};
@@ -1157,3 +1101,5 @@ static auto rCmdFlakeNew = registerCommand2<CmdFlakeNew>({"flake", "new"});
 static auto rCmdFlakePrefetch = registerCommand2<CmdFlakePrefetch>({"flake", "prefetch"});
 static auto rCmdFlakeShow = registerCommand2<CmdFlakeShow>({"flake", "show"});
 static auto rCmdFlakeUpdate = registerCommand2<CmdFlakeUpdate>({"flake", "update"});
+
+} // namespace nix

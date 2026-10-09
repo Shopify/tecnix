@@ -25,11 +25,7 @@ struct GcsAccessToken
     }
 };
 
-class GcsAuthError : public Error
-{
-public:
-    using Error::Error;
-};
+MakeError(GcsAuthError, Error);
 
 /**
  * Provider for Google Cloud Storage credentials.
@@ -63,7 +59,7 @@ public:
      */
     std::optional<std::string> maybeGetAccessToken(bool writable = false);
 
-    virtual ~GcsCredentialProvider() {}
+    virtual ~GcsCredentialProvider();
 };
 
 /**

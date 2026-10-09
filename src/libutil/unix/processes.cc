@@ -13,8 +13,9 @@
 #include <cstring>
 #include <future>
 #include <iostream>
-#include <sstream>
+#include <atomic>
 #include <thread>
+using namespace std::chrono_literals;
 
 #include <grp.h>
 #include <sys/types.h>
@@ -30,7 +31,6 @@
 #  include <sys/mman.h>
 #endif
 
-#include "util-config-private.hh"
 #include "util-unix-config-private.hh"
 
 namespace nix {
@@ -41,6 +41,7 @@ Pid::Pid(Pid && other) noexcept
     : pid(other.pid)
     , separatePG(other.separatePG)
     , killSignal(other.killSignal)
+    , killTimeout(other.killTimeout)
 {
     other.release();
 }
@@ -79,10 +80,39 @@ int Pid::kill(bool allowInterrupts)
 
     debug("killing process %1%", pid);
 
+    std::atomic<bool> killed = false;
+
+    std::thread killThread;
+
+    /* Make sure that the thread is joined even if `wait()` throws
+       an exception. */
+    Finally joinKillThread([&]() {
+        if (killThread.joinable()) {
+            killed = true;
+            killThread.join();
+        }
+    });
+
+    /* Note: the thread must not use `pid`, since `wait()` sets it to
+       -1 when the child has exited. */
+    pid_t target = separatePG ? -pid : pid;
+
+    if (killTimeout > 0ms && killSignal != SIGKILL)
+        killThread = std::thread([&, target]() {
+            auto elapsed = 0ms;
+            while (elapsed < killTimeout) {
+                std::this_thread::sleep_for(25ms);
+                elapsed += 25ms;
+                if (killed)
+                    return;
+            }
+            ::kill(target, SIGKILL);
+        });
+
     /* Send the requested signal to the child.  If it has its own
        process group, send the signal to every process in the child
        process group (which hopefully includes *all* its children). */
-    if (::kill(separatePG ? -pid : pid, killSignal) != 0) {
+    if (::kill(target, killSignal) != 0) {
         /* On BSDs, killing a process group will return EPERM if all
            processes in the group are zombies (or something like
            that). So try to detect and ignore that situation. */
@@ -112,6 +142,25 @@ int Pid::wait(bool allowInterrupts)
     }
 }
 
+bool Pid::isAlive()
+{
+    assert(pid != -1);
+    pid_t res = waitpid(pid, nullptr, WNOHANG);
+    if (res == 0)
+        return true;
+    if (res == -1) {
+        if (errno == EINTR)
+            /* Assume it's still alive; the caller can check again later. */
+            return true;
+        if (errno != ECHILD)
+            warn("waitpid failed for PID %d: %s", pid, strerror(errno));
+    }
+    /* The process has exited and been reaped (or was already reaped
+       elsewhere). Reset so the destructor doesn't kill()/wait() it. */
+    release();
+    return false;
+}
+
 void Pid::setSeparatePG(bool separatePG)
 {
     this->separatePG = separatePG;
@@ -120,6 +169,11 @@ void Pid::setSeparatePG(bool separatePG)
 void Pid::setKillSignal(int signal)
 {
     this->killSignal = signal;
+}
+
+void Pid::setKillTimeout(std::chrono::milliseconds duration)
+{
+    this->killTimeout = duration;
 }
 
 pid_t Pid::release()
@@ -221,6 +275,15 @@ pid_t startProcess(fun<void()> processMain, const ProcessOptions & options)
                ~ProgressBar() tries to join a thread that doesn't
                exist. */
             logger = newLogger;
+
+            /* Discard other state that doesn't survive the fork,
+               such as objects owning a thread. */
+            for (auto & callback : RegisterForkCallback::callbacks()) {
+                try {
+                    callback();
+                } catch (...) {
+                }
+            }
         }
         try {
 #ifdef __linux__
@@ -269,20 +332,15 @@ pid_t startProcess(fun<void()> processMain, const ProcessOptions & options)
     return pid;
 }
 
-std::string runProgram(
-    std::filesystem::path program,
-    bool lookupPath,
-    const OsStrings & args,
-    const std::optional<std::string> & input,
-    bool isInteractive)
+std::string runProgram(std::filesystem::path program, bool lookupPath, const OsStrings & args, bool isInteractive)
 {
     auto res = runProgram(
         RunOptions{
             .program = program,
             .lookupPath = lookupPath,
             .args = args,
-            .input = input,
-            .isInteractive = isInteractive});
+            .isInteractive = isInteractive,
+        });
 
     if (!statusOk(res.first))
         throw ExecError(res.first, "program %s %s", PathFmt(program), statusToString(res.first));
@@ -290,43 +348,14 @@ std::string runProgram(
     return res.second;
 }
 
-// Output = error code + "standard out" output stream
-std::pair<int, std::string> runProgram(RunOptions && options)
-{
-    StringSink sink;
-    options.standardOut = &sink;
-
-    int status = 0;
-
-    try {
-        runProgram2(options);
-    } catch (ExecError & e) {
-        status = e.status;
-    }
-
-    return {status, std::move(sink.s)};
-}
-
 void runProgram2(const RunOptions & options)
 {
     checkInterrupt();
 
-    assert(!(options.standardIn && options.input));
-
-    std::unique_ptr<Source> source_;
-    Source * source = options.standardIn;
-
-    if (options.input) {
-        source_ = std::make_unique<StringSource>(*options.input);
-        source = source_.get();
-    }
-
     /* Create a pipe. */
-    Pipe out, in;
+    Pipe out;
     if (options.standardOut)
         out.create();
-    if (source)
-        in.create();
 
     ProcessOptions processOptions;
     // vfork implies that the environment of the main process and the fork will
@@ -346,8 +375,6 @@ void runProgram2(const RunOptions & options)
             if (options.mergeStderrToStdout)
                 if (dup2(STDOUT_FILENO, STDERR_FILENO) == -1)
                     throw SysError("cannot dup stdout into stderr");
-            if (source && dup2(in.readSide.get(), STDIN_FILENO) == -1)
-                throw SysError("dupping stdin");
 
             if (options.chdir && chdir((*options.chdir).c_str()) == -1)
                 throw SysError("chdir failed");
@@ -377,47 +404,11 @@ void runProgram2(const RunOptions & options)
 
     out.writeSide.close();
 
-    std::thread writerThread;
-
-    std::promise<void> promise;
-
-    Finally doJoin([&] {
-        if (writerThread.joinable())
-            writerThread.join();
-    });
-
-    if (source) {
-        in.readSide.close();
-        writerThread = std::thread([&] {
-            try {
-                std::vector<char> buf(8 * 1024);
-                while (true) {
-                    size_t n;
-                    try {
-                        n = source->read(buf.data(), buf.size());
-                    } catch (EndOfFile &) {
-                        break;
-                    }
-                    writeFull(in.writeSide.get(), {buf.data(), n});
-                }
-                promise.set_value();
-            } catch (...) {
-                promise.set_exception(std::current_exception());
-            }
-            in.writeSide.close();
-        });
-    }
-
     if (options.standardOut)
         drainFD(out.readSide.get(), *options.standardOut);
 
     /* Wait for the child to finish. */
     int status = pid.wait();
-
-    /* Wait for the writer thread to finish. */
-    if (source)
-        promise.get_future().get();
-
     if (status)
         throw ExecError(status, "program %1% %2%", PathFmt(options.program), statusToString(status));
 }

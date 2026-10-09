@@ -213,6 +213,12 @@ RpcError::RpcError(ErrorCode code, const std::string & msg)
 {
 }
 
+/* Out-of-line key functions, so the vtables aren't emitted in every
+   translation unit (-Wweak-vtables). */
+RpcError::~RpcError() = default;
+
+ProtocolError::~ProtocolError() = default;
+
 // ---- connection lifecycle ---------------------------------------------------
 
 Client::Client(int fd)

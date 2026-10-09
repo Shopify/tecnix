@@ -1,3 +1,4 @@
+#include "nix/store/async-path-writer.hh"
 #include "nix/store/derivations.hh"
 #include "nix/store/downstream-placeholder.hh"
 #include "nix/expr/eval-inline.hh"
@@ -698,7 +699,7 @@ static RegisterPrimOp primop_isPath({
 });
 
 template<typename Callable>
-static inline void withExceptionContext(Trace trace, Callable && func)
+static inline void withExceptionContext(Trace trace, const Callable & func)
 {
     try {
         func();
@@ -1024,20 +1025,32 @@ static RegisterPrimOp primop_throw(
 
 static void prim_addErrorContext(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
+    std::exception_ptr error;
     try {
         state.forceValue(*args[1], pos);
         v = *args[1];
+        return;
+    } catch (Error &) {
+        error = std::current_exception();
+    }
+
+    /* Evaluate the message outside of the catch handler: it may force
+       thunks and thereby suspend the current fiber, which is not
+       allowed while an exception is being handled. */
+    NixStringContext context;
+    auto message = state
+                       .coerceToString(
+                           pos,
+                           *args[0],
+                           context,
+                           "while evaluating the error message passed to builtins.addErrorContext",
+                           false,
+                           false)
+                       .toOwned();
+
+    try {
+        std::rethrow_exception(error);
     } catch (Error & e) {
-        NixStringContext context;
-        auto message = state
-                           .coerceToString(
-                               pos,
-                               *args[0],
-                               context,
-                               "while evaluating the error message passed to builtins.addErrorContext",
-                               false,
-                               false)
-                           .toOwned();
         e.addTrace(nullptr, HintFmt(message), TracePrint::Always);
         throw;
     }
@@ -1046,7 +1059,35 @@ static void prim_addErrorContext(EvalState & state, const PosIdx pos, Value ** a
 static RegisterPrimOp primop_addErrorContext(
     PrimOp{
         .name = "__addErrorContext",
+        .args = {"context", "value"},
         .arity = 2,
+        .doc = R"(
+            Evaluate *context*, which can be coerced to a string,
+            and append it to any error or stack traces displayed while evaluating *value*.
+            Then return *value*.
+
+            This function is useful for providing helpful context in complex Nix expressions
+            when the evaluation of *value* fails.
+            The additional context is applied when evaluating *value* itself fails,
+            not when attributes or elements of *value* are evaluated.
+
+            For example, the module system from nixpkgs uses this to show
+            the relevant information about the options that were evaluating
+            when an error occurs.
+
+            ```nix-repl
+            nix-repl> addErrorContext "while evaluating foo" (throw "bar")
+            error:
+                   … while evaluating foo
+
+                   … while calling the 'throw' builtin
+                     at «string»:1:56:
+                        1| with builtins; addErrorContext "while evaluating foo" (throw "bar")
+                         |                                                        ^
+
+                   error: bar
+            ```
+        )",
         // The normal trace item is redundant
         .addTrace = false,
         .impl = prim_addErrorContext,
@@ -1877,14 +1918,11 @@ static void derivationStrictInternal(
         drv.fillInOutputPaths(*state.store);
     }
 
-    /* Write the resulting term into the Nix store directory.
-
-       Unless we are in read-only mode, that is, in which case we do not
-       write anything. Users commonly do this to speed up evaluation in
-       contexts where they don't actually want to build anything. */
-    auto drvPath = settings.readOnlyMode
-                       ? computeStorePath(*state.store, drv)
-                       : state.store->writeDerivation(*state.asyncPathWriter, drv, state.repair, provenance);
+    /* Write the resulting term into the Nix store directory. The
+       writer handles read-only mode (in which case nothing is written,
+       which users commonly rely on to speed up evaluation in contexts
+       where they don't actually want to build anything). */
+    auto drvPath = state.store->writeDerivation(*state.asyncPathWriter, drv, state.repair, provenance);
     auto drvPathS = state.store->printStorePath(drvPath);
 
     printMsg(lvlChatty, "instantiated '%1%' -> '%2%'", drvName, drvPathS);
@@ -1998,21 +2036,25 @@ static void prim_storePath(EvalState & state, const PosIdx pos, Value ** args, V
             .debugThrow();
 
     NixStringContext context;
-    auto path =
-        state.coerceToPath(pos, *args[0], context, "while evaluating the first argument passed to 'builtins.storePath'")
-            .path;
+    SourcePath sourcePath = state.coerceToPath(
+        pos, *args[0], context, "while evaluating the first argument passed to 'builtins.storePath'");
+
     /* Resolve symlinks in ‘path’, unless ‘path’ itself is a symlink
        directly in the store.  The latter condition is necessary so
        e.g. nix-push does the right thing. */
-    if (!state.store->isStorePath(path.abs()))
-        path = CanonPath(canonPath(path.abs(), true).string());
-    if (!state.store->isInStore(path.abs()))
-        state.error<EvalError>("path '%1%' is not in the Nix store", path).atPos(pos).debugThrow();
-    auto path2 = state.store->toStorePath(path.abs()).first;
-    if (!settings.readOnlyMode)
-        state.store->ensurePath(path2);
-    context.insert(NixStringContextElem::Opaque{.path = path2});
-    v.mkString(path.abs(), context, state.mem);
+    if (!state.store->isStorePath(sourcePath.path.abs()))
+        sourcePath = sourcePath.resolveSymlinks(SymlinkResolution::Full);
+    if (!state.store->isInStore(sourcePath.path.abs()))
+        state.error<EvalError>("path '%1%' is not in the Nix store", sourcePath).atPos(pos).debugThrow();
+    auto storePath = state.store->toStorePath(sourcePath.path.abs()).first;
+    if (!state.storeFS->getMount(CanonPath(state.store->printStorePath(storePath))) && !settings.readOnlyMode) {
+        /* The path may still be being written asynchronously (e.g. by
+           `builtins.toFile`). */
+        state.waitForPath(storePath);
+        state.store->ensurePath(storePath);
+    }
+    context.insert(NixStringContextElem::Opaque{.path = storePath});
+    v.mkString(sourcePath.path.abs(), context, state.mem);
 }
 
 static RegisterPrimOp primop_storePath({
@@ -2788,24 +2830,12 @@ static void prim_toFile(EvalState & state, const PosIdx pos, Value ** args, Valu
 
     contents = rewriteStrings(contents, rewrites);
 
-    auto storePath = settings.readOnlyMode ? state.store->makeFixedOutputPathFromCA(
-                                                 name,
-                                                 TextInfo{
-                                                     .hash = hashString(HashAlgorithm::SHA256, contents),
-                                                     .references = std::move(refs),
-                                                 })
-                                           : ({
-                                                 StringSource s{contents};
-                                                 state.store->addToStoreFromDump(
-                                                     s,
-                                                     name,
-                                                     FileSerialisationMethod::Flat,
-                                                     ContentAddressMethod::Raw::Text,
-                                                     HashAlgorithm::SHA256,
-                                                     refs,
-                                                     state.repair,
-                                                     state.evalContext.provenance);
-                                             });
+    /* Write the file asynchronously. The writer skips paths it has
+       already written during this evaluation and handles read-only
+       mode. Any consumer of the resulting path waits for the write
+       to complete (see `EvalState::waitForPath()`). */
+    auto storePath = state.asyncPathWriter->addPath(
+        std::move(contents), std::string(name), std::move(refs), state.repair, state.evalContext.provenance);
 
     /* Note: we don't need to add `context' to the context of the
        result, since `storePath' itself has references to the paths
@@ -3191,6 +3221,8 @@ static RegisterPrimOp primop_attrNames({
       Return the names of the attributes in the set *set* in an
       alphabetically sorted list. For instance, `builtins.attrNames { y
       = 1; x = "foo"; }` evaluates to `[ "x" "y" ]`.
+
+      Has `O(n log n)` time complexity, where `n` is number of attributes in the *set*.
     )",
     .impl = prim_attrNames,
 });
@@ -3223,6 +3255,8 @@ static RegisterPrimOp primop_attrValues({
     .doc = R"(
       Return the values of the attributes in the set *set* in the order
       corresponding to the sorted attribute names.
+
+      Has `O(n log n)` time complexity, where `n` is number of attributes in the *set*.
     )",
     .impl = prim_attrValues,
 });
@@ -3248,6 +3282,8 @@ static RegisterPrimOp primop_getAttr({
       aborts if the attribute doesn’t exist. This is a dynamic version of
       the `.` operator, since *s* is an expression rather than an
       identifier.
+
+      Has `O(log n)` time complexity, where `n` is number of attributes in the *set*.
     )",
     .impl = prim_getAttr,
 });
@@ -3336,6 +3372,8 @@ static RegisterPrimOp primop_hasAttr({
       `hasAttr` returns `true` if *set* has an attribute named *s*, and
       `false` otherwise. This is a dynamic version of the `?` operator,
       since *s* is an expression rather than an identifier.
+
+      Has `O(log n)` time complexity, where `n` is number of attributes in the *set*.
     )",
     .impl = prim_hasAttr,
 });
@@ -3395,6 +3433,8 @@ static RegisterPrimOp primop_removeAttrs({
       ```
 
       evaluates to `{ y = 2; }`.
+
+      Has `O(n + k log k)` time complexity, where `n` is number of attributes in the *set* and `k` is the size of *list*.
     )",
     .impl = prim_removeAttrs,
 });
@@ -3482,6 +3522,8 @@ static RegisterPrimOp primop_listToAttrs({
       ```nix
       { foo = 123; bar = 456; }
       ```
+
+      Has `O(n log n)` time complexity, where `n` is size of the list.
     )",
     .impl = prim_listToAttrs,
 });
@@ -3558,7 +3600,7 @@ static RegisterPrimOp primop_intersectAttrs({
       Return a set consisting of the attributes in the set *e2* which have the
       same name as some attribute in *e1*.
 
-      Performs in O(*n* log *m*) where *n* is the size of the smaller set and *m* the larger set's size.
+      Has `O(n log m)` time complexity, where `n` and `m` are the sizes of the smallest and largest set respectively.
     )",
     .impl = prim_intersectAttrs,
 });
@@ -3598,6 +3640,8 @@ static RegisterPrimOp primop_catAttrs({
       ```
 
       evaluates to `[1 2]`.
+
+      Has `O(n)` time complexity, where `n` is the size of the *list*.
     )",
     .impl = prim_catAttrs,
 });
@@ -3641,6 +3685,8 @@ static RegisterPrimOp primop_functionArgs({
       "Formal argument" here refers to the attributes pattern-matched by
       the function. Plain lambdas are not included, e.g. `functionArgs (x:
       ...) = { }`.
+
+      Has constant time complexity.
     )",
     .impl = prim_functionArgs,
 });
@@ -3673,6 +3719,10 @@ static RegisterPrimOp primop_mapAttrs({
       ```
 
       evaluates to `{ a = 10; b = 20; }`.
+
+      Has `O(n)` time complexity, where `n` is the size of the *attrset*.
+      Note that no calls to *f* are performed by the builtin.
+      The function *f* is called on demand when a resulting attribute value is evaluated.
     )",
     .impl = prim_mapAttrs,
 });
@@ -3842,6 +3892,8 @@ static RegisterPrimOp primop_zipAttrsWith({
         b = { name = "b"; values = [ "z" ]; };
       }
       ```
+
+      Has `O(n log n)` time complexity, where `n` is the number of attributes across all sets.
     )",
     .impl = prim_zipAttrsWith,
 });
@@ -3876,8 +3928,9 @@ static void prim_elemAt(EvalState & state, const PosIdx pos, Value ** args, Valu
         state.error<EvalError>("'builtins.elemAt' called with index %d on a list of size %d", n, args[0]->listSize())
             .atPos(pos)
             .debugThrow();
-    state.forceValue(*args[0]->listView()[n], pos);
-    v = *args[0]->listView()[n];
+    auto ptr = args[0]->listView()[n];
+    state.forceValue(*ptr, pos);
+    v = *ptr;
 }
 
 static RegisterPrimOp primop_elemAt({
@@ -3907,6 +3960,8 @@ static RegisterPrimOp primop_head({
       Return the first element of a list; abort evaluation if the argument
       isn’t a list or is an empty list. You can test whether a list is
       empty by comparing it with `[]`.
+
+      Has constant time complexity.
     )",
     .impl = prim_head,
 });
@@ -3972,6 +4027,10 @@ static RegisterPrimOp primop_map({
       ```
 
       evaluates to `[ "foobar" "foobla" "fooabc" ]`.
+
+      Has `O(n)` time complexity, where `n` is the size of the *list*.
+      Note that no calls to *f* are performed by the builtin, but *f* itself is evaluated and its type is checked eagerly.
+      The function *f* is called on demand when a resulting list element is evaluated.
     )",
     .impl = prim_map,
 });
@@ -4021,6 +4080,7 @@ static RegisterPrimOp primop_filter({
     .doc = R"(
       Return a list consisting of the elements of *list* for which the
       function *f* returns `true`.
+      Has linear time complexity in the size of the input *list*.
     )",
     .impl = prim_filter,
 });
@@ -4044,6 +4104,7 @@ static RegisterPrimOp primop_elem({
     .doc = R"(
       Return `true` if a value equal to *x* occurs in the list *xs*, and
       `false` otherwise.
+      Short-circuits and does not evaluate elements that occur in the list after the first match.
     )",
     .impl = prim_elem,
 });
@@ -4053,12 +4114,7 @@ static void prim_concatLists(EvalState & state, const PosIdx pos, Value ** args,
 {
     state.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.concatLists");
     auto listView = args[0]->listView();
-    state.concatLists(
-        v,
-        args[0]->listSize(),
-        listView.data(),
-        pos,
-        "while evaluating a value of the list passed to builtins.concatLists");
+    state.concatLists(v, listView.span(), pos, "while evaluating a value of the list passed to builtins.concatLists");
 }
 
 static RegisterPrimOp primop_concatLists({
@@ -4114,17 +4170,40 @@ static RegisterPrimOp primop_foldlStrict({
     .args = {"op", "nul", "list"},
     .doc = R"(
       Reduce a list by applying a binary operator, from left to right,
-      e.g. `foldl' op nul [x0 x1 x2 ...] = op (op (op nul x0) x1) x2)
-      ...`.
+      e.g.
+      ```nix
+      foldl' op nul [ x0 x1 x2 ]
+        =
+          let
+            strictly = f: a: builtins.seq a (f a);
+            y0 = op nul x0;
+            y1 = strictly op y0 x1;
+            y2 = strictly op y1 x2;
+          in
+            y2
+
+        # and, ignoring strictness/laziness
+        ==
+          op (op (op nul x0) x1) x2
+      ```
 
       For example, `foldl' (acc: elem: acc + elem) 0 [1 2 3]` evaluates
       to `6` and `foldl' (acc: elem: { "${elem}" = elem; } // acc) {}
       ["a" "b"]` evaluates to `{ a = "a"; b = "b"; }`.
 
       The first argument of `op` is the accumulator whereas the second
-      argument is the current element being processed. The return value
-      of each application of `op` is evaluated immediately, even for
-      intermediate values.
+      argument is the current element being processed.
+
+      The return value of each application of `op` is evaluated immediately,
+      even for intermediate values.
+      This way, `foldl'` can operate in constant stack space, allowing it to operate on large lists,
+      regardless of [max-call-depth](@docroot@/command-ref/conf-file.md#conf-max-call-depth).
+
+      Conventionally, a fold function without the `'` ("prime") preserves laziness,
+      but lacks these benefits.
+      See also [Nixpkgs `lib.foldl`](https://nixos.org/manual/nixpkgs/unstable/#function-library-lib.lists.foldl).
+
+      Has linear time complexity in the size of the list.
     )",
     .impl = prim_foldlStrict,
 });
@@ -4163,6 +4242,7 @@ static RegisterPrimOp primop_any({
     .doc = R"(
       Return `true` if the function *pred* returns `true` for at least one
       element of *list*, and `false` otherwise.
+      Short-circuits and does not evaluate elements that appear later in the list if `pred` evaluates to `true`.
     )",
     .impl = prim_any,
 });
@@ -4178,6 +4258,7 @@ static RegisterPrimOp primop_all({
     .doc = R"(
       Return `true` if the function *pred* returns `true` for all elements
       of *list*, and `false` otherwise.
+      Short-circuits and does not evaluate elements that appear later in the list if `pred` evaluates to `false`.
     )",
     .impl = prim_all,
 });
@@ -4216,6 +4297,8 @@ static RegisterPrimOp primop_genList({
       ```
 
       returns the list `[ 0 1 4 9 16 ]`.
+
+      Has linear time complexity.
     )",
     .impl = prim_genList,
 });
@@ -4326,6 +4409,9 @@ static RegisterPrimOp primop_sort({
 
       If the *comparator* violates any of these properties, then `builtins.sort`
       reorders elements in an unspecified manner.
+
+      Runs in `O(n log n)` time on average, where `n` is the size of the *list*.
+      Uses an adaptive sort that exploits existing sorted runs in the input, down to `O(n)` when the list is already sorted.
     )",
     .impl = prim_sort,
 });
@@ -4387,6 +4473,8 @@ static RegisterPrimOp primop_partition({
       ```nix
       { right = [ 23 42 ]; wrong = [ 1 9 3 ]; }
       ```
+
+      Runs in linear time in the size of the *list*.
     )",
     .impl = prim_partition,
 });
@@ -4438,6 +4526,8 @@ static RegisterPrimOp primop_groupBy({
       ```nix
       { b = [ "bar" "baz" ]; f = [ "foo" ]; }
       ```
+
+      Has `O(n log n)` time complexity, where `n` is the size of the input *list*.
     )",
     .impl = prim_groupBy,
 });
@@ -5268,6 +5358,8 @@ static RegisterPrimOp primop_replaceStrings({
       ```
 
       evaluates to `"fabir"`.
+
+      Has `O(n k)` time complexity, where `n` is the length of *s* and `k` is the number of replacements.
     )",
     .impl = prim_replaceStrings,
 });
@@ -5672,6 +5764,30 @@ void EvalState::createBaseEnv(const EvalSettings & evalSettings)
             vDerivationWithMeta,
             {
                 .type = nFunction,
+                .doc = R"(
+                  Create a derivation with metadata.
+                  `derivationWithMeta` takes the same attributes as [`derivation`](@docroot@/language/derivations.md) plus an optional `__meta` attribute set.
+
+                  Nix records `__meta` as JSON in the [provenance](@docroot@/development/experimental-features.md#xp-feature-provenance) of the derivation and of any outputs that Nix builds from it, while [`nix provenance show`](@docroot@/command-ref/new-cli/nix3-provenance-show.md) displays it.
+                  `__meta` doesn't affect the derivation's store path and Nix doesn't pass it to the builder.
+                  Nix doesn't update the provenance of outputs that already exist, such as outputs that were built earlier or substituted.
+
+                  ```nix
+                  builtins.derivationWithMeta {
+                    name = "hello";
+                    system = builtins.currentSystem;
+                    builder = "/bin/sh";
+                    args = [ "-c" "echo hello > $out" ];
+                    __meta = {
+                      description = "Prints a greeting";
+                      license = "MIT";
+                    };
+                  }
+                  ```
+
+                  See [Derivation metadata](@docroot@/language/derivation-metadata.md) for details.
+                )",
+                .experimentalFeature = Xp::Provenance,
             });
     }
 

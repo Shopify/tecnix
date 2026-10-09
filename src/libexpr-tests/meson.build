@@ -8,7 +8,7 @@ project(
     'warning_level=1',
     'errorlogs=true', # Please print logs for tests that fail
   ],
-  meson_version : '>= 1.1',
+  meson_version : '>= 1.8',
   license : 'LGPL-2.1-or-later',
 )
 
@@ -54,11 +54,12 @@ config_priv_h = configure_file(
 subdir('nix-meson-build-support/common')
 
 sources = files(
+  'coroutine-gc.cc',
   'derived-path.cc',
   'error_traces.cc',
-  'eval-gc.cc',
   'eval.cc',
   'json.cc',
+  'lazy-fetcher-attr.cc',
   'main.cc',
   'nix_api_expr.cc',
   'nix_api_external.cc',
@@ -97,6 +98,8 @@ test(
   this_exe,
   env : {
     '_NIX_TEST_UNIT_DATA' : meson.current_source_dir() / 'data',
+    'HOME' : meson.current_build_dir() / 'test-home',
+    'NIX_STORE' : '',
   },
   protocol : 'gtest',
 )

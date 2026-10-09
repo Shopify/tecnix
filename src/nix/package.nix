@@ -8,18 +8,45 @@
   nix-expr,
   nix-main,
   nix-cmd,
+  opentelemetry-cpp,
   sentry-native,
 
   libmicrohttpd,
 
+  nix-expr-c,
+  nix-fetchers-c,
+  nix-flake-c,
+  nix-main-c,
+  nix-store-c,
+  nix-util-c,
+
+  mimalloc,
+
   # Configuration Options
 
   version,
+
+  # Whether to link against mimalloc for malloc override.
+  # Significantly improves evaluation performance on allocation-heavy
+  # workloads (~10-15% on large evaluations).
+  # mimalloc is disabled on FreeBSD due to a crash in nixpkgs 25.11.
+  # Once the nixpkgs flake is updated, mimalloc can be enabled again.
+  # It's also disabled on static aarch64-darwin because of a duplicate
+  # `reallocarray` symbol in libmimalloc.a and lowdown's compats.o.
+  withMimalloc ?
+    !stdenv.hostPlatform.isWindows
+    && !stdenv.hostPlatform.isFreeBSD
+    && !(stdenv.hostPlatform.isStatic && stdenv.hostPlatform.isDarwin && stdenv.hostPlatform.isAarch64),
+
+  # Whether to embed the public C API into the `nix` executable so plugins can
+  # resolve those symbols without linking Nix libraries directly.
+  withPluginCApi ? !stdenv.hostPlatform.isWindows && !stdenv.hostPlatform.isStatic,
 }:
 
 let
   inherit (lib) fileset;
   enableSentry = false;
+  withOtel = !stdenv.hostPlatform.isStatic && stdenv.buildPlatform.canExecute stdenv.hostPlatform;
 in
 
 mkMesonExecutable (finalAttrs: {
@@ -59,6 +86,7 @@ mkMesonExecutable (finalAttrs: {
       ../../doc/manual/source/store/types/index.md.in
       ./profiles.md
       ../../doc/manual/source/command-ref/files/profiles.md
+      ./baked-flake.nix
 
       # Files
     ]
@@ -76,16 +104,29 @@ mkMesonExecutable (finalAttrs: {
     nix-cmd
     libmicrohttpd
   ]
+  ++ lib.optionals withPluginCApi [
+    nix-expr-c
+    nix-fetchers-c
+    nix-flake-c
+    nix-main-c
+    nix-store-c
+    nix-util-c
+  ]
+  ++ lib.optional withMimalloc mimalloc
   ++ lib.optional (
     stdenv.cc.isClang
     && stdenv.hostPlatform.isStatic
     && stdenv.cc.libcxx != null
     && stdenv.cc.libcxx.isLLVM
   ) llvmPackages.libunwind
-  ++ lib.optional enableSentry sentry-native;
+  ++ lib.optional enableSentry sentry-native
+  ++ lib.optional withOtel opentelemetry-cpp;
 
   mesonFlags = [
+    (lib.mesonEnable "mimalloc" withMimalloc)
+    (lib.mesonBool "plugin-c-api" withPluginCApi)
     (lib.mesonEnable "sentry" enableSentry)
+    (lib.mesonEnable "otel" withOtel)
   ]
   ++ lib.optional enableSentry (
     lib.mesonOption "crashpad-handler" "${sentry-native}/bin/crashpad_handler"
@@ -106,6 +147,10 @@ mkMesonExecutable (finalAttrs: {
     && stdenv.cc.libcxx != null
     && stdenv.cc.libcxx.isLLVM
   ) "-rtlib=compiler-rt -unwindlib=libunwind";
+
+  passthru = {
+    exportsPluginCApi = withPluginCApi;
+  };
 
   meta = {
     mainProgram = "nix";

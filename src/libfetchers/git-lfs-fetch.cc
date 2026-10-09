@@ -2,6 +2,8 @@
 #include "nix/fetchers/git-utils.hh"
 #include "nix/store/filetransfer.hh"
 #include "nix/util/base-n.hh"
+#include "nix/util/file-descriptor.hh"
+#include "nix/util/file-system.hh"
 #include "nix/util/os-string.hh"
 #include "nix/util/processes.hh"
 #include "nix/util/url.hh"
@@ -24,9 +26,7 @@ namespace nix::lfs {
 static void downloadToSink(
     const std::string & url,
     const std::optional<std::string> & authHeader,
-    // FIXME: passing a StringSink is superfluous, we may as well
-    // return a string. Or use an abstract Sink for streaming.
-    StringSink & sink,
+    Sink & sink,
     std::string sha256Expected,
     size_t sizeExpected)
 {
@@ -35,29 +35,102 @@ static void downloadToSink(
     if (authHeader.has_value())
         headers.push_back({"Authorization", *authHeader});
     request.headers = headers;
-    getFileTransfer()->download(std::move(request), sink);
 
-    auto sizeActual = sink.s.length();
-    if (sizeExpected != sizeActual)
-        throw Error("size mismatch while fetching %s: expected %d but got %d", url, sizeExpected, sizeActual);
+    HashSink hashSink(HashAlgorithm::SHA256);
+    TeeSink teeSink(hashSink, sink);
 
-    auto sha256Actual = hashString(HashAlgorithm::SHA256, sink.s).to_string(HashFormat::Base16, false);
+    getFileTransfer()->download(std::move(request), teeSink);
+
+    auto hashResult = hashSink.finish();
+
+    if (sizeExpected != hashResult.numBytesDigested)
+        throw Error(
+            "size mismatch while fetching %s: expected %d but got %d", url, sizeExpected, hashResult.numBytesDigested);
+
+    auto sha256Actual = hashResult.hash.to_string(HashFormat::Base16, false);
     if (sha256Actual != sha256Expected)
         throw Error(
             "hash mismatch while fetching %s: expected sha256:%s but got sha256:%s", url, sha256Expected, sha256Actual);
 }
 
-namespace {
-
-struct LfsApiInfo
+/**
+ * Run `git credential fill` with `description` on its standard input and
+ * return its standard output. `runProgram()` doesn't redirect standard
+ * input, so spawn the process directly.
+ */
+static std::string runGitCredentialFill(const std::string & description)
 {
-    std::string endpoint;
-    std::optional<std::string> authHeader;
-};
+#ifdef _WIN32
+    throw UnimplementedError("git-credential-fill is not supported on Windows");
+#else
+    Pipe toChild, fromChild;
+    toChild.create();
+    fromChild.create();
 
-} // namespace
+    Pid pid = startProcess([&]() {
+        toChild.writeSide.close();
+        fromChild.readSide.close();
+        if (dup2(toChild.readSide.get(), STDIN_FILENO) == -1)
+            throw SysError("dupping stdin");
+        if (dup2(fromChild.writeSide.get(), STDOUT_FILENO) == -1)
+            throw SysError("dupping stdout");
+        execlp("git", "git", "credential", "fill", nullptr);
+        throw SysError("executing 'git credential fill'");
+    });
 
-static LfsApiInfo getLfsApi(const ParsedURL & url)
+    toChild.readSide.close();
+    fromChild.writeSide.close();
+    writeFull(toChild.writeSide.get(), description);
+    toChild.writeSide.close();
+
+    auto output = drainFD(fromChild.readSide.get());
+    /* As with `runProgram()`'s status-returning overload, a failing helper
+       is reported through its (empty) output rather than its exit status. */
+    pid.wait();
+    return output;
+#endif
+}
+
+ParsedURL lfsEndpointForRemote(ParsedURL url)
+{
+    /**
+     * Try to mimic what git-lfs will do to plain remotes
+     * https://github.com/git-lfs/git-lfs/blob/main/docs/api/server-discovery.md
+     *
+     * Try to be smarter with remotes ending in a /, like
+     * `https://github.com/NixOS/nix/`. This should be
+     * `https://github.com/NixOS/nix.git/info/lfs`, not
+     * `https://github.com/NixOS/nix/.git/info/lfs`
+     */
+    bool hasDotGit = false;
+    for (auto it = url.path.rbegin(); it != url.path.rend(); ++it) {
+        if (it->empty())
+            continue;
+        if (!it->ends_with(".git"))
+            *it += ".git";
+        hasDotGit = true;
+        break;
+    }
+    if (!hasDotGit) {
+        if (url.path.size() > 1) // e.g. {"", ""} (single trailing slash)
+            url.path.back() = ".git";
+        else if (url.path.size() == 1) // {""}
+            url.path.push_back(".git");
+        else { // {}
+            url.path.push_back("");
+            url.path.push_back(".git");
+        }
+    }
+    if (url.path.back().empty())
+        url.path.back() = "info";
+    else
+        url.path.push_back("info");
+    url.path.push_back("lfs");
+
+    return url;
+}
+
+LfsApiInfo getLfsApi(ParsedURL url)
 {
     assert(url.authority.has_value());
     if (url.scheme == "ssh") {
@@ -111,8 +184,7 @@ static LfsApiInfo getLfsApi(const ParsedURL & url)
         inputCredDescr << "host=" << url.authority->host << "\n";
         inputCredDescr << "path=" << credentialPath << "\n";
 
-        auto [status, output] =
-            runProgram({.program = "git", .args = {"credential", "fill"}, .input = std::move(inputCredDescr).str()});
+        auto output = runGitCredentialFill(std::move(inputCredDescr).str());
 
         if (output.empty())
             throw Error(
@@ -179,13 +251,8 @@ static std::string getLfsEndpointUrl(git_repository * repo)
     git_remote * remote = nullptr;
     if (!git_remote_lookup(&remote, repo, "origin")) {
         const char * url_c_str = git_remote_url(remote);
-        if (url_c_str) {
-            auto remote = std::string(url_c_str);
-            if (remote.ends_with(".git"))
-                return remote + "/info/lfs";
-            else
-                return remote + ".git/info/lfs";
-        }
+        if (url_c_str)
+            return lfsEndpointForRemote(fixGitURL(url_c_str)).to_string();
     }
 
     return "";
@@ -272,7 +339,12 @@ Fetch::Fetch(git_repository * repo, git_oid rev, std::string attrPathPrefix)
 
     const auto remoteUrl = lfs::getLfsEndpointUrl(repo);
 
-    this->url = nix::fixGitURL(remoteUrl).canonicalise();
+    /* A repository with neither an `origin` remote nor an `lfs.url` has no
+       LFS endpoint. Merely enabling smudging must not fail on it (there may
+       be no LFS pointers to smudge), so leave `url` empty and report it
+       from `fetchUrls()` instead. */
+    if (!remoteUrl.empty())
+        this->url = nix::fixGitURL(remoteUrl).canonicalise();
 }
 
 bool Fetch::shouldFetch(const CanonPath & path) const
@@ -298,6 +370,8 @@ static nlohmann::json pointerToPayload(const std::vector<Pointer> & items)
 
 std::vector<nlohmann::json> Fetch::fetchUrls(const std::vector<Pointer> & pointers) const
 {
+    if (url.scheme.empty())
+        throw Error("cannot fetch git-lfs objects: the repository has no 'origin' remote and no 'lfs.url' configured");
     auto api = lfs::getLfsApi(this->url);
     auto url = api.endpoint + "/objects/batch";
     const auto & authHeader = api.authHeader;
@@ -341,7 +415,7 @@ std::vector<nlohmann::json> Fetch::fetchUrls(const std::vector<Pointer> & pointe
 void Fetch::fetch(
     const std::string & content,
     const CanonPath & pointerFilePath,
-    StringSink & sink,
+    Sink & sink,
     std::function<void(uint64_t)> sizeCallback) const
 {
     debug("trying to fetch '%s' using git-lfs", pointerFilePath);
@@ -376,11 +450,13 @@ void Fetch::fetch(
     std::string key = hashString(HashAlgorithm::SHA256, pointerFilePath.rel()).to_string(HashFormat::Base16, false)
                       + "/" + pointer->oid;
     auto cachePath = cacheDir / key;
-    if (pathExists(cachePath)) {
+    AutoCloseFD cacheFile(openFileReadonly(cachePath, FinalSymlink::DontFollow));
+    if (cacheFile) {
         debug("using cache entry %s -> %s", key, PathFmt(cachePath));
-        auto cacheContent = readFile(cachePath);
-        sizeCallback(cacheContent.length());
-        sink(cacheContent);
+        FdSource cacheSource(cacheFile.get());
+        auto size = getFileSize(cacheFile.get());
+        sizeCallback(size);
+        cacheSource.drainInto(sink, size);
         return;
     }
     debug("did not find cache entry for %s", key);
@@ -418,13 +494,23 @@ void Fetch::fetch(
                 pointer->size);
         }
 
-        sizeCallback(size);
-        downloadToSink(ourl, authHeader, sink, sha256, size);
-
         debug("creating cache entry %s -> %s", key, PathFmt(cachePath));
+
         if (!pathExists(cachePath.parent_path()))
             createDirs(cachePath.parent_path());
-        writeFile(cachePath, sink.s);
+        auto [tempFile, tempPath] = createTempFile(cachePath.parent_path(), {});
+        AutoDelete tempDeleter(tempPath);
+        FdSink tempSink(tempFile.get());
+        downloadToSink(ourl, authHeader, tempSink, sha256, size);
+        tempSink.flush();
+
+        std::filesystem::rename(tempPath, cachePath);
+        tempDeleter.cancel();
+
+        FdSource cacheSource(tempFile.get());
+        cacheSource.restart();
+        sizeCallback(size);
+        cacheSource.drainInto(sink, size);
 
         debug("%s fetched with git-lfs", pointerFilePath);
     } catch (const nlohmann::json::out_of_range & e) {

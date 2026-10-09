@@ -68,6 +68,8 @@ struct ForwardingSourceAccessor : SourceAccessor
     {
         return next->getPhysicalPath(path);
     }
+
+    void anchor() override;
 };
 
 } // namespace nix

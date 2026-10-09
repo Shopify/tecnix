@@ -6,6 +6,7 @@
  * the persistent cache (tecnix/eval-cache.cc).
  */
 
+#include "tecnix/eval-data.hh"
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/eval-settings.hh"
 #include "nix/expr/parallel-eval.hh"

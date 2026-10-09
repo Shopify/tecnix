@@ -55,6 +55,8 @@ flattenFrame(const ref<EvalSourceAccessSetGraph> & graph, const TrackedSourceDep
 
 class TrackingMemorySourceAccessor : public SourceAccessor
 {
+    void anchor() override;
+
     std::map<std::string, std::string> files;
 
     static std::string key(const CanonPath & path)
@@ -140,6 +142,8 @@ public:
         throw NotASymlink("path '%s' is not a symlink", path.abs());
     }
 };
+
+void TrackingMemorySourceAccessor::anchor() {}
 
 class ScopedTrackingContext
 {

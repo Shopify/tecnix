@@ -43,6 +43,10 @@ public:
 
 struct EvalSettings : Config
 {
+private:
+    void anchor() override;
+
+public:
     /**
      * Function used to interpret look path entries of a given scheme.
      *
@@ -71,7 +75,14 @@ struct EvalSettings : Config
 
     EvalSettings(bool & readOnlyMode, LookupPathHooks lookupPathHooks = {});
 
-    bool & readOnlyMode;
+    /* FIXME: This really shouldn't be public. The C API should have non-global settings instead. */
+    bool * readOnlyMode = nullptr;
+
+    bool isReadOnly() const
+    {
+        assert(readOnlyMode);
+        return *readOnlyMode;
+    }
 
     static Strings getDefaultNixPath();
 
@@ -503,6 +514,21 @@ struct EvalSettings : Config
           The value `0` causes Nix to use all available CPU cores in the system.
 
           Note that enabling the debugger (`--debugger`) disables multi-threaded evaluation.
+        )"};
+
+    Setting<unsigned int> evalMaxFibers{
+        this,
+        0,
+        "eval-max-fibers",
+        R"(
+          The maximum number of fibers that the multi-threaded evaluator keeps in existence at the same time.
+
+          Each work item (e.g. an attribute evaluated by `nix search` or `nix flake show`) runs on its own fiber, which has its own stack.
+          When a fiber blocks on a value that is being evaluated by another thread, it is suspended and its worker thread starts the next work item on a new fiber.
+          A suspended fiber is always resumed by the thread that started it, so this limit is applied per evaluation thread (see `eval-cores`): each thread may keep at most `eval-max-fibers / eval-cores` fibers (but at least one) in existence, and when it reaches that limit, it only resumes its suspended fibers instead of starting new work items.
+          Lower values reduce memory usage and page faults; higher values allow more work to be in progress at the same time.
+
+          The value `0` means four fibers per evaluation thread.
         )"};
 
     Setting<bool> tecnixEvalCache{

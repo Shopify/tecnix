@@ -25,6 +25,8 @@ static std::filesystem::path canonicaliseStorePathCandidate(std::string_view pat
 
 StorePath StoreDirConfig::parseStorePath(std::string_view path) const
 {
+    if (path.empty())
+        throw BadStorePath("empty path is not a valid store path");
     auto p = canonicaliseStorePathCandidate(path);
     if (p.parent_path() != storeDir)
         throw BadStorePath("path %s is not in the Nix store", PathFmt(p));
@@ -33,6 +35,8 @@ StorePath StoreDirConfig::parseStorePath(std::string_view path) const
 
 std::optional<StorePath> StoreDirConfig::maybeParseStorePath(std::string_view path) const
 {
+    if (path.empty())
+        return {};
     try {
         auto p = canonicaliseStorePathCandidate(path);
         if (p.parent_path() != storeDir)

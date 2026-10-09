@@ -1,8 +1,7 @@
-#include "nix/util/error.hh"
 #include "nix/util/environment-variables.hh"
+#include "nix/util/processes.hh"
 #include "nix/expr/eval-settings.hh"
 #include "nix/util/config-global.hh"
-#include "nix/util/serialise.hh"
 #include "nix/expr/eval-gc.hh"
 #include "nix/expr/value.hh"
 
@@ -10,17 +9,10 @@
 
 #if NIX_USE_BOEHMGC
 
-#  include <pthread.h>
-#  ifdef __FreeBSD__
-#    include <pthread_np.h>
-#  endif
-
 #  include <gc/gc_allocator.h>
 #  include <gc/gc_tiny_fl.h> // For GC_GRANULE_BYTES
 
-#  include <boost/coroutine2/coroutine.hpp>
-#  include <boost/coroutine2/protected_fixedsize_stack.hpp>
-#  include <boost/context/stack_context.hpp>
+#  include "nix/util/coroutine-gc.hh"
 
 #endif
 
@@ -42,8 +34,7 @@ static_assert(sizeof(void *) * 2 == GC_GRANULE_BYTES, "Boehm GC must use GC_GRAN
 /* Called when the Boehm GC runs out of memory. */
 static void * oomHandler(size_t requested)
 {
-    /* Convert this to a proper C++ exception. */
-    throw std::bad_alloc();
+    outOfMemory();
 }
 
 static size_t getFreeMem()
@@ -80,86 +71,126 @@ static size_t getFreeMem()
     return 0;
 }
 
-// The stack corrector runs under Boehm's allocation lock, potentially with
-// other threads suspended while holding malloc locks. Query pthread bounds
-// before registration, and use the GC lock to publish/remove stack records.
-static BoehmThreadStack * threadStacks = nullptr;
+/**
+ * Implementations of the libutil coroutine GC hooks (see
+ * `coroutine-gc.hh`) in terms of bdwgc's registered stacks. Together
+ * with the fiber stack registration in `parallel-eval.cc`, this makes
+ * every stack that can hold GC roots — thread stacks (registered
+ * automatically), fiber stacks and coroutine stacks — scannable by
+ * the collector, including the frames of a fiber that has switched
+ * onto a coroutine stack.
+ *
+ * The invariant maintained here is that `GC_current_stack` is the
+ * registered stack the thread is executing on, and that every other
+ * stack holding live frames has a `saved_sp` that lies *within* that
+ * stack. So the stack pointer is always recorded into
+ * `GC_current_stack` (the stack actually being left), never into a
+ * stack named by the caller: as explained in `coroutine-gc.hh`, a
+ * coroutine may yield from another coroutine's stack, and recording
+ * such a yield into the coroutine's own stack would make the
+ * collector scan from one stack up to the base of another, running
+ * into guard pages and unrelated mappings along the way.
+ */
 
-BoehmThreadStack::BoehmThreadStack()
-    : threadId(reinterpret_cast<void *>(pthread_self()))
+void gcSaveStackPointer(struct GC_stack * stk)
 {
-    size_t osStackSize;
-#  ifdef __APPLE__
-    osStackSize = pthread_get_stacksize_np(pthread_self());
-    osStackHi = (char *) pthread_get_stackaddr_np(pthread_self());
-    osStackLo = osStackHi - osStackSize;
-#  else
-    pthread_attr_t pattr;
-    if (pthread_attr_init(&pattr))
-        throw Error("BoehmThreadStack: pthread_attr_init failed");
-#    ifdef HAVE_PTHREAD_GETATTR_NP
-    if (pthread_getattr_np(pthread_self(), &pattr))
-        throw Error("BoehmThreadStack: pthread_getattr_np failed");
-#    else
-#      error "Need  `pthread_attr_get_np`"
-#    endif
-    if (pthread_attr_getstack(&pattr, (void **) &osStackLo, &osStackSize))
-        throw Error("BoehmThreadStack: pthread_attr_getstack failed");
-    if (pthread_attr_destroy(&pattr))
-        throw Error("BoehmThreadStack: pthread_attr_destroy failed");
-    osStackHi = osStackLo + osStackSize;
-#  endif
-
-    GC_call_with_alloc_lock(
-        [](void * data) -> void * {
-            auto & stack = *static_cast<BoehmThreadStack *>(data);
-            stack.next = threadStacks;
-            threadStacks = &stack;
-            return nullptr;
-        },
-        this);
+    auto sp = (char *) GC_get_approx_sp();
+    /* Check the stack pointer before lowering it by the slack, so that
+       a stack that is nearly exhausted (but whose guard page is not
+       included in `limit`, as for thread stacks) doesn't trip the
+       check. */
+    if (!(sp < (char *) stk->base && (!stk->limit || sp >= (char *) stk->limit)))
+        panic(
+            fmt("stack pointer %p is not within the stack [%p, %p) that is being switched away from",
+                (void *) sp,
+                stk->limit,
+                stk->base));
+    stk->saved_sp = sp - gcStackSwitchSlack;
 }
 
-BoehmThreadStack::~BoehmThreadStack()
+static void * coroStackRegisterImpl(void * base, size_t size)
 {
-    GC_call_with_alloc_lock(
-        [](void * data) -> void * {
-            auto stack = static_cast<BoehmThreadStack *>(data);
-            auto link = &threadStacks;
-            while (*link != stack)
-                link = &(*link)->next;
-            *link = stack->next;
-            return nullptr;
-        },
-        this);
+    auto stk = new GC_stack{};
+    stk->base = base;
+    stk->limit = (char *) base - size;
+    GC_register_stack(stk);
+    return stk;
+}
+
+static void coroStackUnregisterImpl(void * cookie)
+{
+    auto stk = (struct GC_stack *) cookie;
+    GC_unregister_stack(stk);
+    delete stk;
+}
+
+static void * coroSwitchToImpl(void * cookie)
+{
+    auto prev = GC_current_stack;
+    /* `prev` is null on threads not registered with the GC; such
+       threads hold no GC roots and need no scanning. */
+    if (prev)
+        gcSaveStackPointer(prev);
+    /* Provisional: the resumed coroutine may actually continue on
+       another stack, in which case `coroResumeImpl()` corrects this
+       right after the switch. The body start (`coroEnterImpl()`)
+       corrects the null cookie of a coroutine that is being started. */
+    GC_current_stack = (struct GC_stack *) cookie;
+    return prev;
+}
+
+static void coroSwitchBackImpl(void * prevHandle)
+{
+    auto prev = (struct GC_stack *) prevHandle;
+    GC_current_stack = prev;
+    if (prev)
+        prev->saved_sp = nullptr;
+}
+
+static void coroEnterImpl(void * cookie)
+{
+    GC_current_stack = (struct GC_stack *) cookie;
+}
+
+static void * coroYieldImpl()
+{
+    auto cur = GC_current_stack;
+    if (cur)
+        gcSaveStackPointer(cur);
+    return cur;
+}
+
+static void coroResumeImpl(void * handle)
+{
+    auto cur = (struct GC_stack *) handle;
+    GC_current_stack = cur;
+    if (cur)
+        cur->saved_sp = nullptr;
 }
 
 /**
- * When a thread goes into a coroutine, we lose its original sp until
- * control flow returns to the thread. This causes Boehm GC to crash
- * since it will scan memory between the coroutine's sp and the
- * original stack base of the thread. Therefore, we detect when the
- * current sp is outside of the original thread stack and push the
- * entire thread stack instead, as an approximation.
- *
- * This is not optimal, because it causes the stack below sp to be
- * scanned. However, we usually we don't have active coroutines during
- * evaluation, so this is acceptable.
- *
- * Note that we don't scan coroutine stacks. It's currently assumed
- * that we don't have GC roots in coroutines.
+ * A forked child process (e.g. a builtin builder, or an in-process
+ * build sandbox running on a `clone()` stack) inherits the parent
+ * thread's `GC_current_stack` and registered stacks, but it is not
+ * executing on the stack that `GC_current_stack` refers to (if it
+ * inherited the main thread's, it may be running on an entirely
+ * different one) and it never runs the collector, so the stack
+ * bookkeeping must not be done there: at best it is useless, at worst
+ * it trips the consistency check in `gcSaveStackPointer()` or takes
+ * the collector's lock, which may have been held by another thread of
+ * the parent at the time of the fork. So disable the hooks in the
+ * child.
  */
-void fixupBoehmStackPointer(void ** sp_ptr, void * pthread_id)
-{
-    for (auto stack = threadStacks; stack; stack = stack->next) {
-        if (stack->threadId != pthread_id)
-            continue;
-        auto & sp = *sp_ptr;
-        if (sp >= stack->osStackHi || sp < stack->osStackLo)
-            sp = stack->osStackLo;
-        return;
-    }
-}
+static RegisterForkCallback disableCoroutineGCHooks([]() {
+    coroStackRegister = nullptr;
+    coroStackUnregister = nullptr;
+    coroSwitchTo = nullptr;
+    coroSwitchBack = nullptr;
+    coroEnter = nullptr;
+    coroYield = nullptr;
+    coroResume = nullptr;
+    GC_current_stack = nullptr;
+});
 
 static inline void initGCReal()
 {
@@ -191,9 +222,31 @@ static inline void initGCReal()
 
     GC_set_oom_fn(oomHandler);
 
-    static BoehmThreadStack mainThreadStack;
-    GC_set_sp_corrector(&fixupBoehmStackPointer);
-    assert(GC_get_sp_corrector());
+    /* Make the coroutine stacks of libutil scannable by the GC (fiber
+       stacks are registered in `parallel-eval.cc`; thread stacks are
+       registered automatically by bdwgc). */
+    coroStackRegister = coroStackRegisterImpl;
+    coroStackUnregister = coroStackUnregisterImpl;
+    coroSwitchTo = coroSwitchToImpl;
+    coroSwitchBack = coroSwitchBackImpl;
+    coroEnter = coroEnterImpl;
+    coroYield = coroYieldImpl;
+    coroResume = coroResumeImpl;
+
+    /* Funnel boehm warnings into debug logs. */
+    GC_set_warn_proc([](const char * msg, GC_word word) noexcept {
+        std::array<char, 4096> buffer{};
+        auto res = snprintf(buffer.data(), buffer.size(), msg, word);
+        /* Ignore garbage. */
+        if (res < 0)
+            return;
+
+        try {
+            debug("%s", chomp(std::string_view(buffer.data(), std::min<size_t>(res, buffer.size() - 1))));
+        } catch (...) {
+            /* Swallow all errors. */
+        }
+    });
 
     /* Set the initial heap size to something fairly big (80% of
        free RAM, up to a maximum of 4 GiB) so that in most cases

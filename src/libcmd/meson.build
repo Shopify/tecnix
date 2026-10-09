@@ -8,7 +8,7 @@ project(
     'warning_level=1',
     'errorlogs=true', # Please print logs for tests that fail
   ],
-  meson_version : '>= 1.1',
+  meson_version : '>= 1.8',
   license : 'LGPL-2.1-or-later',
 )
 
@@ -101,7 +101,10 @@ endif
 
 sources += [
   gen_header.process('call-flake-schemas.nix'),
-  gen_header.process('builtin-flake-schemas.nix'),
+  gen_header.process(
+    'builtin-flake-schemas/flake.nix',
+    preserve_path_from : meson.current_source_dir(),
+  ),
 ]
 
 subdir('include/nix/cmd')

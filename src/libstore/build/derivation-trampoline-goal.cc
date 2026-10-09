@@ -49,18 +49,17 @@ void DerivationTrampolineGoal::commonInit()
 
 DerivationTrampolineGoal::~DerivationTrampolineGoal() {}
 
-static StorePath pathPartOfReq(const SingleDerivedPath & req)
-{
-    return std::visit(
-        overloaded{
-            [&](const SingleDerivedPath::Opaque & bo) { return bo.path; },
-            [&](const SingleDerivedPath::Built & bfd) { return pathPartOfReq(*bfd.drvPath); },
-        },
-        req.raw());
-}
-
 std::string DerivationTrampolineGoal::key()
 {
+    auto pathPartOfReq = [](this const auto & self, const SingleDerivedPath & req) -> StorePath {
+        return std::visit(
+            overloaded{
+                [&](const SingleDerivedPath::Opaque & bo) { return bo.path; },
+                [&](const SingleDerivedPath::Built & bfd) { return self(*bfd.drvPath); },
+            },
+            req.raw());
+    };
+
     return "da$" + std::string(pathPartOfReq(*drvReq).name()) + "$" + DerivedPath::Built{
         .drvPath = drvReq,
         .outputs = wantedOutputs,
@@ -151,12 +150,73 @@ Goal::Co DerivationTrampolineGoal::haveDerivation(StorePath drvPath, Derivation 
     /* Must have at least one wanted output. This is assumed below. */
     assert(!resolvedWantedOutputs.empty());
 
+    /* Short-circuit `builtin:substitute`. Since these are never actually built, just create substitution goals for the
+     * outputs. */
+    if (drv.type() == DerivationType::Substituted{}) {
+        struct OutputGoal
+        {
+            OutputName outputName;
+            StorePath outPath;
+            GoalPtr goal;
+        };
+
+        std::vector<OutputGoal> outputGoals;
+        Goals waitees;
+        for (auto & outputName : resolvedWantedOutputs) {
+            auto i = drv.outputs.find(outputName);
+            if (i == drv.outputs.end())
+                throw Error(
+                    "derivation '%s' does not have wanted output '%s'",
+                    worker.store.printStorePath(drvPath),
+                    outputName);
+            auto outPath = i->second.path(worker.store, drv.name, outputName);
+            if (!outPath)
+                throw Error(
+                    "output '%s' of derivation '%s' has no store path",
+                    outputName,
+                    worker.store.printStorePath(drvPath));
+            auto g = upcast_goal(worker.makePathSubstitutionGoal(*outPath));
+            outputGoals.push_back({outputName, *outPath, g});
+            waitees.insert(g);
+        }
+
+        co_await await(std::move(waitees));
+
+        if (nrFailed != 0) {
+            StringSet failedPaths;
+            for (auto & og : outputGoals)
+                if (og.goal->exitCode != ecSuccess)
+                    failedPaths.insert(worker.store.printStorePath(og.outPath));
+            co_return doneFailure(
+                ecFailed,
+                BuildResult::Failure{{
+                    .status = BuildResult::Failure::DependencyFailed,
+                    .msg = HintFmt(
+                        "failed to substitute outputs of '%s': %s",
+                        worker.store.printStorePath(drvPath),
+                        concatStringsSep(", ", quoteStrings(failedPaths))),
+                }});
+        }
+
+        SingleDrvOutputs builtOutputs;
+        for (auto & og : outputGoals)
+            builtOutputs.emplace(og.outputName, UnkeyedRealisation{.outPath = og.outPath});
+
+        co_return doneSuccess(
+            BuildResult::Success{
+                .status = BuildResult::Success::Substituted,
+                .builtOutputs = std::move(builtOutputs),
+            });
+    }
+
     Goals concreteDrvGoals;
 
     /* Build this step! */
 
+    auto sharedDrv = make_ref<const Derivation>(std::move(drv));
+
     for (auto & output : resolvedWantedOutputs) {
-        auto g = upcast_goal(worker.makeDerivationGoal(drvPath, drv, output, buildMode, false));
+        auto g = upcast_goal(worker.makeDerivationGoal(drvPath, sharedDrv, output, buildMode, false));
         g->preserveFailure = true;
         /* We will finish with it ourselves, as if we were the derivational goal. */
         concreteDrvGoals.insert(std::move(g));

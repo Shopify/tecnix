@@ -12,6 +12,7 @@
 #include "nix/store/names.hh"
 #include "nix/util/url.hh"
 #include "nix/flake/url-name.hh"
+#include "nix/fetchers/fetch-settings.hh"
 
 #include <nlohmann/json.hpp>
 #include <regex>
@@ -19,7 +20,7 @@
 
 #include "nix/util/strings.hh"
 
-using namespace nix;
+namespace nix {
 
 struct ProfileElementSource
 {
@@ -124,7 +125,7 @@ struct ProfileManifest
         auto manifestPath = profile / "manifest.json";
 
         if (std::filesystem::exists(manifestPath)) {
-            auto json = nlohmann::json::parse(readFile(manifestPath.string()));
+            auto json = nlohmann::json::parse(readFile(manifestPath));
 
             auto version = json.value("version", 0);
             std::string sUrl;
@@ -247,13 +248,13 @@ struct ProfileManifest
             }
         }
 
-        buildProfile(tempDir.string(), std::move(pkgs));
+        buildProfile(tempDir, std::move(pkgs));
 
         writeFile(tempDir / "manifest.json", toJSON(*store).dump());
 
         /* Add the symlink tree to the store. */
         StringSink sink;
-        dumpPath(tempDir.string(), sink);
+        dumpPath(tempDir, sink);
 
         auto narHash = hashString(HashAlgorithm::SHA256, sink.s);
 
@@ -279,27 +280,49 @@ struct ProfileManifest
         return std::move(info.path);
     }
 
-    static void printDiff(const ProfileManifest & prev, const ProfileManifest & cur, std::string_view indent)
+    static void
+    printDiff(const ProfileManifest & prev, const ProfileManifest & cur, std::string_view indent, bool showSource)
     {
         auto i = prev.elements.begin();
         auto j = cur.elements.begin();
 
         bool changes = false;
 
+        auto flakeRef = [&](const ProfileElement & element) -> std::string {
+            if (!showSource || !element.source)
+                return "";
+            return fmt(" (%s)", element.source->lockedRef.to_string(true));
+        };
+
+        auto flakeRefChange = [&](const ProfileElement & e1, const ProfileElement & e2) -> std::string {
+            if (!showSource || !e1.source || !e2.source)
+                return "";
+            return fmt(" (%s -> %s)", e1.source->lockedRef.to_string(true), e2.source->lockedRef.to_string(true));
+        };
+
         while (i != prev.elements.end() || j != cur.elements.end()) {
             if (j != cur.elements.end() && (i == prev.elements.end() || i->first > j->first)) {
-                logger->cout("%s%s: %s added", indent, j->second.identifier(), j->second.versions());
+                auto & e = j->second;
+                logger->cout("%s%s: %s added%s", indent, e.identifier(), e.versions(), flakeRef(e));
                 changes = true;
                 ++j;
             } else if (i != prev.elements.end() && (j == cur.elements.end() || i->first < j->first)) {
-                logger->cout("%s%s: %s removed", indent, i->second.identifier(), i->second.versions());
+                auto & e = i->second;
+                logger->cout("%s%s: %s removed%s", indent, e.identifier(), e.versions(), flakeRef(e));
                 changes = true;
                 ++i;
             } else {
-                auto v1 = i->second.versions();
-                auto v2 = j->second.versions();
+                auto & e1 = i->second;
+                auto & e2 = j->second;
+                auto v1 = e1.versions();
+                auto v2 = e2.versions();
                 if (v1 != v2) {
-                    logger->cout("%s%s: %s -> %s", indent, i->second.identifier(), v1, v2);
+                    logger->cout("%s%s: %s -> %s%s", indent, e1.identifier(), v1, v2, flakeRefChange(e1, e2));
+                    changes = true;
+                } else if (e1.storePaths != e2.storePaths) {
+                    /* Same version, but a different store path (e.g. a
+                       rebuild due to a dependency change). */
+                    logger->cout("%s%s: %s changed%s", indent, e1.identifier(), v1, flakeRefChange(e1, e2));
                     changes = true;
                 }
                 ++i;
@@ -692,7 +715,7 @@ struct CmdProfileRemove : virtual EvalCommand, MixProfileElementMatchers
     }
 };
 
-struct CmdProfileUpgrade : virtual SourceExprCommand, MixProfileElementMatchers
+struct CmdProfileUpgrade : virtual SourceExprCommand, MixProfileElementMatchers, MixDryRun
 {
     std::string description() override
     {
@@ -708,6 +731,7 @@ struct CmdProfileUpgrade : virtual SourceExprCommand, MixProfileElementMatchers
 
     void run(ref<Store> store) override
     {
+        fetchSettings.tarballTtl = 0;
         ProfileManifest manifest(*getEvalState(), *profile);
 
         Installables installables;
@@ -785,6 +809,9 @@ struct CmdProfileUpgrade : virtual SourceExprCommand, MixProfileElementMatchers
             warn("Found some packages but none of them could be upgraded.");
             return;
         }
+
+        if (dryRun)
+            return;
 
         auto buildResults = Installable::build2(getEvalStore(), store, Realise::Outputs, installables, bmNormal);
         Installable::throwBuildErrors(buildResults, *store);
@@ -884,6 +911,17 @@ struct CmdProfileDiffClosures : virtual StoreCommand, MixDefaultProfile
 
 struct CmdProfileHistory : virtual StoreCommand, EvalCommand, MixDefaultProfile
 {
+    bool showSource = false;
+
+    CmdProfileHistory()
+    {
+        addFlag({
+            .longName = "show-source",
+            .description = "Show the locked flake reference of each added, removed or changed package.",
+            .handler = {&showSource, true},
+        });
+    }
+
     std::string description() override
     {
         return "show all versions of a profile";
@@ -917,7 +955,7 @@ struct CmdProfileHistory : virtual StoreCommand, EvalCommand, MixDefaultProfile
                 std::put_time(std::gmtime(&gen.creationTime), "%Y-%m-%d"),
                 prevGen ? fmt(" <- %d", prevGen->first.number) : "");
 
-            ProfileManifest::printDiff(prevGen ? prevGen->second : ProfileManifest(), manifest, "  ");
+            ProfileManifest::printDiff(prevGen ? prevGen->second : ProfileManifest(), manifest, "  ", showSource);
 
             prevGen = {gen, std::move(manifest)};
         }
@@ -1029,3 +1067,5 @@ struct CmdProfile : NixMultiCommand
 };
 
 static auto rCmdProfile = registerCommand<CmdProfile>("profile");
+
+} // namespace nix

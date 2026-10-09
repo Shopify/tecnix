@@ -5,10 +5,10 @@
 #include "nix/expr/tests/libexpr.hh"
 #include "nix/expr/eval-cache.hh"
 #include "nix/store/async-path-writer.hh"
+#include "nix/store/derivations.hh"
 #include "nix/store/local-store.hh"
 #include "nix/util/file-system.hh"
 #include "nix/util/finally.hh"
-#include "nix/util/memory-source-accessor.hh"
 
 namespace nix {
 
@@ -293,8 +293,14 @@ TEST_F(EvalStateTest, forceDerivationWaitsForPendingWrite)
     EvalState evalState({}, racingStore, fetchSettings, evalSettings, nullptr);
     evalState.asyncPathWriter = writer;
 
-    const std::string contents =
-        R"(Derive([("out","/nix/store/0ngv9b0ck67hr29zy0zak64s3n77pncq-pending","","")],[],[],"dummy","/bin/sh",[],[]))";
+    Derivation drv;
+    drv.name = "pending";
+    drv.platform = "dummy";
+    drv.builder = "/bin/sh";
+    drv.env["out"] = "";
+    drv.outputs.insert_or_assign("out", DerivationOutput::Deferred{});
+    drv.fillInOutputPaths(*racingStore);
+    const std::string contents = drv.unparse(*racingStore, false);
     auto path = racingStore->makeFixedOutputPathFromCA(
         "pending.drv", TextInfo{.hash = hashString(HashAlgorithm::SHA256, contents), .references = {}});
     writer->write = [&] {
