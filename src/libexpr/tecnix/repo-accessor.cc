@@ -292,11 +292,19 @@ struct TecnixSourceAccessor : SourceAccessor
 
     void trackAccess(const CanonPath & path)
     {
-        if (auto ctx = currentTecnixThreadState.trackingContext; ctx) {
-            static thread_local std::string trackedRepoPathScratch;
-            trackedRepoPathScratch.clear();
-            ctx->recordAccess(trackedRepoPathForAccess(path, trackedRepoPathScratch));
-        }
+        auto ctx = currentTecnixThreadState.trackingContext;
+        // Nix files are code: note them whether or not this read is tracked
+        // (see recordTecnixCodeFile).
+        bool code = !path.isRoot() && path.rel().ends_with(".nix");
+        if (!ctx && !code)
+            return;
+        static thread_local std::string trackedRepoPathScratch;
+        trackedRepoPathScratch.clear();
+        auto repoPath = trackedRepoPathForAccess(path, trackedRepoPathScratch);
+        if (code)
+            recordTecnixCodeFile(repoPath);
+        if (ctx)
+            ctx->recordAccess(repoPath);
     }
 
     /**

@@ -14,7 +14,9 @@
 #include "nix/expr/ingestion-stats.hh"
 #include "nix/expr/tecnix/access-set-graph.hh"
 #include "nix/expr/tecnix/eval-cache.hh"
+#include "nix/expr/tecnix/memo-value.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
+#include "nix/store/globals.hh"
 #include "nix/store/store-api.hh"
 #include "nix/util/finally.hh"
 #include "nix/util/strings.hh"
@@ -271,6 +273,255 @@ static RegisterPrimOp primop_tecnixMemoize({
       evaluates `import ./load-zone.nix "//areas/tools/dev"` once.
     )",
     .impl = prim_tecnixMemoize,
+});
+
+// ============================================================================
+// builtins.tecnixPersistentMemo ns key f
+// `f key`, kept across evaluations: inside a cached `builtins.tecnixTargets`
+// evaluation the deeply forced result is stored as data, with the source
+// closure it was computed from, in the target cache's database, and a later
+// evaluation that proves that closure against its own tree reuses it.
+// ============================================================================
+
+/**
+ * The row family one cached `tecnixTargets` call stores its memo rows in: its
+ * own (resolver, argsKey) scope, set apart from target rows by a reserved
+ * resolver prefix, and tied to this evaluator's version, since a row holds
+ * evaluation *results* (derivation paths among them) rather than just a
+ * closure.
+ */
+struct TecnixMemoRowFamily
+{
+    std::string resolver;
+    std::string argsKey;
+    DependencyFingerprintCache * fingerprintCache;
+    size_t historyLimit;
+
+    /** Results already produced in this call, so repeated calls in one
+        target neither re-read nor re-evaluate. Keyed by row key. */
+    std::mutex lock;
+    std::unordered_map<std::string, std::pair<RootValue, EvalSourceAccessSetId>> values;
+
+    TecnixMemoRowFamily(
+        std::string_view resolver_,
+        std::string_view argsKey_,
+        DependencyFingerprintCache & fingerprintCache_,
+        size_t historyLimit_)
+        : resolver(std::string("__tecnixPersistentMemo\0", 23) + std::string(resolver_))
+        , argsKey(std::string(argsKey_) + '\0' + nixVersion + '\0' + tecnixVersion)
+        , fingerprintCache(&fingerprintCache_)
+        , historyLimit(historyLimit_)
+    {
+    }
+};
+
+/** The target this thread is evaluating for a cached `tecnixTargets` call, if any. */
+struct TecnixMemoTarget
+{
+    TecnixMemoRowFamily * family = nullptr;
+    std::string_view target;
+};
+
+static thread_local TecnixMemoTarget currentTecnixMemoTarget;
+
+/**
+ * A memo row is keyed by the enclosing target as well as `ns` and `key`: `f`
+ * can close over values derived from the target id (the zone's own path, say)
+ * that are not source reads, so only the target id makes them part of the key.
+ */
+static std::string tecnixMemoRowKey(std::string_view target, std::string_view ns, std::string_view key)
+{
+    std::string rowKey;
+    rowKey.reserve(target.size() + ns.size() + key.size() + 2);
+    rowKey.append(target);
+    rowKey.push_back('\0');
+    rowKey.append(ns);
+    rowKey.push_back('\0');
+    rowKey.append(key);
+    return rowKey;
+}
+
+/** Intern a stored closure's paths as one access set of `trackingCtx`'s graph. */
+static EvalSourceAccessSetId internTrackedPaths(TrackingContext & trackingCtx, const std::vector<std::string> & paths)
+{
+    std::vector<EvalSourceAccessId> ids;
+    ids.reserve(paths.size());
+    for (auto & path : paths)
+        ids.push_back(trackingCtx.sourceAccessSetGraph->internAccess(path));
+    return trackingCtx.sourceAccessSetGraph->internAccessSet(ids, {});
+}
+
+/**
+ * A stored result, if one proves out: its closure matches this tree (checked
+ * by the lookup), it decodes, and every store path its string contexts name
+ * is still valid. Anything less is a miss.
+ */
+static Value * lookupPersistentMemo(
+    EvalState & state,
+    TrackingContext & trackingCtx,
+    TecnixMemoRowFamily & family,
+    const std::string & rowKey,
+    EvalSourceAccessSetId & sourceDeps)
+{
+    std::optional<std::string> payload;
+    std::vector<std::string> closure;
+    std::array<std::string, 1> keys{rowKey};
+    lookupCachedDependencies(
+        state,
+        TecnixCacheScope{family.resolver, family.argsKey},
+        keys,
+        *family.fingerprintCache,
+        [&](size_t, const DependencyCacheHit & hit) {
+            if (auto p = hit.payload()) {
+                payload.emplace(*p);
+                closure = hit.paths();
+            }
+        });
+    if (!payload)
+        return nullptr;
+
+    auto decoded = deserializeTecnixMemoValue(state, *payload);
+    if (!decoded)
+        return nullptr;
+    if (!decoded->storePaths.empty()
+        && state.store->queryValidPaths(decoded->storePaths).size() != decoded->storePaths.size())
+        return nullptr;
+
+    sourceDeps = internTrackedPaths(trackingCtx, closure);
+    if (sourceDeps != emptyEvalSourceAccessSetId)
+        decoded->value->setTrackedSourceAccessSet(sourceDeps);
+    return decoded->value;
+}
+
+/**
+ * Store a fresh result. Its closure is what its evaluation read plus every Nix
+ * file read so far (see `recordTecnixCodeFile`). A result that is not data, or
+ * a closure that can't be fingerprinted, is simply not stored.
+ */
+static void storePersistentMemo(
+    EvalState & state,
+    TecnixMemoRowFamily & family,
+    const std::string & rowKey,
+    Value & result,
+    EvalSourceAccessSetId sourceDeps)
+{
+    std::string payload;
+    try {
+        payload = serializeTecnixMemoValue(state, result);
+    } catch (TecnixMemoUnserializable & e) {
+        printTalkative("tecnixPersistentMemo: not storing '%s': %s", rowKey, e.msg());
+        return;
+    }
+
+    auto paths = sourceDeps == emptyEvalSourceAccessSetId
+                     ? std::vector<std::string>{}
+                     : trackedSourceAccessSetGraph(state)->flatten({}, {sourceDeps});
+    auto code = tecnixCodeFiles();
+    paths.insert(paths.end(), code.begin(), code.end());
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+
+    DependencyClosure dependencies;
+    try {
+        dependencies = dependencyFingerprints(getTecnixRepoAccessor(state), paths, *family.fingerprintCache);
+    } catch (Error & e) {
+        printTalkative("tecnixPersistentMemo: not storing '%s': %s", rowKey, e.msg());
+        return;
+    }
+
+    std::vector<TecnixDependencyUpsert> upserts{{rowKey, &dependencies, std::move(payload)}};
+    upsertDependencyClosures(TecnixCacheScope{family.resolver, family.argsKey}, upserts, family.historyLimit);
+}
+
+static void prim_tecnixPersistentMemo(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto ns =
+        state.forceStringNoCtx(*args[0], pos, "while evaluating the namespace passed to builtins.tecnixPersistentMemo");
+    auto key =
+        state.forceStringNoCtx(*args[1], pos, "while evaluating the key passed to builtins.tecnixPersistentMemo");
+    auto * function = args[2];
+
+    // A fresh key, for the same reason as in tecnixMemoize: `f` must not
+    // inherit the label of however the caller computed it.
+    auto * keyArg = state.allocValue();
+    keyArg->mkString(key, state.mem);
+
+    auto * trackingCtx = currentTecnixThreadState.trackingContext;
+    auto memoTarget = currentTecnixMemoTarget;
+    if (!trackingCtx || !memoTarget.family) {
+        // Not inside a cached target evaluation: just `f key`.
+        state.callFunction(*function, *keyArg, v, pos);
+        return;
+    }
+    auto & family = *memoTarget.family;
+    auto rowKey = tecnixMemoRowKey(memoTarget.target, ns, key);
+
+    {
+        std::lock_guard guard(family.lock);
+        if (auto i = family.values.find(rowKey); i != family.values.end()) {
+            recordTrackedSourceAccessSetDependency(*trackingCtx, i->second.second);
+            v = **i->second.first;
+            return;
+        }
+    }
+
+    auto sourceDeps = emptyEvalSourceAccessSetId;
+    Value * result = lookupPersistentMemo(state, *trackingCtx, family, rowKey, sourceDeps);
+    if (result) {
+        printTalkative("tecnixPersistentMemo: hit for '%s' / '%s' in '%s'", ns, key, memoTarget.target);
+        recordTrackedSourceAccessSetDependency(*trackingCtx, sourceDeps);
+    } else {
+        printTalkative("tecnixPersistentMemo: miss for '%s' / '%s' in '%s'", ns, key, memoTarget.target);
+        result = state.allocValue();
+        {
+            TrackedSourceDepsScope scope(*trackingCtx);
+            state.callFunction(*function, *keyArg, *result, pos);
+            // Deeply, so the closure is complete and the result is data.
+            state.forceValueDeep(*result);
+            // Records the closure into this caller's frame too.
+            sourceDeps = scope.finish(result);
+        }
+        storePersistentMemo(state, family, rowKey, *result, sourceDeps);
+    }
+
+    {
+        std::lock_guard guard(family.lock);
+        family.values.try_emplace(rowKey, RootValue(result), sourceDeps);
+    }
+    v = *result;
+}
+
+static RegisterPrimOp primop_tecnixPersistentMemo({
+    .name = "__tecnixPersistentMemo",
+    .args = {"ns", "key", "f"},
+    .doc = R"(
+      Return `f key`, reusing it from an earlier evaluation when that is
+      provably the same value.
+
+      Outside a cached `builtins.tecnixTargets` evaluation (pure evaluation
+      with `tecnix-eval-cache`), this is just `f key`.
+
+      Inside one, the result is looked up under the target being evaluated,
+      `ns` and `key` (both strings without context). A stored result is used
+      only if every source path it was computed from still has the same
+      fingerprint in the evaluated tree, and every store path in its string
+      contexts is still valid. The stored closure covers what computing it
+      read, plus every Nix file the evaluator had read when it was stored, so
+      a change to the code that computes it invalidates it too. The value's
+      sources are recorded for the target either way, so the target's own
+      cache entry stays exact.
+
+      Otherwise `f key` is evaluated, forced deeply, and stored, provided it
+      is data: null, booleans, numbers, strings (with their contexts), lists
+      and attribute sets. A result holding a function or a path is returned
+      as usual and not stored. Project such values to data before memoizing
+      them; a derivation's `drvPath` and output paths, for example, are
+      strings with context and are stored fine.
+
+      `ns` and `key` together must name what `f` computes for this target:
+      two calls in one target with the same `ns` and `key` share one result.
+    )",
+    .impl = prim_tecnixPersistentMemo,
 });
 
 // ============================================================================
@@ -1046,7 +1297,8 @@ static TargetDependencyResult evalTargetDependencies(
     EvalSourceAccessSetId resolveSourceDeps,
     const std::string & target,
     bool keepTargetValue,
-    bool track)
+    bool track,
+    TecnixMemoRowFamily * memoFamily = nullptr)
 {
     auto started = std::chrono::steady_clock::now();
     IngestionTargetScope ingestionTargetScope(target);
@@ -1067,6 +1319,13 @@ static TargetDependencyResult evalTargetDependencies(
         std::optional<ActiveTrackingContext> activeTrackingCtx;
         if (trackingCtx)
             activeTrackingCtx.emplace(*trackingCtx);
+
+        // Persistent memo calls made while evaluating this target store
+        // their rows under it (see tecnixPersistentMemo).
+        auto previousMemoTarget = currentTecnixMemoTarget;
+        if (trackingCtx && memoFamily)
+            currentTecnixMemoTarget = {.family = memoFamily, .target = target};
+        Finally restoreMemoTarget([&]() { currentTecnixMemoTarget = previousMemoTarget; });
 
         auto * targetArg = state.allocValue();
         targetArg->mkString(target, state.mem);
@@ -1285,6 +1544,10 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
     if (!misses.empty()) {
         auto preparedResolve = prepareTrackedResolveFunction(state, pos, args);
 
+        std::optional<TecnixMemoRowFamily> memoFamily;
+        if (useCache)
+            memoFamily.emplace(args.resolver, args.argsKey, fingerprintCache, state.settings.tecnixEvalCacheHistory);
+
         auto evalMiss = [&](size_t i) {
             auto & target = args.targets[i];
             try {
@@ -1295,7 +1558,8 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
                     preparedResolve.sourceDeps,
                     target,
                     keepTargetValues,
-                    tecnixSourceTrackingEnabled(state, args));
+                    tecnixSourceTrackingEnabled(state, args),
+                    memoFamily ? &*memoFamily : nullptr);
             } catch (Error & e) {
                 // Interrupted is not an Error, so interrupts still stop the call.
                 if (!errors)

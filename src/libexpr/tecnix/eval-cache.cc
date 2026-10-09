@@ -1452,6 +1452,23 @@ DependencyClosure dependencyFingerprints(
     return result;
 }
 
+std::vector<std::string> DependencyCacheHit::paths() const
+{
+    auto & view = impl.view;
+    auto pairs = TecnixEvalCache::storedCandidatePairs(view, impl.candidateIndex);
+
+    std::vector<std::string> result;
+    result.reserve(pairs.count);
+    for (uint32_t i = 0; i < pairs.count; i++) {
+        auto ids = view.pairIds(pairs.start + i);
+        auto path = ids ? view.path(ids->path) : std::nullopt;
+        if (!path)
+            throw MalformedTecnixCacheRow("malformed Tecnix dependency cache row");
+        result.emplace_back(*path);
+    }
+    return result;
+}
+
 Value * DependencyCacheHit::toValue(EvalState & state) const
 {
     auto & view = impl.view;

@@ -49,6 +49,22 @@ forceValueTracked(EvalState & state, Value & v, PosIdx pos, TrackingContext & tr
 std::vector<std::string> parseGitPorcelainZDirtyPaths(std::string_view output);
 
 /**
+ * Note that the evaluator read the repository's Nix file `repoPath` (a
+ * tracked repo path, as `TrackingContext::recordAccess` gets it), tracked or
+ * not. Process-wide and append-only.
+ *
+ * `builtins.tecnixPersistentMemo` stores these with every row: tracking
+ * records what a computation *reads*, but the code that runs inside it was
+ * often read earlier, outside its scope (a function defined in a file
+ * imported long before the call), and a change to that code must invalidate
+ * the row too.
+ */
+void recordTecnixCodeFile(std::string_view repoPath);
+
+/** Every path passed to `recordTecnixCodeFile` so far, sorted. */
+std::vector<std::string> tecnixCodeFiles();
+
+/**
  * A stack-resident accumulator for one bracketed region of evaluation: the
  * force of one value (`value` set) or a source-deps scope / target root
  * (`value` null). Collects direct path accesses and inherited child labels;

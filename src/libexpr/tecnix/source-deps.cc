@@ -5,6 +5,8 @@
 #include "nix/util/util.hh"
 
 #include <algorithm>
+#include <mutex>
+#include <set>
 #include <span>
 
 #include <sys/mman.h>
@@ -808,6 +810,37 @@ EvalSourceAccessSetId publishTrackedSourceAccessSetDependencies(
     if (accessSet != emptyEvalSourceAccessSetId)
         v.setTrackedSourceAccessSet(accessSet);
     return accessSet;
+}
+
+namespace {
+
+struct TecnixCodeFiles
+{
+    std::mutex lock;
+    std::set<std::string, std::less<>> paths;
+};
+
+TecnixCodeFiles & tecnixCodeFileRegistry()
+{
+    static TecnixCodeFiles registry;
+    return registry;
+}
+
+} // namespace
+
+void recordTecnixCodeFile(std::string_view repoPath)
+{
+    auto & registry = tecnixCodeFileRegistry();
+    std::lock_guard guard(registry.lock);
+    if (!registry.paths.contains(repoPath))
+        registry.paths.emplace(repoPath);
+}
+
+std::vector<std::string> tecnixCodeFiles()
+{
+    auto & registry = tecnixCodeFileRegistry();
+    std::lock_guard guard(registry.lock);
+    return {registry.paths.begin(), registry.paths.end()};
 }
 
 } // namespace nix
