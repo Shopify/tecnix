@@ -1,0 +1,77 @@
+From: Josh Heinrichs <josh.heinrichs@shopify.com>
+Subject: [PATCH] futils: don't rmdir() empty parents through a trailing slash
+
+`git_futils_rmdir_r()` with `GIT_RMDIR_EMPTY_PARENTS` walks up the removed
+path's parents with `git_fs_path_walk_up()`, which yields each directory
+with a trailing slash, and hands them to rmdir() as they are.
+
+With the trailing slash, a symbolic link in that position is resolved on
+BSD-derived systems (including macOS), so rmdir() acts on the link's
+target: it removes an unrelated empty directory the link points to, or,
+for a link to an ancestor, fails with EINVAL (macOS 27) or ENOTEMPTY
+(earlier macOS). Linux reports ENOTDIR for the link itself, which is what
+the error handling in `futils__rmdir_empty_parent()` expects and treats as
+"nothing to remove".
+
+This is reached from checkout on a case-insensitive filesystem whenever a
+file is removed from a directory whose name collides with a symlink, e.g.
+`checkout::icase::overwrites_links_for_folders_when_forced`, which fails on
+macOS 27 with:
+
+    invalid path for filesystem '.../testrepo/a/': Invalid argument
+
+Strip the trailing slash before calling rmdir(), so the link itself is
+named and every platform reports ENOTDIR.
+---
+--- a/src/util/futils.c	1969-12-31 18:00:01
++++ b/src/util/futils.c	2026-10-09 17:36:44
+@@ -829,26 +829,44 @@
+ static int futils__rmdir_empty_parent(void *opaque, const char *path)
+ {
+ 	futils__rmdir_data *data = opaque;
++	git_str dir = GIT_STR_INIT;
++	size_t len = strlen(path);
+ 	int error = 0;
+ 
+-	if (strlen(path) <= data->baselen)
+-		error = GIT_ITEROVER;
++	if (len <= data->baselen)
++		return GIT_ITEROVER;
+ 
+-	else if (p_rmdir(path) < 0) {
++	/*
++	 * `git_fs_path_walk_up` yields directories with a trailing slash.
++	 * Strip it before calling rmdir(): with the slash, a symbolic link
++	 * in that position is resolved on BSD-derived systems (including
++	 * macOS), so rmdir() would act on the link's target -- removing an
++	 * unrelated empty directory, or failing with EINVAL for a link to
++	 * an ancestor -- instead of reporting ENOTDIR for the link itself,
++	 * as Linux does and as the error handling below expects.
++	 */
++	while (len > 1 && path[len - 1] == '/')
++		len--;
++
++	if (git_str_put(&dir, path, len) < 0)
++		return -1;
++
++	if (p_rmdir(dir.ptr) < 0) {
+ 		int en = errno;
+ 
+ 		if (en == ENOENT || en == ENOTDIR) {
+ 			/* do nothing */
+ 		} else if ((data->flags & GIT_RMDIR_SKIP_NONEMPTY) == 0 &&
+ 			en == EBUSY) {
+-			error = git_fs_path_set_error(errno, path, "rmdir");
++			error = git_fs_path_set_error(en, dir.ptr, "rmdir");
+ 		} else if (en == ENOTEMPTY || en == EEXIST || en == EBUSY) {
+ 			error = GIT_ITEROVER;
+ 		} else {
+-			error = git_fs_path_set_error(errno, path, "rmdir");
++			error = git_fs_path_set_error(en, dir.ptr, "rmdir");
+ 		}
+ 	}
+ 
++	git_str_dispose(&dir);
+ 	return error;
+ }
+ 

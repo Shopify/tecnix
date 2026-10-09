@@ -178,6 +178,10 @@ scope: {
       # orphaned delta-search worker threads running while the
       # packbuilder is freed.
       ./patches/libgit2-packbuilder-dont-fail-on-thread-create-error.patch
+
+      # Don't let GIT_RMDIR_EMPTY_PARENTS rmdir() through a symlink: on macOS
+      # a trailing slash makes rmdir() act on the link's target.
+      ./patches/libgit2-rmdir-empty-parent-trailing-slash.patch
     ];
   });
 }
