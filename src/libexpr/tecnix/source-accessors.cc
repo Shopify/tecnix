@@ -531,79 +531,33 @@ const std::map<std::string, EvalState::ZoneDirtyInfo> & getTectonixDirtyZones(co
             dirtyZones[zonePath] = {};
         }
 
-        // Create git command environment with environment variables
-        // GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR removed since they affect
-        // git repository discovery
-        StringMap gitEnvironment = getEnv();
-        gitEnvironment.erase("GIT_DIR");
-        gitEnvironment.erase("GIT_WORK_TREE");
-        gitEnvironment.erase("GIT_COMMON_DIR");
-
-        // Get dirty files via git status with -z for NUL-separated output
-        // This handles filenames with special characters correctly.
-        // --untracked-files=all lists each untracked file: by default git
-        // collapses an untracked directory to one `dir/` entry, which
-        // DirtyOverlaySourceAccessor (it overlays listed files) would drop, so
-        // a new directory in a checkout was invisible to the zone's source.
-        auto checkoutPath = state.settings.tectonixCheckoutPath.get();
-        auto [gitStatusCode, gitStatusOutput] = runProgram(
-            {.program = "git",
-             .args = {"-C", checkoutPath, "status", "--porcelain", "-z", "--untracked-files=all"},
-             .environment = gitEnvironment});
-        if (!statusOk(gitStatusCode)) {
+        // The checkout's dirty paths come from the same `git status` that the
+        // Tecnix repo accessor's overlay uses (one per evaluation, see
+        // getTecnixCheckoutDirtyPaths): `--untracked-files=all`, so a file in
+        // an untracked directory is listed by name. With the default, git
+        // collapses the directory to one `dir/` entry, which the dirty overlay
+        // (it overlays listed files) would drop, and a new directory in a
+        // checkout was missing from the zone's source.
+        const std::vector<std::string> * dirtyPaths;
+        try {
+            dirtyPaths = &getTecnixCheckoutDirtyPaths(state);
+        } catch (Error & e) {
             // If git status fails, treat all zones as clean (fallback)
             // This ensures call_once completes and we don't retry with partial state
-            warn(
-                "failed to get git status for dirty zone detection in '%s': program 'git' %s; treating all zones as clean",
-                checkoutPath,
-                statusToString(gitStatusCode));
+            warn("%s; treating all zones as clean for dirty zone detection", e.msg());
             return;
         }
 
-        // Parse NUL-separated output
-        // Format with -z: XY SP path NUL [orig-path NUL for renames/copies]
-        size_t pos = 0;
-        while (pos < gitStatusOutput.size()) {
-            // Find the next NUL
-            auto nulPos = gitStatusOutput.find('\0', pos);
-            if (nulPos == std::string::npos)
-                break;
-
-            auto entry = gitStatusOutput.substr(pos, nulPos - pos);
-            pos = nulPos + 1;
-
-            // Git porcelain format: "XY PATH" where XY is 2-char status, then space, then path
-            // Minimum valid entry is "X  P" (4 chars): status + space + 1-char path
-            if (entry.size() < 4)
-                continue;
-
-            // XY is first 2 chars, then space, then path
-            char xy0 = entry[0];
-            std::string rawPath = entry.substr(3);
-
-            // Collect paths to check - destination path is always included
-            std::vector<std::string> pathsToCheck;
-            pathsToCheck.push_back("/" + rawPath);
-
-            // For renames (R) and copies (C), also process the original path
-            // Both source and destination zones should be marked dirty
-            if (xy0 == 'R' || xy0 == 'C') {
-                auto nextNul = gitStatusOutput.find('\0', pos);
-                if (nextNul != std::string::npos) {
-                    auto origPath = gitStatusOutput.substr(pos, nextNul - pos);
-                    pathsToCheck.push_back("/" + origPath);
-                    pos = nextNul + 1;
-                }
-            }
-
-            for (const auto & filePath : pathsToCheck) {
-                for (auto & [zonePath, info] : dirtyZones) {
-                    auto normalized = "/" + normalizeZonePath(zonePath);
-                    if (hasPrefix(filePath, normalized + "/") || filePath == normalized) {
-                        info.dirty = true;
-                        info.dirtyFiles.insert(filePath.substr(1));
-                        break;
-                    }
+        // Both sides of a rename or copy are in the list, so both source and
+        // destination zones are marked dirty.
+        for (auto & rawPath : *dirtyPaths) {
+            auto filePath = "/" + rawPath;
+            for (auto & [zonePath, info] : dirtyZones) {
+                auto normalized = "/" + normalizeZonePath(zonePath);
+                if (hasPrefix(filePath, normalized + "/") || filePath == normalized) {
+                    info.dirty = true;
+                    info.dirtyFiles.insert(rawPath);
+                    break;
                 }
             }
         }

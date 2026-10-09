@@ -13,6 +13,13 @@ Hash getWorldTreeSha(const EvalState & state, std::string_view worldPath);
 bool isTectonixSourceAvailable(const EvalState & state);
 const std::set<std::string> & getTectonixSparseCheckoutRoots(const EvalState & state);
 const std::map<std::string, EvalState::ZoneDirtyInfo> & getTectonixDirtyZones(const EvalState & state);
+/**
+ * The checkout's dirty repo-relative paths (modified, added, deleted, both
+ * sides of a rename, and every untracked file), from one `git status` per
+ * evaluation that the repo accessor's overlay and dirty-zone detection share.
+ * Throws if git status fails.
+ */
+const std::vector<std::string> & getTecnixCheckoutDirtyPaths(const EvalState & state);
 const std::string & getManifestContent(const EvalState & state);
 const nlohmann::json & getManifestJson(const EvalState & state);
 StorePath getLegacyTectonixZoneStorePath(EvalState & state, std::string_view zonePath);

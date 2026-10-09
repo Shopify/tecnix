@@ -176,6 +176,15 @@ struct EvalState::TecnixEvalData
     mutable std::once_flag tecnixRepoAccessorFlag;
     mutable std::optional<ref<SourceAccessor>> tecnixRepoAccessor;
 
+    /**
+     * The checkout's dirty paths from one `git status --porcelain -z
+     * --untracked-files=all` per evaluation, shared by the repo accessor's
+     * overlay and dirty-zone detection (thread-safe via once_flag; a failed
+     * status leaves it unset, so the next caller retries and sees the error).
+     */
+    mutable std::once_flag tecnixCheckoutDirtyPathsFlag;
+    mutable std::vector<std::string> tecnixCheckoutDirtyPaths;
+
     /** `.meta/manifest.json` as `tecnixRepoAccessor` serves it, parsed
         (thread-safe via once_flag). */
     mutable std::once_flag tecnixManifestJsonFlag;
