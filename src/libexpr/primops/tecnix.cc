@@ -632,9 +632,17 @@ struct TecnixArgs
     std::string checkoutPath;
     Value * resolverArgs = nullptr;
     std::string argsKey;
-    /** The key memo rows are scoped by: `memoArgs`' canonical JSON if given,
+    /** The key memo rows are scoped by: `scopeArgs`' canonical JSON if given,
         else `argsKey`. */
-    std::string memoArgsKey;
+    std::string memoScopeKey;
+    /** The key target and discovery rows are scoped by: `argsKey`, or with
+        `scopeArgs` its canonical JSON marked as such, so a scoped call never
+        shares a scope with an unscoped one (whose rows carry no proof). */
+    std::string rowScopeKey;
+    /** With `scopeArgs`: a digest of `argsKey`, recorded in every target and
+        discovery row's closure under `tecnixArgsProofPath`, so a row scoped
+        by `scopeArgs` still matches only calls with the same whole `args`. */
+    std::optional<std::string> argsProof;
     std::vector<std::string> targets;
     /** The caller asked for the tracked source closure (`includeDependencies`),
         so it must be computed even when the eval cache would not need it. */
@@ -647,7 +655,17 @@ struct TecnixArgs
 /** The persistent-cache row family these arguments address. */
 static TecnixCacheScope cacheScope(const TecnixArgs & args)
 {
-    return {args.resolver, args.argsKey};
+    return {args.resolver, args.rowScopeKey};
+}
+
+/** `dependencies` as a target or discovery row stores it: with the call's
+    `args` proof when rows are scoped by `scopeArgs`. */
+static DependencyClosure storedClosure(const TecnixArgs & args, const DependencyClosure & dependencies)
+{
+    DependencyClosure stored = dependencies;
+    if (args.argsProof)
+        stored.push_back({std::string(tecnixArgsProofPath), *args.argsProof});
+    return stored;
 }
 
 static const Bindings & forceTecnixBuiltinAttrs(EvalState & state, const PosIdx pos, Value ** args)
@@ -774,10 +792,14 @@ static TecnixArgs parseTecnixArgs(EvalState & state, const PosIdx pos, Value ** 
     TecnixArgs result;
     parseTecnixRepoArgs(state, pos, attrs, result);
     result.resolverArgs = resolverArgs;
-    if (auto memoArgsAttr = attrs.get(state.symbols.create("memoArgs")))
-        result.memoArgsKey = canonicalJsonFromValue(state, *memoArgsAttr->value, memoArgsAttr->pos).dump();
-    else
-        result.memoArgsKey = argsKey;
+    if (auto scopeArgsAttr = attrs.get(state.symbols.create("scopeArgs"))) {
+        result.memoScopeKey = canonicalJsonFromValue(state, *scopeArgsAttr->value, scopeArgsAttr->pos).dump();
+        result.rowScopeKey = result.memoScopeKey + "\x1fscoped";
+        result.argsProof = "args:" + hashString(HashAlgorithm::SHA256, argsKey).to_string(HashFormat::Base16, false);
+    } else {
+        result.memoScopeKey = argsKey;
+        result.rowScopeKey = argsKey;
+    }
     result.argsKey = std::move(argsKey);
     if (withTargets)
         result.targets = parseTecnixTargets(state, pos, attrs);
@@ -1035,6 +1057,7 @@ static TecnixDiscoveryResult discoverTecnixTargetNames(
 {
     bool useCache = state.settings.pureEval && state.settings.tecnixEvalCache;
     bool track = tecnixSourceTrackingEnabled(state, tArgs);
+    fingerprintCache.argsProof = tArgs.argsProof;
 
     std::string cacheKey{tecnixTargetNamesCacheKey};
     if (useCache) {
@@ -1082,8 +1105,9 @@ static TecnixDiscoveryResult discoverTecnixTargetNames(
     }
 
     if (useCache && !dependencies.empty()) {
+        auto stored = storedClosure(tArgs, dependencies);
         std::vector<TecnixDependencyUpsert> upserts;
-        upserts.push_back({cacheKey, &dependencies, nlohmann::json(targetNames).dump()});
+        upserts.push_back({cacheKey, &stored, nlohmann::json(targetNames).dump()});
         upsertDependencyClosures(cacheScope(tArgs), upserts, state.settings.tecnixEvalCacheHistory);
     }
 
@@ -1294,12 +1318,15 @@ static RegisterPrimOp primop_tecnixTargets({
       Nix string context using the imported derivation shape; other resolver
       attributes are not preserved on a value-cache hit.
 
-      Target rows are keyed by `args`. `builtins.tecnixPersistentMemo` rows
-      made while evaluating the targets are keyed by `memoArgs` instead, when
-      given: memoized values are then shared by calls whose `args` differ
-      outside `memoArgs`. The caller vouches that what differs (local state
-      passed to the targets, say) reaches no memoized value except through
-      its memo key.
+      Cache rows are scoped by `args`, or by `scopeArgs` when given. A target
+      row scoped by `scopeArgs` also records a digest of the whole `args` in
+      its closure, so it is still answered only for the same `args`, while
+      calls that differ outside `scopeArgs` (local state passed to the
+      targets, say) share one scope and its bounded candidate history instead
+      of each starting a new one. `builtins.tecnixPersistentMemo` rows made
+      while evaluating the targets are scoped the same way and shared across
+      such calls: the caller vouches that what differs reaches no memoized
+      value except through its memo key.
     )",
     .impl = prim_tecnixTargets,
 });
@@ -1551,6 +1578,7 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
     std::vector<std::string> * errors = nullptr)
 {
     bool useCache = state.settings.pureEval && state.settings.tecnixEvalCache;
+    fingerprintCache.argsProof = args.argsProof;
     printTalkative(
         "tecnixTargets dependencies: planning %d target ref(s), dependency cache %s, eval cores %d",
         args.targets.size(),
@@ -1623,7 +1651,7 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
         std::optional<TecnixMemoRowFamily> memoFamily;
         if (useCache && state.settings.tecnixPersistentMemo)
             memoFamily.emplace(
-                args.resolver, args.memoArgsKey, fingerprintCache, state.settings.tecnixEvalCacheHistory);
+                args.resolver, args.memoScopeKey, fingerprintCache, state.settings.tecnixEvalCacheHistory);
 
         auto evalMiss = [&](size_t i) {
             auto & target = args.targets[i];
@@ -1653,12 +1681,15 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
         finalizeSourceAccessSetDependencies(state, results, fingerprintCache);
 
         if (useCache) {
+            std::vector<DependencyClosure> stored;
+            stored.reserve(misses.size());
             std::vector<TecnixDependencyUpsert> upserts;
             upserts.reserve(misses.size());
             for (auto i : misses) {
-                if (results[i] && results[i]->cacheNeedsUpsert)
-                    upserts.push_back(
-                        {args.targets[i], &results[i]->dependencies, std::move(results[i]->targetPayload)});
+                if (results[i] && results[i]->cacheNeedsUpsert) {
+                    stored.push_back(storedClosure(args, results[i]->dependencies));
+                    upserts.push_back({args.targets[i], &stored.back(), std::move(results[i]->targetPayload)});
+                }
             }
             upsertDependencyClosures(cacheScope(args), upserts, state.settings.tecnixEvalCacheHistory);
         }

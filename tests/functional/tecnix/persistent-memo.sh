@@ -103,7 +103,7 @@ CACHE_HOME="$TEST_ROOT/memo-cache-home"
 DEFAULT_ARGS='args = { system = "test-system"; };'
 
 # Evaluate targets $2 at rev $1 with the cache on; stderr goes to $3. $4, if
-# given, replaces `args` (and may add `memoArgs`).
+# given, replaces `args` (and may add `scopeArgs`).
 eval_at() {
     local rev="$1" targets="$2" err="$3" argsAttrs="${4:-$DEFAULT_ARGS}"
     XDG_CACHE_HOME="$CACHE_HOME" nix eval --json -v \
@@ -234,16 +234,43 @@ eval_at "$REV12" '[ "t" ]' "$TEST_ROOT/memo18.err"
 grepQuiet "tecnixPersistentMemo: miss for 'records' / 'a' in 't'" "$TEST_ROOT/memo18.err" \
     || fail "a row from another evaluator version should not be served"
 
-echo "memoArgs: rows are shared across args that differ outside it, and only then"
+echo "scopeArgs: memo rows are shared across args that differ outside it, and only then"
+SCOPED='scopeArgs = { system = "test-system"; };'
 eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo15.err"
-eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo16.err" \
-    'args = { system = "test-system"; state = "x"; }; memoArgs = { system = "test-system"; };'
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo16.err" "args = { system = \"test-system\"; state = \"x\"; }; $SCOPED"
 grepQuiet "dependency cache miss, evaluating 't'" "$TEST_ROOT/memo16.err" || fail "other args should miss the target row"
 grepQuiet "tecnixPersistentMemo: hit for 'records' / 'a' in 't'" "$TEST_ROOT/memo16.err" \
-    || fail "equal memoArgs should share the memo row ($(cat "$TEST_ROOT/memo16.err"))"
+    || fail "equal scopeArgs should share the memo row ($(cat "$TEST_ROOT/memo16.err"))"
 eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo17.err" 'args = { system = "test-system"; state = "y"; };'
 grepQuiet "tecnixPersistentMemo: miss for 'records' / 'a' in 't'" "$TEST_ROOT/memo17.err" \
-    || fail "without memoArgs, other args should not share memo rows"
+    || fail "without scopeArgs, other args should not share memo rows"
+
+echo "scopeArgs: a target row is answered only for the same whole args, in one bounded scope"
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/scoped1.err" "args = { system = \"test-system\"; state = \"x\"; }; $SCOPED"
+grepQuiet "dependency cache hit for 't'" "$TEST_ROOT/scoped1.err" || fail "the same args should hit the scoped target row"
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/scoped2.err" "args = { system = \"test-system\"; state = \"z\"; }; $SCOPED"
+grepQuiet "dependency cache miss, evaluating 't'" "$TEST_ROOT/scoped2.err" \
+    || fail "a scoped target row must not answer other args"
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/scoped3.err" "args = { system = \"test-system\"; state = \"x\"; }; $SCOPED"
+grepQuiet "dependency cache hit for 't'" "$TEST_ROOT/scoped3.err" || fail "earlier args should still hit from the history"
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/scoped4.err" 'args = { system = "test-system"; };'
+grepQuiet "dependency cache hit for 't'" "$TEST_ROOT/scoped4.err" || fail "the unscoped row should still hit"
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/scoped5.err" "args = { system = \"test-system\"; }; $SCOPED"
+grepQuiet "dependency cache miss, evaluating 't'" "$TEST_ROOT/scoped5.err" \
+    || fail "a scoped call must not take an unscoped row, which proves no args"
+scopes=$(sqlite3 "$EVAL_CACHE_DB" \
+    "SELECT group_concat(DISTINCT replace(argsKey, char(31), '|')) FROM DependencyShards
+       WHERE resolver = 'resolve.nix' AND argsKey LIKE '%' || char(31) || 'scoped'")
+[[ "$scopes" == '{"system":"test-system"}|scoped' ]] \
+    || fail "scoped target rows should share the one scopeArgs scope, got '$scopes'"
+deps=$(XDG_CACHE_HOME="$CACHE_HOME" nix eval --json --extra-experimental-features 'nix-command' \
+    --option lazy-trees true --option tectonix-git-dir "$WORLD/.git" --option tectonix-git-sha "$REV11" \
+    --option tecnix-eval-cache true --pure-eval \
+    --expr "builtins.attrNames (builtins.head (builtins.tecnixTargets {
+      gitDir = \"$WORLD/.git\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; state = \"x\"; }; $SCOPED
+      rev = \"$REV11\"; targets = [ \"t\" ]; includeDependencies = true; includeTargets = false; })).dependencies")
+jq -e 'length > 0 and all(.[]; startswith("\u001f") | not)' <<< "$deps" >/dev/null \
+    || fail "the args proof should not be returned as a dependency: $deps"
 
 echo "Outside cached target evaluation it is just f key"
 out=$(nix eval --raw --extra-experimental-features 'nix-command' \
