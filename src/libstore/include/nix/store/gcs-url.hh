@@ -25,8 +25,22 @@ struct ParsedGcsURL
     /**
      * Where the GCS APIs are served (via ?endpoint=URL), e.g. an emulator at
      * `http://127.0.0.1:4443`. Defaults to `https://storage.googleapis.com`.
+     * Requests to an endpoint never carry Google credentials (see
+     * `sendsCredentials`).
      */
     std::optional<std::string> endpoint;
+
+    /**
+     * Whether requests for this URL carry the Application Default Credentials
+     * token: only when they go to Google's own endpoint. Anything can put a
+     * gs:// URL in front of Nix (a substituter, `nix copy --from`,
+     * `builtins.fetchurl`, a fixed-output derivation the daemon fetches with
+     * its own credentials), so an `endpoint` must never receive the token.
+     */
+    bool sendsCredentials() const
+    {
+        return !endpoint;
+    }
 
     /**
      * Parse a gs:// URL.

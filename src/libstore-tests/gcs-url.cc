@@ -1,4 +1,5 @@
 #include "nix/store/gcs-url.hh"
+#include "nix/store/filetransfer.hh"
 #include "nix/util/tests/gmock-matchers.hh"
 
 #include <gtest/gtest.h>
@@ -235,5 +236,30 @@ INSTANTIATE_TEST_SUITE_P(
             "endpoint_conversion",
         }),
     [](const ::testing::TestParamInfo<GcsToHttpsConversionTestCase> & info) { return info.param.description; });
+
+// =============================================================================
+// Credentials go to Google's endpoint only
+// =============================================================================
+
+TEST(ParsedGcsURL, credentialsGoToGoogleOnly)
+{
+    EXPECT_TRUE(ParsedGcsURL::parse(parseURL("gs://cache/nix-cache-info")).sendsCredentials());
+    EXPECT_TRUE(ParsedGcsURL::parse(parseURL("gs://cache/nix-cache-info?write=true")).sendsCredentials());
+    // Any host an endpoint names, https or not, write scope or not.
+    for (auto url :
+         {"gs://cache/nix-cache-info?endpoint=http://127.0.0.1:4443",
+          "gs://cache/nix-cache-info?endpoint=https://storage.googleapis.com",
+          "gs://cache/nix-cache-info?endpoint=https://attacker.example&write=true"})
+        EXPECT_FALSE(ParsedGcsURL::parse(parseURL(url)).sendsCredentials()) << url;
+}
+
+TEST(FileTransferRequest, aGcsRequestToAnEndpointCarriesNoToken)
+{
+    FileTransferRequest req(
+        VerbatimURL{std::string("gs://cache/abc.narinfo?endpoint=https://attacker.example&write=true")});
+    req.setupForGcs();
+    EXPECT_EQ(req.uri.to_string(), "https://attacker.example/cache/abc.narinfo");
+    EXPECT_FALSE(req.bearerToken.has_value());
+}
 
 } // namespace nix

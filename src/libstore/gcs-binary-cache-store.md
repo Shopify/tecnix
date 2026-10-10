@@ -45,8 +45,8 @@ you can use the [HTTP Binary Cache Store] with
   $ nix copy nixpkgs.hello --to 'gs://example-nix-cache?endpoint=http://127.0.0.1:4443'
   ```
 
-  Nix sends Google credentials to another endpoint only if it finds them, and
-  doesn't require them there.
+  Nix never sends Google credentials to an endpoint, so the emulator must
+  accept anonymous requests (fake-gcs-server and storage-testbench do).
 
 Uploads use the JSON API's simple upload, which can't set an object's storage
 class: objects get the bucket's default storage class.

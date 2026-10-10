@@ -98,11 +98,9 @@ void GcsBinaryCacheStore::upload(
     req.headers.insert(req.headers.end(), otherHeaders.begin(), otherHeaders.end());
 
     // Authenticate with write scope via OAuth2. Google's endpoint always needs
-    // credentials; another endpoint (an emulator) gets them only if they exist.
-    if (!parsedGcs.endpoint)
+    // credentials; another endpoint (an emulator) never gets them.
+    if (parsedGcs.sendsCredentials())
         req.bearerToken = getGcsCredentialsProvider()->getAccessToken(/* writable = */ true);
-    else if (auto token = getGcsCredentialsProvider()->maybeGetAccessToken(/* writable = */ true))
-        req.bearerToken = std::move(*token);
 
     req.data = {sizeHint, source};
     req.mimeType = mimeType;
