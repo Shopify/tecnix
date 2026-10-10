@@ -213,6 +213,27 @@ out=$(nix eval --raw --extra-experimental-features 'nix-command' \
     --expr 'toString (builtins.tecnixPersistentMemo "ns" "k" { compute = k: 3; project = throw "no"; load = throw "no"; })')
 [[ "$out" == "3" ]] || fail "outside cached evaluation the projecting form is compute key, got '$out'"
 
+echo "A memo row's stored scope names the resolver and this evaluator's versions"
+EVAL_CACHE_DB="$CACHE_HOME/nix/tecnix-eval-cache-v2.sqlite"
+scopes=$(sqlite3 "$EVAL_CACHE_DB" \
+    "SELECT count(*) FROM DependencyShards WHERE resolver = '__tecnixPersistentMemo' || char(31) || 'resolve.nix'
+       AND argsKey LIKE '%' || char(31) || 'nix=%' || char(31) || 'tecnix=%'")
+others=$(sqlite3 "$EVAL_CACHE_DB" \
+    "SELECT count(*) FROM DependencyShards WHERE resolver LIKE '__tecnixPersistentMemo%'
+       AND NOT (resolver = '__tecnixPersistentMemo' || char(31) || 'resolve.nix'
+                AND argsKey LIKE '%' || char(31) || 'nix=%' || char(31) || 'tecnix=%')")
+[[ "$scopes" -gt 0 && "$others" == 0 ]] || fail "memo scopes should carry the resolver and versions ($scopes with, $others without)"
+
+echo "A row stored by another evaluator version is a miss"
+echo "outside seven" > "$WORLD/outside.txt"
+REV12=$(commit_world "outside seven")
+sqlite3 "$EVAL_CACHE_DB" \
+    "UPDATE DependencyShards SET argsKey = replace(argsKey, char(31) || 'tecnix=', char(31) || 'tecnix=another-')
+       WHERE resolver LIKE '__tecnixPersistentMemo%'"
+eval_at "$REV12" '[ "t" ]' "$TEST_ROOT/memo18.err"
+grepQuiet "tecnixPersistentMemo: miss for 'records' / 'a' in 't'" "$TEST_ROOT/memo18.err" \
+    || fail "a row from another evaluator version should not be served"
+
 echo "memoArgs: rows are shared across args that differ outside it, and only then"
 eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo15.err"
 eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo16.err" \
