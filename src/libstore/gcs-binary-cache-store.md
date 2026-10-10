@@ -48,10 +48,7 @@ you can use the [HTTP Binary Cache Store] with
   Nix sends Google credentials to another endpoint only if it finds them, and
   doesn't require them there.
 
-- To specify a storage class for uploads:
-
-  ```console
-  $ nix copy nixpkgs.hello --to 'gs://example-nix-cache?storage-class=NEARLINE'
-  ```
+Uploads use the JSON API's simple upload, which can't set an object's storage
+class: objects get the bucket's default storage class.
 
 )"

@@ -29,31 +29,6 @@ struct GcsBinaryCacheStoreConfig : HttpBinaryCacheStoreConfig
           this endpoint when it finds them, and doesn't require them here.
         )"};
 
-    const Setting<std::optional<std::string>> projectId{
-        this,
-        std::nullopt,
-        "project-id",
-        R"(
-          The Google Cloud project ID. When not set (default), the project is
-          inferred from the service account credentials or GCE metadata.
-        )"};
-
-    const Setting<std::optional<std::string>> storageClass{
-        this,
-        std::nullopt,
-        "storage-class",
-        R"(
-          The GCS storage class to use for uploaded objects. When not set (default),
-          uses the bucket's default storage class. Valid values include:
-          - STANDARD (frequently accessed data)
-          - NEARLINE (accessed less than once per 30 days)
-          - COLDLINE (accessed less than once per 90 days)
-          - ARCHIVE (accessed less than once per year)
-
-          See Google Cloud Storage documentation for detailed storage class descriptions:
-          https://cloud.google.com/storage/docs/storage-classes
-        )"};
-
     static const std::string name()
     {
         return "GCS Binary Cache Store";

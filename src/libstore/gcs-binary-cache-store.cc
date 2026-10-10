@@ -21,7 +21,6 @@ public:
         : Store{*config}
         , BinaryCacheStore{*config}
         , HttpBinaryCacheStore{config}
-        , gcsConfig{config}
     {
     }
 
@@ -29,8 +28,6 @@ public:
         const std::string & path, RestartableSource & source, const std::string & mimeType, uint64_t sizeHint) override;
 
 private:
-    ref<GcsBinaryCacheStoreConfig> gcsConfig;
-
     /**
      * Uploads a file to GCS using the JSON API simple upload.
      * Supports files up to 5 GiB, which is sufficient for binary cache objects.
@@ -106,10 +103,6 @@ void GcsBinaryCacheStore::upload(
         req.bearerToken = getGcsCredentialsProvider()->getAccessToken(/* writable = */ true);
     else if (auto token = getGcsCredentialsProvider()->maybeGetAccessToken(/* writable = */ true))
         req.bearerToken = std::move(*token);
-
-    if (auto storageClass = gcsConfig->storageClass.get()) {
-        req.headers.emplace_back("x-goog-storage-class", *storageClass);
-    }
 
     req.data = {sizeHint, source};
     req.mimeType = mimeType;
