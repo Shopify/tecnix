@@ -40,8 +40,21 @@ struct DependencyFingerprintCache
 {
     uint64_t generation;
 
+    /** The fingerprint `tecnixArgsProofPath` has in this run: a digest of the
+        call's whole `args` when rows are scoped by `scopeArgs`, else none
+        (a row that names the path then never matches). */
+    std::optional<std::string> argsProof;
+
     DependencyFingerprintCache();
 };
+
+/**
+ * A pseudo dependency path, never a repo path: a target or discovery row
+ * scoped by `scopeArgs` records the call's whole `args` under it, so a
+ * candidate matches only calls with the same `args`. Not returned to callers
+ * as a dependency.
+ */
+constexpr std::string_view tecnixArgsProofPath = "\x1ftecnixTargets-args";
 
 std::optional<std::string>
 dependencyFingerprint(ref<SourceAccessor> accessor, std::string_view path, DependencyFingerprintCache & cache);
@@ -98,6 +111,9 @@ public:
     /** The matched candidate's payload (discovery's target-name JSON, or a
         target's evaluated drvPath/outputName result), if any. */
     std::optional<std::string_view> payload() const;
+
+    /** The matched candidate's dependency paths, copied out of the row. */
+    std::vector<std::string> paths() const;
 
 private:
     const Impl & impl;

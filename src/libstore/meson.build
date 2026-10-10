@@ -342,6 +342,7 @@ sources = files(
   'derived-path-map.cc',
   'derived-path.cc',
   'downstream-placeholder.cc',
+  'drv-hash-cache.cc',
   'dummy-store.cc',
   'export-import.cc',
   'filetransfer.cc',

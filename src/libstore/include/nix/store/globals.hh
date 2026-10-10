@@ -205,6 +205,18 @@ public:
 
     Setting<bool> useSQLiteWAL{this, !isWSL1(), "use-sqlite-wal", "Whether SQLite should use WAL mode."};
 
+    Setting<bool> tecnixDrvHashCache{
+        this,
+        true,
+        "tecnix-drv-hash-cache",
+        R"(
+          Whether to keep the hash modulo of every derivation Nix computes in a
+          cache under the user's cache directory, and reuse it in later
+          processes instead of reading the derivation's whole closure again.
+          A derivation path names the derivation's exact contents, so a stored
+          hash is never stale.
+        )"};
+
     Setting<bool> keepFailed{this, false, "keep-failed", "Whether to keep temporary directories of failed builds."};
 
     /**

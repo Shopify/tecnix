@@ -189,6 +189,7 @@ sources = files(
   'search-path.cc',
   'symbol-table.cc',
   'tecnix/eval-cache.cc',
+  'tecnix/memo-value.cc',
   'tecnix/repo-accessor.cc',
   'tecnix/source-accessors.cc',
   'tecnix/source-deps.cc',

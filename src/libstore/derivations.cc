@@ -1,4 +1,5 @@
 #include "nix/store/derivations.hh"
+#include "nix/store/drv-hash-cache.hh"
 #include "nix/store/downstream-placeholder.hh"
 #include "nix/store/store-api.hh"
 #include "nix/util/types.hh"
@@ -902,10 +903,18 @@ static DrvHashModulo pathDerivationModulo(Store & store, const StorePath & drvPa
     if (drvHashes.cvisit(drvPath, [&hash](const auto & kv) { hash.emplace(kv.second); })) {
         return *hash;
     }
+    // Another process may have computed it: a drvPath names its contents,
+    // so a stored hash is never stale. This saves reading the derivation's
+    // whole closure from disk in every new process.
+    if (auto stored = lookupPersistentDrvHash(store, drvPath)) {
+        drvHashes.insert_or_assign(drvPath, *stored);
+        return *stored;
+    }
     auto h = hashDerivationModulo(store, store.readInvalidDerivation(drvPath), false);
 
     // Cache it
     drvHashes.insert_or_assign(drvPath, h);
+    recordPersistentDrvHash(store, drvPath, h);
     return h;
 }
 

@@ -1401,6 +1401,9 @@ static std::optional<std::string> manifestPathFingerprint(const nlohmann::json &
 static const std::optional<std::string> *
 dependencyFingerprintCached(ref<SourceAccessor> accessor, std::string_view path, DependencyFingerprintCache & cache)
 {
+    if (path == tecnixArgsProofPath)
+        return &cache.argsProof;
+
     auto & threadCache = getDependencyFingerprintThreadCache(cache);
 
     auto it = threadCache.fingerprints.find(path);
@@ -1454,6 +1457,25 @@ DependencyClosure dependencyFingerprints(
     return result;
 }
 
+std::vector<std::string> DependencyCacheHit::paths() const
+{
+    auto & view = impl.view;
+    auto pairs = TecnixEvalCache::storedCandidatePairs(view, impl.candidateIndex);
+
+    std::vector<std::string> result;
+    result.reserve(pairs.count);
+    for (uint32_t i = 0; i < pairs.count; i++) {
+        auto ids = view.pairIds(pairs.start + i);
+        auto path = ids ? view.path(ids->path) : std::nullopt;
+        if (!path)
+            throw MalformedTecnixCacheRow("malformed Tecnix dependency cache row");
+        if (*path == tecnixArgsProofPath)
+            continue;
+        result.emplace_back(*path);
+    }
+    return result;
+}
+
 Value * DependencyCacheHit::toValue(EvalState & state) const
 {
     auto & view = impl.view;
@@ -1466,6 +1488,8 @@ Value * DependencyCacheHit::toValue(EvalState & state) const
         auto fingerprint = ids ? view.fingerprint(ids->fingerprint) : std::nullopt;
         if (!path || !fingerprint)
             throw MalformedTecnixCacheRow("malformed Tecnix dependency cache row");
+        if (*path == tecnixArgsProofPath)
+            continue;
 
         auto * fingerprintValue = state.allocValue();
         fingerprintValue->mkString(*fingerprint, state.mem);
