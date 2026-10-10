@@ -247,7 +247,24 @@ onError() {
             if [[ -z ${BASH_SOURCE[i]} ]]; then break; fi
             echo "  ${FUNCNAME[i]} in ${BASH_SOURCE[i]}:${BASH_LINENO[i-1]}" >&2
         done
+        dumpSanitizerLogs
     fi
+}
+
+# Sanitizer reports are written to `log_path` (see tests/functional/meson.build)
+# rather than stderr, so a process that a sanitizer aborted leaves no trace in
+# the test output. Show whatever reports exist when a test fails.
+dumpSanitizerLogs() {
+    local options
+    for options in "${ASAN_OPTIONS:-}" "${UBSAN_OPTIONS:-}"; do
+        [[ $options =~ log_path=([^:]+) ]] || continue
+        local f
+        for f in "${BASH_REMATCH[1]}".*; do
+            [[ -f $f ]] || continue
+            echo "--- sanitizer report $f ---" >&2
+            cat "$f" >&2
+        done
+    done
 }
 
 # Prints an error message prefix referring to the last call into this file.
