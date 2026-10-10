@@ -254,9 +254,9 @@ TEST_F(TectonixTest, historical_worldtree_explains_malformed_manifest)
         getManifestJson(*ctx->state);
         FAIL() << "expected malformed manifest to fail";
     } catch (const Error & e) {
-        ASSERT_THAT(e.what(), testing::HasSubstr("historical World manifest '.meta/manifest.json'"));
-        ASSERT_THAT(e.what(), testing::HasSubstr(commitSha));
-        ASSERT_THAT(e.what(), testing::HasSubstr("missing or malformed"));
+        ASSERT_THAT(e.what(), ::testing::HasSubstr("historical World manifest '.meta/manifest.json'"));
+        ASSERT_THAT(e.what(), ::testing::HasSubstr(commitSha));
+        ASSERT_THAT(e.what(), ::testing::HasSubstr("missing or malformed"));
     }
 }
 
@@ -269,9 +269,9 @@ TEST_F(TectonixTest, historical_worldtree_explains_missing_manifest)
         getManifestContent(*ctx->state);
         FAIL() << "expected missing manifest to fail";
     } catch (const Error & e) {
-        ASSERT_THAT(e.what(), testing::HasSubstr("historical World manifest '.meta/manifest.json'"));
-        ASSERT_THAT(e.what(), testing::HasSubstr(commitSha));
-        ASSERT_THAT(e.what(), testing::HasSubstr("missing or malformed"));
+        ASSERT_THAT(e.what(), ::testing::HasSubstr("historical World manifest '.meta/manifest.json'"));
+        ASSERT_THAT(e.what(), ::testing::HasSubstr(commitSha));
+        ASSERT_THAT(e.what(), ::testing::HasSubstr("missing or malformed"));
     }
 }
 
