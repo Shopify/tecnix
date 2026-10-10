@@ -43,7 +43,17 @@ let
     '';
   };
 
-  componentOverrides = (lib.optional withCoverage collectCoverageLayer);
+  # Let the sanitizer runtimes symbolize their reports; without
+  # `llvm-symbolizer` on PATH they only print raw addresses.
+  symbolizeSanitizerReportsLayer = finalAttrs: prevAttrs: {
+    nativeBuildInputs = (prevAttrs.nativeBuildInputs or [ ]) ++ [
+      pkgs.buildPackages.llvmPackages.llvm
+    ];
+  };
+
+  componentOverrides =
+    (lib.optional withCoverage collectCoverageLayer)
+    ++ (lib.optional withSanitizers symbolizeSanitizerReportsLayer);
 in
 
 rec {
