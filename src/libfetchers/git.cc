@@ -902,10 +902,18 @@ struct GitInputScheme : InputScheme
 
         Input result(input);
 
-        if (auto lm = maybeGetIntAttr(cached->value, "lastModified"))
-            result.attrs.insert_or_assign("lastModified", *lm);
-        if (auto rc = maybeGetIntAttr(cached->value, "revCount"))
-            result.attrs.insert_or_assign("revCount", *rc);
+        /* As in the uncached path, don't override attributes the caller
+           supplied. They may be lazy (see `lazyRevCount`), and a lazy
+           attribute compares unequal to its resolved value in
+           `Input::checkLocks`, so replacing one with the cached integer
+           makes a refetch of a locked input fail with a spurious
+           "mismatch in field 'revCount'". */
+        if (!result.attrs.contains("lastModified"))
+            if (auto lm = maybeGetIntAttr(cached->value, "lastModified"))
+                result.attrs.insert_or_assign("lastModified", *lm);
+        if (!result.attrs.contains("revCount"))
+            if (auto rc = maybeGetIntAttr(cached->value, "revCount"))
+                result.attrs.insert_or_assign("revCount", *rc);
 
         return std::make_pair(accessor, std::move(result));
     }
