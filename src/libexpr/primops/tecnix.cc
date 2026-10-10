@@ -626,6 +626,9 @@ struct TecnixArgs
     std::string checkoutPath;
     Value * resolverArgs = nullptr;
     std::string argsKey;
+    /** The key memo rows are scoped by: `memoArgs`' canonical JSON if given,
+        else `argsKey`. */
+    std::string memoArgsKey;
     std::vector<std::string> targets;
     /** The caller asked for the tracked source closure (`includeDependencies`),
         so it must be computed even when the eval cache would not need it. */
@@ -765,6 +768,10 @@ static TecnixArgs parseTecnixArgs(EvalState & state, const PosIdx pos, Value ** 
     TecnixArgs result;
     parseTecnixRepoArgs(state, pos, attrs, result);
     result.resolverArgs = resolverArgs;
+    if (auto memoArgsAttr = attrs.get(state.symbols.create("memoArgs")))
+        result.memoArgsKey = canonicalJsonFromValue(state, *memoArgsAttr->value, memoArgsAttr->pos).dump();
+    else
+        result.memoArgsKey = argsKey;
     result.argsKey = std::move(argsKey);
     if (withTargets)
         result.targets = parseTecnixTargets(state, pos, attrs);
@@ -1280,6 +1287,13 @@ static RegisterPrimOp primop_tecnixTargets({
       without evaluation. Such values preserve the selected output and its
       Nix string context using the imported derivation shape; other resolver
       attributes are not preserved on a value-cache hit.
+
+      Target rows are keyed by `args`. `builtins.tecnixPersistentMemo` rows
+      made while evaluating the targets are keyed by `memoArgs` instead, when
+      given: memoized values are then shared by calls whose `args` differ
+      outside `memoArgs`. The caller vouches that what differs (local state
+      passed to the targets, say) reaches no memoized value except through
+      its memo key.
     )",
     .impl = prim_tecnixTargets,
 });
@@ -1602,7 +1616,8 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
 
         std::optional<TecnixMemoRowFamily> memoFamily;
         if (useCache && state.settings.tecnixPersistentMemo)
-            memoFamily.emplace(args.resolver, args.argsKey, fingerprintCache, state.settings.tecnixEvalCacheHistory);
+            memoFamily.emplace(
+                args.resolver, args.memoArgsKey, fingerprintCache, state.settings.tecnixEvalCacheHistory);
 
         auto evalMiss = [&](size_t i) {
             auto & target = args.targets[i];

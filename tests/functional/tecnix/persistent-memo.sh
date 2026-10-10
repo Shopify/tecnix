@@ -100,10 +100,12 @@ commit_world() {
 }
 
 CACHE_HOME="$TEST_ROOT/memo-cache-home"
+DEFAULT_ARGS='args = { system = "test-system"; };'
 
-# Evaluate targets $2 at rev $1 with the cache on; stderr goes to $3.
+# Evaluate targets $2 at rev $1 with the cache on; stderr goes to $3. $4, if
+# given, replaces `args` (and may add `memoArgs`).
 eval_at() {
-    local rev="$1" targets="$2" err="$3"
+    local rev="$1" targets="$2" err="$3" argsAttrs="${4:-$DEFAULT_ARGS}"
     XDG_CACHE_HOME="$CACHE_HOME" nix eval --json -v \
         --extra-experimental-features 'nix-command' \
         --option lazy-trees true \
@@ -111,7 +113,7 @@ eval_at() {
         --option tectonix-git-sha "$rev" \
         --option tecnix-eval-cache true --pure-eval \
         --expr "builtins.length (builtins.tecnixTargets {
-          gitDir = \"$WORLD/.git\"; resolver = \"resolve.nix\"; args = { system = \"test-system\"; };
+          gitDir = \"$WORLD/.git\"; resolver = \"resolve.nix\"; $argsAttrs
           rev = \"$rev\"; targets = $targets; includeDependencies = true; includeTargets = false; })" \
         > /dev/null 2> "$err"
 }
@@ -210,6 +212,17 @@ grepQuiet "trace: proj 2" "$TEST_ROOT/memo14.err" || fail "load's value should b
 out=$(nix eval --raw --extra-experimental-features 'nix-command' \
     --expr 'toString (builtins.tecnixPersistentMemo "ns" "k" { compute = k: 3; project = throw "no"; load = throw "no"; })')
 [[ "$out" == "3" ]] || fail "outside cached evaluation the projecting form is compute key, got '$out'"
+
+echo "memoArgs: rows are shared across args that differ outside it, and only then"
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo15.err"
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo16.err" \
+    'args = { system = "test-system"; state = "x"; }; memoArgs = { system = "test-system"; };'
+grepQuiet "dependency cache miss, evaluating 't'" "$TEST_ROOT/memo16.err" || fail "other args should miss the target row"
+grepQuiet "tecnixPersistentMemo: hit for 'records' / 'a' in 't'" "$TEST_ROOT/memo16.err" \
+    || fail "equal memoArgs should share the memo row ($(cat "$TEST_ROOT/memo16.err"))"
+eval_at "$REV11" '[ "t" ]' "$TEST_ROOT/memo17.err" 'args = { system = "test-system"; state = "y"; };'
+grepQuiet "tecnixPersistentMemo: miss for 'records' / 'a' in 't'" "$TEST_ROOT/memo17.err" \
+    || fail "without memoArgs, other args should not share memo rows"
 
 echo "Outside cached target evaluation it is just f key"
 out=$(nix eval --raw --extra-experimental-features 'nix-command' \
