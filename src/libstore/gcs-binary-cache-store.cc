@@ -26,6 +26,11 @@ GcsBinaryCacheStore::GcsBinaryCacheStore(
 {
 }
 
+GcsBinaryCacheStore::GcsBinaryCacheStore(ref<Config> config, ref<FileTransfer> fileTransfer)
+    : GcsBinaryCacheStore(config, fileTransfer, getGcsCredentialsProvider(config->rootHttpsUrl()))
+{
+}
+
 void GcsBinaryCacheStore::initDeferringCredentialErrors(fun<void()> step)
 {
     auto defer = [&](Error & e) {
@@ -141,6 +146,16 @@ GcsBinaryCacheStoreConfig::GcsBinaryCacheStoreConfig(std::string_view bucketName
     : GcsBinaryCacheStoreConfig(
           ParsedURL{.scheme = "gs", .authority = ParsedURL::Authority{.host = std::string(bucketName)}}, params)
 {
+}
+
+ParsedURL GcsBinaryCacheStoreConfig::rootHttpsUrl() const
+{
+    /* With a trailing slash, as the base of every object URL. */
+    auto root = cacheUri;
+    if (root.path.empty())
+        root.path.push_back("");
+    root.path.push_back("");
+    return ParsedGcsURL::parse(root).toHttpsUrl();
 }
 
 std::string GcsBinaryCacheStoreConfig::getHumanReadableURI() const

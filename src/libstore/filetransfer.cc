@@ -1464,7 +1464,7 @@ void FileTransferRequest::setupForGcs()
 
     // Get OAuth2 bearer token from Application Default Credentials
     // Use read-only scope by default, read-write if ?write=true is specified
-    if (auto token = getGcsCredentialsProvider()->maybeGetAccessToken(parsedGcs.writable)) {
+    if (auto token = getGcsCredentialsProvider(uri.parsed())->maybeGetAccessToken(parsedGcs.writable)) {
         bearerToken = std::move(*token);
         debug("Using GCS OAuth2 bearer token for request (writable=%s)", parsedGcs.writable ? "true" : "false");
     } else {

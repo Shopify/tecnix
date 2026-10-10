@@ -1,16 +1,33 @@
 #include "nix/store/gcs-creds.hh"
+#include "nix/store/daemon.hh"
 #include "nix/store/filetransfer.hh"
 #include "nix/util/base-n.hh"
+#include "nix/util/config-global.hh"
+#include "nix/util/current-process.hh"
 #include "nix/util/environment-variables.hh"
+#include "nix/util/file-descriptor.hh"
+#include "nix/util/file-system.hh"
 #include "nix/util/json-utils.hh"
 #include "nix/util/logging.hh"
+#include "nix/util/processes.hh"
+#include "nix/util/signals.hh"
+#include "nix/util/strings.hh"
 #include "nix/util/users.hh"
+#include "nix/util/util.hh"
 
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <ranges>
+#include <thread>
 #include <nlohmann/json.hpp>
+
+#ifndef _WIN32
+#  include <grp.h>
+#  include <pwd.h>
+#  include <unistd.h>
+#endif
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -18,6 +35,12 @@
 #include <openssl/pem.h>
 
 namespace nix {
+
+GcsSettings gcsSettings;
+
+void GcsSettings::anchor() {}
+
+static GlobalConfig::Register rGcsSettings(&gcsSettings);
 
 namespace {
 
@@ -495,15 +518,290 @@ std::optional<std::string> GcsCredentialProvider::maybeGetAccessToken(bool writa
     }
 }
 
+/**
+ * A credential provider that asks the `gcs-credential-helper` command, a
+ * Git credential helper (gitcredentials(7)), the way Go's `GOAUTH=git` or
+ * Cargo do: Nix runs `<command> get` with the request on its standard
+ * input (`protocol`, `host`, `path`) and reads attributes back. GCS
+ * authenticates with a bearer token, so the answer must be
+ * `authtype=Bearer` with `credential=<token>` (or, from a helper without
+ * the authtype capability, `password=<token>`), and `password_expiry_utc`
+ * says when it expires.
+ *
+ * The helper's expiry is the only lifetime policy here. A token is reused
+ * until shortly before it; a helper that reports no expiry is run for every
+ * request, since guessing how long its tokens last would be a second
+ * policy that works only while it happens to agree with the helper's own.
+ *
+ * @see https://git-scm.com/docs/git-credential#IOFMT
+ */
+class GcsCredentialHelperProvider : public GcsCredentialProvider
+{
+    /* Stop using a token this long before the helper says it expires. */
+    static constexpr auto expiryMargin = std::chrono::seconds(60);
+
+    const Strings command;
+    const ParsedURL uri;
+
+    std::mutex mutex;
+    std::optional<std::string> token;
+    std::chrono::steady_clock::time_point tokenValidUntil;
+    bool warnedNoExpiry = false;
+
+public:
+    GcsCredentialHelperProvider(Strings command, ParsedURL uri)
+        : command(std::move(command))
+        , uri(std::move(uri))
+    {
+        assert(!this->command.empty());
+    }
+
+    ~GcsCredentialHelperProvider() override;
+
+    /* The scope is up to the helper, so `writable` plays no part here. */
+    std::string getAccessToken(bool writable) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+
+        auto now = std::chrono::steady_clock::now();
+        if (token && now < tokenValidUntil)
+            return *token;
+
+        auto credential = parseResponse(runHelper());
+        token = credential.token;
+        if (credential.expiresIn)
+            tokenValidUntil = now + std::max(*credential.expiresIn - expiryMargin, std::chrono::seconds(0));
+        else {
+            warnOnce(
+                warnedNoExpiry,
+                "%s does not report when its credentials expire, so it is run for every request; "
+                "have it return 'password_expiry_utc' to avoid that",
+                describe());
+            tokenValidUntil = now;
+        }
+        return *token;
+    }
+
+private:
+    struct Credential
+    {
+        std::string token;
+        /** How much longer the token is valid, if the helper said. */
+        std::optional<std::chrono::seconds> expiresIn;
+    };
+
+    std::string describe() const
+    {
+        return fmt("GCS credential helper '%s'", concatStringsSep(" ", command));
+    }
+
+    /**
+     * The request for `uri`, as Git would write it with
+     * `credential.useHttpPath` on. The `authtype` capability asks for a
+     * `credential` rather than a password.
+     */
+    std::string request() const
+    {
+        std::string host = uri.authority ? uri.authority->host : "";
+        if (uri.authority && uri.authority->port)
+            host += fmt(":%d", *uri.authority->port);
+        auto path = concatStringsSep("/", std::views::drop(uri.path, 1) | std::ranges::to<Strings>());
+        return fmt("protocol=%s\nhost=%s\npath=%s\ncapability[]=authtype\n\n", uri.scheme, host, path);
+    }
+
+    /**
+     * Interpret the helper's answer.
+     */
+    Credential parseResponse(const std::string & output) const
+    {
+        Credential credential;
+        std::optional<std::string> password, authtype;
+
+        for (auto & line : tokenizeString<Strings>(output, "\n")) {
+            auto eq = line.find('=');
+            if (eq == std::string::npos)
+                continue;
+            auto key = line.substr(0, eq);
+            auto value = line.substr(eq + 1);
+            if (key == "credential")
+                credential.token = value;
+            else if (key == "password")
+                password = value;
+            else if (key == "authtype")
+                authtype = value;
+            else if (key == "password_expiry_utc") {
+                auto expiry = string2Int<int64_t>(value);
+                if (!expiry)
+                    throw GcsAuthError(
+                        "%s returned a 'password_expiry_utc' that is not a Unix time: '%s'", describe(), value);
+                auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+                credential.expiresIn = std::chrono::seconds(*expiry - now);
+            }
+        }
+
+        if (authtype && toLower(*authtype) != "bearer")
+            throw GcsAuthError(
+                "%s returned a '%s' credential, but GCS authenticates with a bearer token", describe(), *authtype);
+        if (credential.token.empty() && password)
+            credential.token = *password;
+        if (credential.token.empty())
+            throw GcsAuthError("%s returned no credential", describe());
+        if (credential.expiresIn && *credential.expiresIn <= std::chrono::seconds(0))
+            throw GcsAuthError(
+                "%s returned a credential that expired %d s ago", describe(), -credential.expiresIn->count());
+
+        debug(
+            "obtained a GCS access token from the credential helper%s",
+            credential.expiresIn ? fmt(", valid for %d s", credential.expiresIn->count()) : "");
+        return credential;
+    }
+
+    /**
+     * Run `<command> get` with the request on its standard input and return
+     * what it printed. The request is a few dozen bytes, so it is written
+     * in full before the answer is read; a pipe holds far more.
+     */
+    std::string runHelper()
+    {
+#ifdef _WIN32
+        throw UnimplementedError("GCS credential helpers are not supported on this platform");
+#else
+        auto input = request();
+
+        /* In a daemon worker, act as the client rather than as the daemon,
+           so that per-user token brokers recognise the caller. */
+        std::optional<daemon::Client> runAs;
+        std::optional<OsStringMap> environment;
+        if (auto client = daemon::getClient(); client && client->uid != geteuid()) {
+            debug("running %s as uid %d", describe(), client->uid);
+            runAs = client;
+            environment = environmentFor(client->uid);
+        }
+
+        /* The helper's diagnostics go into the error, since in a daemon
+           worker its stderr would otherwise reach only the daemon's log,
+           and they are what tells the user what to do. */
+        auto run = [&]() -> std::tuple<int, std::string, std::string> {
+            checkInterrupt();
+            Pipe in, out;
+            in.create();
+            out.create();
+            auto [diagnosticsFd, diagnosticsPath] = createTempFile("nix-credential-helper");
+            AutoDelete delDiagnostics(diagnosticsPath);
+
+            Pid pid = startProcess(
+                [&] {
+                    if (environment)
+                        replaceEnv(*environment);
+                    if (dup2(in.readSide.get(), STDIN_FILENO) == -1)
+                        throw SysError("dupping stdin");
+                    if (dup2(out.writeSide.get(), STDOUT_FILENO) == -1)
+                        throw SysError("dupping stdout");
+                    if (dup2(diagnosticsFd.get(), STDERR_FILENO) == -1)
+                        throw SysError("dupping stderr");
+                    if (runAs) {
+                        if (setgid(runAs->gid) == -1)
+                            throw SysError("setgid failed");
+                        if (setgroups(0, 0) == -1)
+                            throw SysError("setgroups failed");
+                        if (setuid(runAs->uid) == -1)
+                            throw SysError("setuid failed");
+                    }
+                    Strings args(command);
+                    args.push_back("get");
+                    restoreProcessContext();
+                    execvp(command.front().c_str(), stringsToCharPtrs(args).data());
+                    throw SysError("executing %s", command.front());
+                },
+                {.allowVfork = false});
+
+            in.readSide.close();
+            out.writeSide.close();
+            try {
+                writeFull(in.writeSide.get(), input);
+            } catch (SysError &) {
+                /* A helper that doesn't read its input is not thereby
+                   wrong; its exit status and output decide. */
+            }
+            in.writeSide.close();
+            auto output = drainFD(out.readSide.get());
+            auto status = pid.wait();
+            diagnosticsFd.close();
+            return {status, std::move(output), trim(readFile(diagnosticsPath))};
+        };
+
+        /* A helper typically asks a broker, which can fail transiently; one
+           more try is cheap compared to failing the user's request. */
+        auto [status, output, diagnostics] = run();
+        if (!statusOk(status)) {
+            debug("%s %s, retrying once", describe(), statusToString(status));
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::tie(status, output, diagnostics) = run();
+        }
+        if (!statusOk(status))
+            throw GcsAuthError(
+                "%s %s%s", describe(), statusToString(status), diagnostics.empty() ? "" : ":\n" + diagnostics);
+        if (!diagnostics.empty())
+            debug("%s said: %s", describe(), diagnostics);
+
+        return output;
+#endif
+    }
+
+#ifndef _WIN32
+    /**
+     * A minimal environment for running the helper as `uid`: the user's
+     * identity and home directory, so that the helper finds its own
+     * per-user state, and nothing of the daemon's environment.
+     */
+    static OsStringMap environmentFor(uid_t uid)
+    {
+        struct passwd pwbuf;
+        struct passwd * pw = nullptr;
+        std::vector<char> buf(16384);
+        if (getpwuid_r(uid, &pwbuf, buf.data(), buf.size(), &pw) != 0 || !pw || !pw->pw_dir || !pw->pw_dir[0])
+            throw GcsAuthError("cannot look up the home directory of uid %d to run the GCS credential helper", uid);
+
+        OsStringMap env;
+        env["HOME"] = pw->pw_dir;
+        env["USER"] = pw->pw_name;
+        env["LOGNAME"] = pw->pw_name;
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin";
+
+        /* Where systemd puts a logged-in user's runtime directory; per-user
+           services bind their sockets under it. */
+        auto runtimeDir = fmt("/run/user/%d", uid);
+        if (pathExists(runtimeDir))
+            env["XDG_RUNTIME_DIR"] = runtimeDir;
+
+        return env;
+    }
+#endif
+};
+
+GcsCredentialHelperProvider::~GcsCredentialHelperProvider() {}
+
 ref<GcsCredentialProvider> makeGcsCredentialsProvider()
 {
     return make_ref<GcsCredentialProviderImpl>();
 }
 
-ref<GcsCredentialProvider> getGcsCredentialsProvider()
+ref<GcsCredentialProvider> makeGcsCredentialHelperProvider(Strings command, ParsedURL uri)
 {
-    static auto instance = makeGcsCredentialsProvider();
-    return instance;
+    if (command.empty())
+        throw UsageError("gcs-credential-helper must name a command");
+    return make_ref<GcsCredentialHelperProvider>(std::move(command), std::move(uri));
+}
+
+ref<GcsCredentialProvider> getGcsCredentialsProvider(const ParsedURL & uri)
+{
+    if (auto & helper = gcsSettings.credentialHelper.get(); !helper.empty())
+        return makeGcsCredentialHelperProvider(helper, uri);
+
+    static auto applicationDefault = makeGcsCredentialsProvider();
+    return applicationDefault;
 }
 
 } // namespace nix

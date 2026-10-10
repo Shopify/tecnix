@@ -40,6 +40,22 @@ TEST(GcsBinaryCacheStoreConfig, constructConfigWithPrefix)
     EXPECT_EQ(config.cacheUri.to_string(), "gs://my-bucket/some/prefix");
 }
 
+/** What a credential helper is asked for: the root of the store, endpoint included. */
+TEST(GcsBinaryCacheStoreConfig, rootHttpsUrl)
+{
+    EXPECT_EQ(
+        GcsBinaryCacheStoreConfig(parseURL("gs://my-bucket"), {}).rootHttpsUrl().to_string(),
+        "https://storage.googleapis.com/my-bucket/");
+    EXPECT_EQ(
+        GcsBinaryCacheStoreConfig(parseURL("gs://my-bucket/some/prefix"), {}).rootHttpsUrl().to_string(),
+        "https://storage.googleapis.com/my-bucket/some/prefix/");
+    EXPECT_EQ(
+        GcsBinaryCacheStoreConfig(parseURL("gs://my-bucket"), {{"endpoint", "http://gcs.local:4443"}})
+            .rootHttpsUrl()
+            .to_string(),
+        "http://gcs.local:4443/my-bucket/");
+}
+
 /**
  * Only the settings that affect request URLs end up in the cache URI,
  * so that `makeRequest` can propagate them to every request.

@@ -1,14 +1,74 @@
 #pragma once
 ///@file
 
+#include "nix/util/configuration.hh"
 #include "nix/util/error.hh"
 #include "nix/util/ref.hh"
+#include "nix/util/url.hh"
+#include "nix/util/types.hh"
 
 #include <chrono>
 #include <optional>
 #include <string>
 
 namespace nix {
+
+/**
+ * Settings for access to Google Cloud Storage.
+ */
+struct GcsSettings : Config
+{
+    void anchor() override;
+
+    Setting<Strings> credentialHelper{
+        this,
+        {},
+        "gcs-credential-helper",
+        R"(
+          A [Git credential helper](https://git-scm.com/docs/gitcredentials)
+          that provides the OAuth2 access token for `gs://` stores. Nix
+          calls it the way Go's `GOAUTH=git` or Cargo do: it runs the
+          command with `get` appended, writes the request to its standard
+          input,
+
+              protocol=https
+              host=storage.googleapis.com
+              path=<bucket>/<prefix>/
+              capability[]=authtype
+
+          and reads attributes back. GCS authenticates with a bearer token,
+          so the answer must carry one,
+
+              authtype=Bearer
+              credential=ya29.a0AfH6SMB...
+              password_expiry_utc=1760011200
+
+          (a helper without the `authtype` capability may return it as
+          `password` instead). When set, this is the only source of
+          credentials.
+
+          Nix asks once per store, for the store's URL, and uses the answer
+          for all requests under it until a minute before
+          `password_expiry_utc`. A helper that reports no expiry is run for
+          every request, since Nix does not guess how long its tokens stay
+          valid. A non-zero exit, a missing credential, an `authtype` other
+          than `Bearer` or an already expired credential is an error, not a
+          fall back to anonymous access.
+
+          The token's scope is the helper's business: reads from a binary
+          cache need `devstorage.read_only`, uploads `devstorage.read_write`.
+
+          When the Nix daemon serves a client, the helper runs *as that
+          client's user* (with that user's home directory, and
+          `XDG_RUNTIME_DIR` set to `/run/user/<uid>` when that exists), not
+          as the daemon. A per-user token broker therefore sees an ordinary
+          same-user caller, and the daemon never holds a long-lived
+          credential. Use an absolute path: the helper runs with a minimal
+          `PATH`, and without a terminal, so a helper that prompts fails.
+        )"};
+};
+
+extern GcsSettings gcsSettings;
 
 /**
  * GCS access token with expiration tracking
@@ -79,13 +139,22 @@ public:
 };
 
 /**
- * Create a new GCS credential provider.
+ * Create a new GCS credential provider that resolves credentials with
+ * Application Default Credentials.
  */
 ref<GcsCredentialProvider> makeGcsCredentialsProvider();
 
 /**
- * Get a reference to the global GCS credential provider.
+ * A provider that gets its credentials for `uri` from the given Git
+ * credential helper, as described for `gcs-credential-helper`.
  */
-ref<GcsCredentialProvider> getGcsCredentialsProvider();
+ref<GcsCredentialProvider> makeGcsCredentialHelperProvider(Strings command, ParsedURL uri);
+
+/**
+ * The credential provider for requests to `uri`: the `gcs-credential-helper`
+ * if one is configured, otherwise the shared Application Default
+ * Credentials provider.
+ */
+ref<GcsCredentialProvider> getGcsCredentialsProvider(const ParsedURL & uri);
 
 } // namespace nix

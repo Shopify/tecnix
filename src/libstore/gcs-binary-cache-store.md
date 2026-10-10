@@ -15,8 +15,24 @@ Uploaded objects get the bucket's default storage class.
 
 ### Authentication
 
-Nix uses a Google credentials JSON file (a service account key, or the
-`application_default_credentials.json` written by `gcloud auth
+Requests carry an OAuth2 access token, obtained in one of two ways.
+
+If the [`gcs-credential-helper`](@docroot@/command-ref/conf-file.md#conf-gcs-credential-helper)
+setting is configured, Nix asks that command the way Git asks a
+[credential helper](https://git-scm.com/docs/gitcredentials): it runs
+`<command> get` with the store's `protocol`, `host` and `path` on standard
+input and reads attributes back, of which `credential` (with
+`authtype=Bearer`) is the token and `password_expiry_utc` its expiry.
+
+Substitutions are performed by the Nix daemon when one is in use. The daemon
+runs the helper *as the user it is serving*, not as root, so a per-user
+credential store or token broker sees an ordinary same-user caller, and the
+daemon holds no credential of its own. The answer is used for all requests to
+the store until shortly before it expires; a helper that reports no expiry is
+run for every request.
+
+Otherwise Nix uses a Google credentials JSON file (a service account key,
+or the `application_default_credentials.json` written by `gcloud auth
 application-default login`) or the GCE metadata server, looked up in this
 order:
 
@@ -24,13 +40,11 @@ order:
 2. `~/.config/gcloud/application_default_credentials.json`.
 3. The GCE metadata server (automatic on Compute Engine, GKE, Cloud Run, etc.).
 
-Substitutions are performed by the Nix daemon when one is in use, so the
-daemon's own environment and home directory are what matter, and every
-client it serves acts as that one identity. For read operations, Nix
-requests the `devstorage.read_only` OAuth2 scope and for writes
-`devstorage.read_write`; the scopes only matter for service account keys,
-since user credentials and the metadata server grant the scopes they were
-configured with.
+Here the daemon's own environment and home directory are what matter, and every client the daemon serves acts as that one identity.
+For read operations, Nix requests the `devstorage.read_only` OAuth2 scope and
+for writes `devstorage.read_write`; the scopes only matter for service
+account keys, since user credentials and the metadata server grant the
+scopes they were configured with.
 
 ### Anonymous reads
 

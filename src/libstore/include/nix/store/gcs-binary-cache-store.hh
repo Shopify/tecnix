@@ -49,6 +49,12 @@ struct GcsBinaryCacheStoreConfig : HttpBinaryCacheStoreConfig
 
     std::string getHumanReadableURI() const override;
 
+    /**
+     * The HTTPS URL of the store's root, under which all of its objects
+     * live: what a credential helper is asked for.
+     */
+    ParsedURL rootHttpsUrl() const;
+
     ref<Store> openStore() const override;
 };
 
@@ -66,10 +72,13 @@ public:
 
     ref<Config> gcsConfig;
 
-    GcsBinaryCacheStore(
-        ref<Config> config,
-        ref<FileTransfer> fileTransfer = getFileTransfer(),
-        ref<GcsCredentialProvider> credentials = getGcsCredentialsProvider());
+    GcsBinaryCacheStore(ref<Config> config, ref<FileTransfer> fileTransfer, ref<GcsCredentialProvider> credentials);
+
+    /**
+     * With the credentials `getGcsCredentialsProvider()` gives for the
+     * store's URL.
+     */
+    GcsBinaryCacheStore(ref<Config> config, ref<FileTransfer> fileTransfer = getFileTransfer());
 
 protected:
 
