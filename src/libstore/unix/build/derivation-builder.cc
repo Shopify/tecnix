@@ -1183,6 +1183,12 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
         std::string outputName;
         std::filesystem::path path;
         bool discardReferences;
+        /* Whether registering the output can reuse the scan's NAR hash: an
+           input-addressed output built at its final path, which nothing
+           rewrites. A content-addressed or fixed-output one is hashed after
+           it moves, and a rewritten one after the rewrite, so hashing it in
+           the scan would be wasted. */
+        bool hashInScan;
     };
 
     std::vector<OutputToScan> toScan;
@@ -1247,8 +1253,15 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
             discardReferences = *udr;
         }
 
+        auto * inputAddressed = std::get_if<DerivationOutput::InputAddressed>(&drv.outputs.at(outputName).raw);
+        bool hashInScan = inputAddressed && inputAddressed->path == *scratchOutput;
+
         outputStats.insert_or_assign(outputName, std::move(st));
-        toScan.push_back({.outputName = outputName, .path = actualPath, .discardReferences = discardReferences});
+        toScan.push_back(
+            {.outputName = outputName,
+             .path = actualPath,
+             .discardReferences = discardReferences,
+             .hashInScan = hashInScan});
     }
 
     /* Scan the outputs for references, and hash each one's NAR in the same
@@ -1270,6 +1283,10 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
             }
             debug(
                 "scanning for references for output '%s' in temp location %s", output.outputName, PathFmt(output.path));
+            if (!output.hashInScan) {
+                NullSink sink;
+                return {.references = scanForReferences(sink, output.path, referenceablePaths)};
+            }
             HashSink narSink{HashAlgorithm::SHA256};
             auto references = scanForReferences(narSink, output.path, referenceablePaths);
             return {.references = std::move(references), .narHash = narSink.finish()};
