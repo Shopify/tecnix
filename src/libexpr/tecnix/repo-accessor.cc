@@ -189,6 +189,14 @@ const std::vector<std::string> & getTecnixCheckoutDirtyPaths(const EvalState & s
 {
     auto & data = state.tecnixEvalData();
     std::call_once(data.tecnixCheckoutDirtyPathsFlag, [&]() {
+        // A caller that already ran the same status (tec) hands its output over
+        // instead of paying for a second one.
+        auto & statusFile = state.settings.tectonixGitStatusFile.get();
+        if (!statusFile.empty()) {
+            debug("reading the checkout's git status from '%s'", statusFile);
+            data.tecnixCheckoutDirtyPaths = parseGitPorcelainZDirtyPaths(readFile(statusFile));
+            return;
+        }
         data.tecnixCheckoutDirtyPaths = gitStatusDirtyPaths(state.settings.tectonixCheckoutPath.get());
     });
     return data.tecnixCheckoutDirtyPaths;
