@@ -289,6 +289,11 @@ static RegisterPrimOp primop_tecnixMemoize({
  * resolver prefix, and tied to this evaluator's version, since a row holds
  * evaluation *results* (derivation paths among them) rather than just a
  * closure.
+ *
+ * The parts are joined with U+001F, not NUL: the cache binds `resolver` and
+ * `argsKey` as SQLite text up to the first NUL, so a NUL would drop the
+ * resolver and the versions from the stored scope. `argsKey` is canonical
+ * JSON, which escapes control characters, so the join stays unambiguous.
  */
 struct TecnixMemoRowFamily
 {
@@ -307,11 +312,12 @@ struct TecnixMemoRowFamily
         std::string_view argsKey_,
         DependencyFingerprintCache & fingerprintCache_,
         size_t historyLimit_)
-        : resolver(std::string("__tecnixPersistentMemo\0", 23) + std::string(resolver_))
-        , argsKey(std::string(argsKey_) + '\0' + nixVersion + '\0' + tecnixVersion)
+        : resolver(std::string("__tecnixPersistentMemo\x1f") + std::string(resolver_))
+        , argsKey(std::string(argsKey_) + "\x1fnix=" + nixVersion + "\x1ftecnix=" + tecnixVersion)
         , fingerprintCache(&fingerprintCache_)
         , historyLimit(historyLimit_)
     {
+        assert(resolver.find('\0') == std::string::npos && argsKey.find('\0') == std::string::npos);
     }
 };
 
