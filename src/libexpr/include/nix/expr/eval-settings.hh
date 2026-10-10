@@ -620,6 +620,21 @@ struct EvalSettings : Config
           are visible before committing.
         )"};
 
+    Setting<std::string> tectonixGitStatusFile{
+        this,
+        "",
+        "tectonix-git-status-file",
+        R"(
+          A file holding the output of `git --no-optional-locks status
+          --porcelain -z --untracked-files=all`, run in `tectonix-checkout-path`.
+
+          When set, Tecnix reads the checkout's dirty paths from it instead of
+          running `git status` itself. A caller that has already run that
+          status for the same checkout (tec does, to decide whether to try its
+          artifact cache) passes it here, so one command pays for one status.
+          The caller is responsible for the file describing this checkout.
+        )"};
+
     Setting<std::string> tectonixWorldtreeSocket{
         this,
         "",

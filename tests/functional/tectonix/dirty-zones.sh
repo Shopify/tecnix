@@ -81,4 +81,26 @@ echo "$zone_src" | grepQuiet '"untrackedFile":"untracked file' || fail "zone sou
 echo "$zone_src" | grepQuiet '"untrackedDir":"in an untracked dir' || fail "zone source should carry files in an untracked directory"
 echo "$zone_src" | grepQuiet '"ignored":false' || fail "zone source should not carry ignored files"
 
+# A caller that already ran the status hands it over with
+# tectonix-git-status-file, and Tecnix trusts it instead of running git: with a
+# status that lists only new.txt, zone.nix's modification (on disk) is not
+# overlaid, and new.txt is.
+status_file="$TEST_ROOT/git-status"
+printf '?? areas/tools/dev/new.txt\0' > "$status_file"
+from_file_expr='let src = builtins.unsafeTectonixInternalZoneSrc "//areas/tools/dev"; in {
+  modified = builtins.readFile "${src}/zone.nix";
+  untrackedFile = builtins.readFile "${src}/new.txt";
+  untrackedDir = builtins.pathExists "${src}/newdir/deeper/x.txt";
+}'
+from_file=$(tectonix_eval_json "$TEST_WORLD/.git" "$HEAD_SHA" "$from_file_expr" \
+    --option tectonix-checkout-path "$TEST_WORLD" \
+    --option tectonix-git-status-file "$status_file")
+echo "Dirty zone source from a status file: $from_file"
+
+echo "$from_file" | grepQuiet '"untrackedFile":"untracked file' || fail "zone source should carry the file the status lists"
+if echo "$from_file" | grepQuiet '"modified":"[^"]*Modified content'; then
+    fail "zone source should follow the status file, not run git status"
+fi
+echo "$from_file" | grepQuiet '"untrackedDir":false' || fail "zone source should follow the status file for untracked files too"
+
 echo "Dirty zone tests passed!"
