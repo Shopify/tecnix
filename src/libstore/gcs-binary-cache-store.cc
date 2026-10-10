@@ -72,17 +72,33 @@ void GcsBinaryCacheStore::upload(
 {
     debug("uploading to GCS '%s' (%d bytes)", path, sizeHint);
 
-    auto parsedGcs = ParsedGcsURL::parse(config->cacheUri);
+    /* The object this file is: the same URL a download of it uses, so a cache
+       under a prefix (gs://bucket/prefix) uploads under that prefix too. The
+       cache URL itself has no object key and doesn't parse as one. */
+    auto parsedGcs = ParsedGcsURL::parse(makeRequest(path).uri.parsed());
 
     // The GCS JSON API's simple upload:
     // POST <endpoint>/upload/storage/v1/b/{bucket}/o?uploadType=media&name={object}
     auto uploadUrl = parsedGcs.apiBase();
     uploadUrl.path = {"", "upload", "storage", "v1", "b", parsedGcs.bucket, "o"};
     uploadUrl.query["uploadType"] = "media";
-    uploadUrl.query["name"] = std::string{path};
+    uploadUrl.query["name"] = concatStringsSep("/", parsedGcs.key);
+
+    /* A simple upload takes the object's contentEncoding as a query parameter
+       (objects.insert), not from a Content-Encoding header: the header would
+       describe the request body, not the stored object. Without it, a
+       compressed narinfo or listing would be served back still compressed. */
+    Headers otherHeaders;
+    for (auto & [name, value] : headers.value_or(Headers{})) {
+        if (toLower(name) == "content-encoding")
+            uploadUrl.query["contentEncoding"] = value;
+        else
+            otherHeaders.emplace_back(name, value);
+    }
 
     FileTransferRequest req(VerbatimURL{uploadUrl});
     req.method = HttpMethod::Post;
+    req.headers.insert(req.headers.end(), otherHeaders.begin(), otherHeaders.end());
 
     // Authenticate with write scope via OAuth2. Google's endpoint always needs
     // credentials; another endpoint (an emulator) gets them only if they exist.
@@ -90,11 +106,6 @@ void GcsBinaryCacheStore::upload(
         req.bearerToken = getGcsCredentialsProvider()->getAccessToken(/* writable = */ true);
     else if (auto token = getGcsCredentialsProvider()->maybeGetAccessToken(/* writable = */ true))
         req.bearerToken = std::move(*token);
-
-    if (headers) {
-        req.headers.reserve(req.headers.size() + headers->size());
-        std::move(headers->begin(), headers->end(), std::back_inserter(req.headers));
-    }
 
     if (auto storageClass = gcsConfig->storageClass.get()) {
         req.headers.emplace_back("x-goog-storage-class", *storageClass);
