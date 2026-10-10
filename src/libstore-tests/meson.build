@@ -64,6 +64,7 @@ sources = files(
   'derived-path.cc',
   'downstream-placeholder.cc',
   'dummy-store.cc',
+  'gcs-binary-cache-store.cc',
   'filetransfer-request.cc',
   'filetransfer-retry.cc',
   'gcs-url.cc',

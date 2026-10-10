@@ -131,7 +131,12 @@ protected:
     void upsertFile(
         const std::string & path, RestartableSource & source, const std::string & mimeType, uint64_t sizeHint) override;
 
-    FileTransferRequest makeRequest(std::string_view path);
+    /**
+     * Create a request for the given path (a URL relative to the cache
+     * URI). Subclasses can override this to rewrite the URL or add
+     * authentication.
+     */
+    virtual FileTransferRequest makeRequest(std::string_view path);
 
     /**
      * Uploads data to the binary cache.
