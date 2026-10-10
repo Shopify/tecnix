@@ -257,7 +257,7 @@ rec {
     };
 
   vmTests = {
-    inherit (nixosTests) s3-binary-cache-store;
+    inherit (nixosTests) s3-binary-cache-store gcs-binary-cache-store;
   }
   // lib.optionalAttrs (!withSanitizers && !withCoverage) {
     # evalNixpkgs uses non-instrumented components from hydraJobs, so only run it
