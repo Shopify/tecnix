@@ -18,6 +18,17 @@ struct GcsBinaryCacheStoreConfig : HttpBinaryCacheStoreConfig
 
     GcsBinaryCacheStoreConfig(std::string_view bucketName, const Params & params);
 
+    const Setting<std::string> endpoint{
+        this,
+        "",
+        "endpoint",
+        R"(
+          The URL the GCS APIs are served at, for example a local emulator
+          (`http://127.0.0.1:4443`). By default Nix uses
+          `https://storage.googleapis.com`. Nix sends Google credentials to
+          this endpoint when it finds them, and doesn't require them here.
+        )"};
+
     const Setting<std::optional<std::string>> projectId{
         this,
         std::nullopt,

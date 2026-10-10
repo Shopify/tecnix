@@ -25,27 +25,42 @@ try {
         writable = true;
     }
 
+    std::optional<std::string> endpoint;
+    if (auto e = parsed.query.find("endpoint"); e != parsed.query.end() && !e->second.empty()) {
+        auto url = parseURL(e->second);
+        if ((url.scheme != "https" && url.scheme != "http") || !url.authority || url.authority->host.empty())
+            throw BadURL("endpoint '%s' is not an http(s) URL with a host", e->second);
+        endpoint = e->second;
+    }
+
     return ParsedGcsURL{
         .bucket = parsed.authority->host,
         .key = std::move(key),
         .writable = writable,
+        .endpoint = std::move(endpoint),
     };
 } catch (BadURL & e) {
     e.addTrace({}, "while parsing GCS URI: '%s'", parsed.to_string());
     throw;
 }
 
+ParsedURL ParsedGcsURL::apiBase() const
+{
+    if (!endpoint)
+        return ParsedURL{
+            .scheme = "https",
+            .authority = ParsedURL::Authority{.host = "storage.googleapis.com"},
+        };
+    auto url = parseURL(*endpoint);
+    return ParsedURL{.scheme = std::move(url.scheme), .authority = std::move(url.authority)};
+}
+
 ParsedURL ParsedGcsURL::toHttpsUrl() const
 {
-    std::vector<std::string> path{""};
-    path.push_back(bucket);
-    path.insert(path.end(), key.begin(), key.end());
-
-    return ParsedURL{
-        .scheme = "https",
-        .authority = ParsedURL::Authority{.host = "storage.googleapis.com"},
-        .path = std::move(path),
-    };
+    auto url = apiBase();
+    url.path = {"", bucket};
+    url.path.insert(url.path.end(), key.begin(), key.end());
+    return url;
 }
 
 } // namespace nix

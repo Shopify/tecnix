@@ -39,6 +39,15 @@ you can use the [HTTP Binary Cache Store] with
   $ nix copy nixpkgs.hello --to 'gs://example-nix-cache'
   ```
 
+- To use a local GCS emulator (such as `fake-gcs-server`), for tests:
+
+  ```console
+  $ nix copy nixpkgs.hello --to 'gs://example-nix-cache?endpoint=http://127.0.0.1:4443'
+  ```
+
+  Nix sends Google credentials to another endpoint only if it finds them, and
+  doesn't require them there.
+
 - To specify a storage class for uploads:
 
   ```console

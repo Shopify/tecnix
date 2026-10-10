@@ -3,6 +3,7 @@
 
 #include "nix/util/url.hh"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,12 @@ struct ParsedGcsURL
     bool writable = false;
 
     /**
+     * Where the GCS APIs are served (via ?endpoint=URL), e.g. an emulator at
+     * `http://127.0.0.1:4443`. Defaults to `https://storage.googleapis.com`.
+     */
+    std::optional<std::string> endpoint;
+
+    /**
      * Parse a gs:// URL.
      *
      * @param parsed The parsed URL to convert
@@ -31,7 +38,14 @@ struct ParsedGcsURL
     static ParsedGcsURL parse(const ParsedURL & parsed);
 
     /**
-     * Convert to HTTPS URL for storage.googleapis.com
+     * The endpoint's scheme and authority: `https://storage.googleapis.com`
+     * unless `endpoint` is set.
+     */
+    ParsedURL apiBase() const;
+
+    /**
+     * The object's URL on the endpoint (the XML API's path-style form),
+     * `https://storage.googleapis.com/<bucket>/<key>` by default.
      */
     ParsedURL toHttpsUrl() const;
 

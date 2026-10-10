@@ -74,11 +74,9 @@ void GcsBinaryCacheStore::upload(
 
     auto parsedGcs = ParsedGcsURL::parse(config->cacheUri);
 
-    // Build the upload URL using the GCS JSON API:
-    // POST https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?uploadType=media&name={object}
-    ParsedURL uploadUrl;
-    uploadUrl.scheme = "https";
-    uploadUrl.authority = ParsedURL::Authority{.host = "storage.googleapis.com"};
+    // The GCS JSON API's simple upload:
+    // POST <endpoint>/upload/storage/v1/b/{bucket}/o?uploadType=media&name={object}
+    auto uploadUrl = parsedGcs.apiBase();
     uploadUrl.path = {"", "upload", "storage", "v1", "b", parsedGcs.bucket, "o"};
     uploadUrl.query["uploadType"] = "media";
     uploadUrl.query["name"] = std::string{path};
@@ -86,9 +84,12 @@ void GcsBinaryCacheStore::upload(
     FileTransferRequest req(VerbatimURL{uploadUrl});
     req.method = HttpMethod::Post;
 
-    // Authenticate with write scope via OAuth2
-    auto token = getGcsCredentialsProvider()->getAccessToken(/* writable = */ true);
-    req.bearerToken = std::move(token);
+    // Authenticate with write scope via OAuth2. Google's endpoint always needs
+    // credentials; another endpoint (an emulator) gets them only if they exist.
+    if (!parsedGcs.endpoint)
+        req.bearerToken = getGcsCredentialsProvider()->getAccessToken(/* writable = */ true);
+    else if (auto token = getGcsCredentialsProvider()->maybeGetAccessToken(/* writable = */ true))
+        req.bearerToken = std::move(*token);
 
     if (headers) {
         req.headers.reserve(req.headers.size() + headers->size());
@@ -115,6 +116,11 @@ GcsBinaryCacheStoreConfig::GcsBinaryCacheStoreConfig(ParsedURL cacheUri_, const 
     , HttpBinaryCacheStoreConfig(std::move(cacheUri_), params)
 {
     assert(cacheUri.scheme == "gs");
+
+    /* Requests are built from cacheUri, and `gs://` requests read the
+       endpoint from its query, so the endpoint travels there. */
+    if (!endpoint.get().empty())
+        cacheUri.query["endpoint"] = endpoint.get();
 }
 
 GcsBinaryCacheStoreConfig::GcsBinaryCacheStoreConfig(std::string_view bucketName, const Params & params)
