@@ -388,13 +388,27 @@ void (*coroResume)(void * handle) = nullptr;
 namespace {
 
 /**
+ * The GC cookie of a coroutine stack (see `coroutine-gc.hh`), shared
+ * between the coroutine's owner, which needs it to announce switches
+ * onto the stack, and the stack allocator inside the coroutine's
+ * control block, which needs it to unregister the stack when the stack
+ * is deallocated. The two must not refer to each other directly, since
+ * they can die in either order: a coroutine that yielded from another
+ * coroutine's stack (a decompressor feeding a `sinkToSource` sink, say)
+ * is only unwound, and its stack only deallocated, when *that* stack is
+ * unwound, which can be after the owner was destroyed in the course of
+ * the same unwinding.
+ */
+using CoroutineStackCookie = std::shared_ptr<void *>;
+
+/**
  * A stack allocator that reports the coroutine stacks to the GC hooks
- * (see `coroutine-gc.hh`), storing the resulting cookie in the owning
- * object (which must outlive the coroutine).
+ * (see `coroutine-gc.hh`), storing the resulting cookie in the shared
+ * cell.
  */
 struct GCTrackedStackAllocator
 {
-    void ** cookie;
+    CoroutineStackCookie cookie;
 
     boost::context::stack_context allocate()
     {
@@ -482,7 +496,7 @@ std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
 
         fun<void(Source &)> reader;
         std::optional<coro_t::push_type> coro;
-        void * stackCookie = nullptr;
+        CoroutineStackCookie stackCookie = std::make_shared<void *>(nullptr);
 
         SourceToSink(fun<void(Source &)> reader)
             : reader(reader)
@@ -494,7 +508,7 @@ std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
             /* Destroying a suspended coroutine unwinds it on its own
                stack, so this too is a switch onto the coroutine
                stack. */
-            CoroutineGuard guard{stackCookie};
+            CoroutineGuard guard{*stackCookie};
             coro.reset();
         }
 
@@ -506,14 +520,14 @@ std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
                 return;
             cur = in;
 
-            CoroutineGuard guard{stackCookie};
+            CoroutineGuard guard{*stackCookie};
 
             if (!coro) {
-                coro = coro_t::push_type(GCTrackedStackAllocator{&stackCookie}, [&](coro_t::pull_type & yield) {
+                coro = coro_t::push_type(GCTrackedStackAllocator{stackCookie}, [&](coro_t::pull_type & yield) {
                     /* Note: `stackCookie` has been set by the stack
                        allocator before the body started. */
                     if (coroEnter)
-                        coroEnter(stackCookie);
+                        coroEnter(*stackCookie);
                     LambdaSource source([&](char * out, size_t out_len) {
                         if (cur.empty()) {
                             {
@@ -544,7 +558,7 @@ std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
         void finish() override
         {
             if (coro && *coro) {
-                CoroutineGuard guard{stackCookie};
+                CoroutineGuard guard{*stackCookie};
                 (*coro)(true);
             }
         }
@@ -562,7 +576,7 @@ std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
         fun<void(Sink &)> writer;
         fun<void()> eof;
         std::optional<coro_t::pull_type> coro;
-        void * stackCookie = nullptr;
+        CoroutineStackCookie stackCookie = std::make_shared<void *>(nullptr);
 
         SinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
             : writer(writer)
@@ -573,7 +587,7 @@ std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
         ~SinkToSource()
         {
             /* See `SourceToSink::~SourceToSink()`. */
-            CoroutineGuard guard{stackCookie};
+            CoroutineGuard guard{*stackCookie};
             coro.reset();
         }
 
@@ -581,15 +595,15 @@ std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
 
         size_t read(char * data, size_t len) override
         {
-            CoroutineGuard guard{stackCookie};
+            CoroutineGuard guard{*stackCookie};
 
             bool hasCoro = coro.has_value();
             if (!hasCoro) {
-                coro = coro_t::pull_type(GCTrackedStackAllocator{&stackCookie}, [&](coro_t::push_type & yield) {
+                coro = coro_t::pull_type(GCTrackedStackAllocator{stackCookie}, [&](coro_t::push_type & yield) {
                     /* Note: `stackCookie` has been set by the stack
                        allocator before the body started. */
                     if (coroEnter)
-                        coroEnter(stackCookie);
+                        coroEnter(*stackCookie);
 
                     /* Feed the consumer in chunks, instead of on each write
                        to avoid excessive context switching. parseDump does
