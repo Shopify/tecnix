@@ -369,14 +369,15 @@ static void daemonLoop(
             [&](AutoCloseFD remote, std::function<void()> closeListeners) {
                 unix::closeOnExec(remote.get());
 
-                unix::PeerInfo peer;
+                /* Even when trust is forced, we still want to know who the
+                   client is, so that the worker can act on their behalf. */
+                unix::PeerInfo peer = unix::getPeerInfo(remote.get());
                 TrustedFlag trusted;
                 std::optional<std::string> userName;
 
                 if (forceTrustClientOpt)
                     trusted = *forceTrustClientOpt;
                 else {
-                    peer = unix::getPeerInfo(remote.get());
                     try {
                         auto [_trusted, _userName] = authPeer(peer);
                         trusted = _trusted;
@@ -418,6 +419,11 @@ static void daemonLoop(
                             auto processName = std::to_string(*peer.pid);
                             strncpy(savedArgv[1], processName.c_str(), strlen(savedArgv[1]));
                         }
+
+                        // Remember who we're serving, so that per-user helpers
+                        // (e.g. the GCS credential helper) can run as the client.
+                        if (peer.uid && peer.gid)
+                            daemon::setClient(daemon::Client{.uid = *peer.uid, .gid = *peer.gid});
 
                         // Handle the connection.
                         auto store = storeConfig->openStore();

@@ -49,8 +49,19 @@ PeerInfo getPeerInfo(Descriptor remote)
 
     xucred cred;
     socklen_t credLen = sizeof(cred);
-    if (getsockopt(remote, SOL_LOCAL, LOCAL_PEERCRED, &cred, &credLen) == 0)
+    if (getsockopt(remote, SOL_LOCAL, LOCAL_PEERCRED, &cred, &credLen) == 0) {
         peer.uid = cred.cr_uid;
+        /* The first group is the effective gid; see unix(4). */
+        if (cred.cr_ngroups > 0)
+            peer.gid = cred.cr_groups[0];
+    }
+
+#  if defined(LOCAL_PEERPID)
+    pid_t pid;
+    socklen_t pidLen = sizeof(pid);
+    if (getsockopt(remote, SOL_LOCAL, LOCAL_PEERPID, &pid, &pidLen) == 0)
+        peer.pid = pid;
+#  endif
 
 #endif
 
