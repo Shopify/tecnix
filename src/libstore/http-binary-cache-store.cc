@@ -175,9 +175,7 @@ bool HttpBinaryCacheStore::fileExists(const std::string & path)
         fileTransfer->download(request);
         return true;
     } catch (FileTransferError & e) {
-        /* S3 buckets return 403 if a file doesn't exist and the
-           bucket is unlistable, so treat 403 as 404. */
-        if (e.error == FileTransfer::NotFound || e.error == FileTransfer::Forbidden)
+        if (isMissing(e))
             return false;
         maybeDisable();
         throw;
@@ -284,7 +282,7 @@ void HttpBinaryCacheStore::getFile(const std::string & path, Sink & sink)
     try {
         fileTransfer->download(std::move(request), sink);
     } catch (FileTransferError & e) {
-        if (e.error == FileTransfer::NotFound || e.error == FileTransfer::Forbidden)
+        if (isMissing(e))
             throw NoSuchBinaryCacheFile(
                 "file '%s' does not exist in binary cache '%s'", path, config->getHumanReadableURI());
         maybeDisable();
@@ -305,8 +303,7 @@ void HttpBinaryCacheStore::getFile(const std::string & path, Callback<std::optio
                                               try {
                                                   (*callbackPtr)(std::move(result.get().data));
                                               } catch (FileTransferError & e) {
-                                                  if (e.error == FileTransfer::NotFound
-                                                      || e.error == FileTransfer::Forbidden)
+                                                  if (isMissing(e))
                                                       return (*callbackPtr)({});
                                                   maybeDisable();
                                                   callbackPtr->rethrow();

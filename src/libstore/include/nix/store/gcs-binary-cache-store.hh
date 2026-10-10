@@ -5,6 +5,7 @@
 #include "nix/store/gcs-creds.hh"
 #include "nix/store/gcs-url.hh"
 #include "nix/store/http-binary-cache-store.hh"
+#include "nix/util/fun.hh"
 
 namespace nix {
 
@@ -73,6 +74,35 @@ public:
 protected:
 
     ref<GcsCredentialProvider> credentials;
+
+    /**
+     * GCS answers 404 for a missing object and 403 only for denied
+     * access, so a 403 is a credential problem to report, not a miss.
+     */
+    bool isMissing(const FileTransferError & e) const override
+    {
+        return e.error == FileTransfer::NotFound;
+    }
+
+    /**
+     * Like `HttpBinaryCacheStore::init()`, except that a credential
+     * problem doesn't stop the store from opening: a substituter that
+     * fails to open is dropped with a warning, so that an unreachable
+     * cache doesn't stop builds, which would quietly turn wrong
+     * credentials into building from source. The store stays registered
+     * and its first query fails with the same error, where it stops the
+     * build.
+     */
+    void init() override
+    {
+        initDeferringCredentialErrors([&] { HttpBinaryCacheStore::init(); });
+    }
+
+    /**
+     * Run the initialisation `step`, letting a credential error wait for
+     * the store's first use.
+     */
+    void initDeferringCredentialErrors(fun<void()> step);
 
     /**
      * Turn the `gs://` URL for `path` into an authenticated (read-only)

@@ -34,10 +34,15 @@ configured with.
 
 ### Anonymous reads
 
-If no credentials are found, reads are attempted anonymously, which works
-for publicly readable buckets. Writes to Google's endpoint always require
-credentials; writes to another `endpoint` (an emulator, say) use them only
-when there are any.
+If no credentials are configured at all, reads are attempted anonymously,
+which works for publicly readable buckets. Writes to Google's endpoint always
+require credentials; writes to another `endpoint` (an emulator, say) use them
+only when there are any. Credentials that are configured but cannot be used
+(for example a revoked or expired `gcloud` login) are an error, rather than a
+silent fall back to anonymous access. Likewise, access that GCS denies (HTTP
+403) is an error rather than a cache miss: GCS answers 404 for an object that
+is missing, so a 403 means the credentials are wrong, not that the path has to
+be built. Pass `--fallback` to build locally regardless.
 
 Alternatively, a public bucket can be used with the
 [HTTP Binary Cache Store](@docroot@/store/types/http-binary-cache-store.md)

@@ -26,6 +26,25 @@ GcsBinaryCacheStore::GcsBinaryCacheStore(
 {
 }
 
+void GcsBinaryCacheStore::initDeferringCredentialErrors(fun<void()> step)
+{
+    auto defer = [&](Error & e) {
+        debug("deferring a credential error for '%s' to its first use: %s", config->cacheUri.to_string(), e.what());
+        /* Nothing is known about this cache, so there is nothing to look up
+           or record in the narinfo disk cache; its first use fails anyway. */
+        diskCache = nullptr;
+    };
+    try {
+        step();
+    } catch (GcsAuthError & e) {
+        defer(e);
+    } catch (FileTransferError & e) {
+        if (e.error != FileTransfer::Forbidden && e.error != FileTransfer::Unauthorized)
+            throw;
+        defer(e);
+    }
+}
+
 FileTransferRequest GcsBinaryCacheStore::makeRequest(std::string_view path)
 {
     auto request = HttpBinaryCacheStore::makeRequest(path);

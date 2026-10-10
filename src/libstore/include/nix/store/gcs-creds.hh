@@ -25,7 +25,18 @@ struct GcsAccessToken
     }
 };
 
+/**
+ * Credentials were found but could not be used, e.g. the gcloud login has
+ * been revoked or the service account key is malformed.
+ */
 MakeError(GcsAuthError, Error);
+
+/**
+ * No credentials are configured at all. Unlike other `GcsAuthError`s,
+ * this is expected on machines without Google Cloud credentials, and
+ * reads then proceed anonymously.
+ */
+MakeError(GcsNoCredentials, GcsAuthError);
 
 /**
  * Provider for Google Cloud Storage credentials.
@@ -53,9 +64,14 @@ public:
     virtual std::string getAccessToken(bool writable = false) = 0;
 
     /**
-     * Try to get an access token, returning nullopt on failure.
+     * Get an access token, or nullopt if no credentials are configured
+     * (so that the request can be attempted anonymously). Credentials
+     * that are configured but unusable are an error, like in
+     * `getAccessToken()`, so that e.g. an expired login doesn't silently
+     * turn into anonymous requests and 403s.
      *
      * @param writable If true, request read/write scope; otherwise read-only
+     * @throws GcsAuthError if credentials exist but no token can be obtained
      */
     std::optional<std::string> maybeGetAccessToken(bool writable = false);
 

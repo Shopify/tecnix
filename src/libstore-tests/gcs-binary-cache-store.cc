@@ -112,6 +112,8 @@ struct FakeGcs : FileTransfer
     ParsedURL base{.scheme = "https", .authority = ParsedURL::Authority{.host = "storage.googleapis.com"}};
     /** Whether writes without a token are accepted, as an emulator does. */
     bool anonymousWrites = false;
+    /** Like a private bucket: reads without a token are denied. */
+    bool privateReads = false;
     std::map<std::string, Object> objects;
     std::vector<Request> requests;
 
@@ -177,6 +179,10 @@ struct FakeGcs : FileTransfer
             || (request.method != HttpMethod::Get && request.method != HttpMethod::Head))
             throw nix::Error("fake GCS: unexpected %s of '%s'", request.verb(), url);
 
+        if (privateReads && !request.bearerToken)
+            throw FileTransferError(
+                FileTransfer::Forbidden, std::nullopt, "fake GCS: anonymous caller may not read '%s'", url);
+
         auto obj = objects.find(requests.back().key());
         if (obj == objects.end())
             throw FileTransferError(FileTransfer::NotFound, std::nullopt, "fake GCS: '%s' does not exist", url);
@@ -199,11 +205,21 @@ struct FakeGcsCredentials : GcsCredentialProvider
     }
 };
 
+/** No credentials are configured at all. */
 struct NoGcsCredentials : GcsCredentialProvider
 {
     std::string getAccessToken(bool writable) override
     {
-        throw GcsAuthError("no credentials");
+        throw GcsNoCredentials("no credentials");
+    }
+};
+
+/** Credentials are configured, but unusable (e.g. a revoked gcloud login). */
+struct BrokenGcsCredentials : GcsCredentialProvider
+{
+    std::string getAccessToken(bool writable) override
+    {
+        throw GcsAuthError("OAuth2 token request failed: invalid_grant");
     }
 };
 
@@ -224,9 +240,11 @@ public:
         diskCache = nullptr;
     }
 
+    /* Without the narinfo disk cache that `HttpBinaryCacheStore::init()`
+       consults, but with the GCS store's own treatment of credentials. */
     void init() override
     {
-        BinaryCacheStore::init();
+        initDeferringCredentialErrors([&] { BinaryCacheStore::init(); });
     }
 
     using BinaryCacheStore::fileExists;
@@ -342,6 +360,46 @@ TEST_F(GcsBinaryCacheStoreTest, writesToAnotherEndpointMayBeAnonymous)
         EXPECT_EQ(req.bearerToken, std::nullopt);
         EXPECT_EQ(req.url.authority->host, "gcs.local");
     }
+}
+
+/**
+ * Credentials that exist but don't work are an error, never a fall back to
+ * anonymous requests. Opening the store still succeeds, since a substituter
+ * that fails to open is dropped with a warning (the quiet fall back again);
+ * its first use fails instead, where that stops the build.
+ */
+TEST_F(GcsBinaryCacheStoreTest, brokenCredentialsAreAnError)
+{
+    gcs->objects["nix-cache-info"] = {.data = cacheInfo()};
+    auto store = openStore({}, "gs://test-bucket", make_ref<BrokenGcsCredentials>());
+    EXPECT_TRUE(gcs->requests.empty()) << "no anonymous request should have been made";
+
+    EXPECT_THAT(
+        [&] { store->queryPathInfo(StorePath("g25sx2bjrsxs0zj1pgskqhh2cka48wlh-foo")); },
+        ::testing::ThrowsMessage<GcsAuthError>(testing::HasSubstrIgnoreANSIMatcher("invalid_grant")));
+    EXPECT_TRUE(gcs->requests.empty()) << "no anonymous request should have been made";
+}
+
+/**
+ * Denied access is reported, not taken for a cache miss: a 403 on a
+ * private bucket must not quietly turn into building from source.
+ */
+TEST_F(GcsBinaryCacheStoreTest, deniedAccessIsAnErrorNotAMiss)
+{
+    gcs->privateReads = true;
+    gcs->objects["nix-cache-info"] = {.data = cacheInfo()};
+    auto config = make_ref<GcsBinaryCacheStoreConfig>(parseURL("gs://test-bucket"), StoreConfig::Params{});
+    config->pathInfoCacheSize = 0;
+    auto store = make_ref<TestGcsBinaryCacheStore>(config, gcs, make_ref<NoGcsCredentials>());
+
+    EXPECT_THAT(
+        [&] { store->fileExists("nix-cache-info"); },
+        ::testing::ThrowsMessage<FileTransferError>(testing::HasSubstrIgnoreANSIMatcher("anonymous caller")));
+    EXPECT_THROW(store->queryPathInfo(StorePath("g25sx2bjrsxs0zj1pgskqhh2cka48wlh-foo")), FileTransferError);
+    /* Opening the store, though, succeeds: a substituter that fails to open
+       is dropped with a warning, which is the quiet fall back again. */
+    EXPECT_NO_THROW(store->init());
+    EXPECT_THROW(store->queryPathInfo(StorePath("g25sx2bjrsxs0zj1pgskqhh2cka48wlh-foo")), FileTransferError);
 }
 
 TEST_F(GcsBinaryCacheStoreTest, missingFiles)

@@ -1312,27 +1312,36 @@ struct curlFileTransfer : public FileTransfer
     inline ref<TransferItem>
     makeTransferItem(const FileTransferRequest & request, Callback<FileTransferResult> callback)
     {
-        /* Handle s3:// URIs by converting to HTTPS and optionally adding auth */
-        if (request.uri.scheme() == "s3") {
-            auto modifiedRequest = request;
-            modifiedRequest.setupForS3();
-            return make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback));
+        /* s3:// and gs:// URIs are converted to HTTPS and get their
+           authentication added here. That can fail (malformed URI, credential
+           problems), and enqueueFileTransfer() is `noexcept`, so rather than
+           letting the exception escape, create the item anyway and fail it, so
+           that the error reaches the callback like any other transfer error. */
+        auto modifiedRequest = request;
+        std::exception_ptr setupError;
+        try {
+            if (request.uri.scheme() == "s3")
+                modifiedRequest.setupForS3();
+            else if (request.uri.scheme() == "gs")
+                modifiedRequest.setupForGcs();
+        } catch (...) {
+            setupError = std::current_exception();
         }
 
-        /* Handle gs:// URIs by converting to HTTPS and adding OAuth2 bearer token */
-        if (request.uri.scheme() == "gs") {
-            auto modifiedRequest = request;
-            modifiedRequest.setupForGcs();
-            return make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback));
-        }
-
-        return make_ref<TransferItem>(*this, request, std::move(callback));
+        auto item = make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback));
+        if (setupError)
+            item->failEx(setupError);
+        return item;
     }
 
     ItemHandle
     enqueueFileTransfer(const FileTransferRequest & request, Callback<FileTransferResult> callback) noexcept override
     {
         const auto item = makeTransferItem(request, std::move(callback));
+
+        /* Setting up the request failed; the callback has already been invoked. */
+        if (item->done)
+            return ItemHandle(item.get_ptr());
 
         try {
             return enqueueItem(item);

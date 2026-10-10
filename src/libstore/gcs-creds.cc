@@ -153,11 +153,10 @@ std::optional<std::filesystem::path> findCredentialFile()
     // 1. Check GOOGLE_APPLICATION_CREDENTIALS
     if (auto envPath = getEnv("GOOGLE_APPLICATION_CREDENTIALS")) {
         auto path = std::filesystem::path(*envPath);
-        if (std::filesystem::exists(path)) {
-            debug("Using GCS credentials from GOOGLE_APPLICATION_CREDENTIALS: %s", path.string());
-            return path;
-        }
-        warn("GOOGLE_APPLICATION_CREDENTIALS set but file not found: %s", *envPath);
+        if (!std::filesystem::exists(path))
+            throw GcsAuthError("GOOGLE_APPLICATION_CREDENTIALS names a file that does not exist: %s", *envPath);
+        debug("Using GCS credentials from GOOGLE_APPLICATION_CREDENTIALS: %s", path.string());
+        return path;
     }
 
     // 2. Check well-known ADC location
@@ -320,6 +319,9 @@ private:
     // Credential type: "authorized_user", "service_account", or "gce_metadata"
     std::string credentialType;
 
+    // The file the credentials were loaded from, if any (for error messages)
+    std::optional<std::filesystem::path> credentialFile;
+
     // For authorized_user
     std::string clientId;
     std::string clientSecret;
@@ -337,6 +339,7 @@ private:
             auto json = loadCredentialFile(*credPath);
             auto & obj = getObject(json);
 
+            credentialFile = *credPath;
             credentialType = getString(valueAt(obj, "type"));
 
             if (credentialType == "authorized_user") {
@@ -364,7 +367,7 @@ private:
             return;
         }
 
-        throw GcsAuthError(
+        throw GcsNoCredentials(
             "No GCS credentials found. Run 'gcloud auth application-default login', "
             "set GOOGLE_APPLICATION_CREDENTIALS, or run on GCE/Cloud Run/GKE");
     }
@@ -399,8 +402,19 @@ private:
         StringSource bodySource(body);
         req.data = FileTransferRequest::UploadData(bodySource);
 
-        auto result = getFileTransfer()->upload(req);
-        return parseTokenResponse(result.data);
+        try {
+            auto result = getFileTransfer()->upload(req);
+            return parseTokenResponse(result.data);
+        } catch (Error & e) {
+            /* Typically an HTTP 400 `invalid_grant`: the login was revoked, the
+               password changed, or the session expired. */
+            e.addTrace(
+                {},
+                "while refreshing the gcloud application default credentials in '%s'; "
+                "running 'gcloud auth application-default login' again may help",
+                credentialFile ? credentialFile->string() : "<unknown>");
+            throw;
+        }
     }
 
     GcsAccessToken refreshServiceAccountToken(std::string_view scope)
@@ -465,6 +479,8 @@ private:
 
 void GcsAuthError::anchor() {}
 
+void GcsNoCredentials::anchor() {}
+
 GcsCredentialProvider::~GcsCredentialProvider() {}
 
 GcsCredentialProviderImpl::~GcsCredentialProviderImpl() {}
@@ -473,8 +489,8 @@ std::optional<std::string> GcsCredentialProvider::maybeGetAccessToken(bool writa
 {
     try {
         return getAccessToken(writable);
-    } catch (GcsAuthError & e) {
-        debug("GCS credential lookup failed: %s", e.what());
+    } catch (GcsNoCredentials & e) {
+        debug("no GCS credentials, proceeding without authentication: %s", e.message());
         return std::nullopt;
     }
 }
