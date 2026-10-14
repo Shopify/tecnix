@@ -972,15 +972,27 @@ struct GitInputScheme : InputScheme
 
         auto originalRef = input.getRef();
         bool shallow = canDoShallow(input);
-        auto ref = originalRef ? *originalRef : getDefaultRef(settings, repoInfo, shallow);
-        input.attrs.insert_or_assign("ref", ref);
+
+        /* A remote repository's default branch only decides what to fetch
+           when no revision is given. When the revision is pinned, resolving
+           it costs a round trip to the remote (`git ls-remote --symref`) whose
+           answer is otherwise unused, and when the remote is unreachable it
+           costs a full network timeout before falling back to 'master'.
+           Every Git submodule without a `branch` in `.gitmodules` is fetched
+           this way, so skip the lookup. A local repository's default branch
+           is read from disk, so it is still resolved. */
+        std::optional<std::string> ref = originalRef;
+        if (!ref && (!input.getRev() || repoInfo.getPath()))
+            ref = getDefaultRef(settings, repoInfo, shallow);
+        if (ref)
+            input.attrs.insert_or_assign("ref", *ref);
 
         std::filesystem::path repoDir;
 
         if (auto repoPath = repoInfo.getPath()) {
             repoDir = *repoPath;
             if (!input.getRev())
-                input.attrs.insert_or_assign("rev", GitRepo::openRepo(repoDir, {})->resolveRef(ref).gitRev());
+                input.attrs.insert_or_assign("rev", GitRepo::openRepo(repoDir, {})->resolveRef(*ref).gitRev());
         } else {
             auto rev = input.getRev();
             auto repoUrl = std::get<ParsedURL>(repoInfo.location);
@@ -1011,7 +1023,10 @@ struct GitInputScheme : InputScheme
             // We need to set the origin so resolving submodule URLs works
             repo->setRemote("origin", repoUrl.to_string());
 
-            auto localRefFile = ref.compare(0, 5, "refs/") == 0 ? cacheDir / ref : cacheDir / "refs/heads" / ref;
+            /* Only unset when the revision is pinned (see above). */
+            std::optional<std::filesystem::path> localRefFile;
+            if (ref)
+                localRefFile = ref->compare(0, 5, "refs/") == 0 ? cacheDir / *ref : cacheDir / "refs/heads" / *ref;
 
             bool doFetch = false;
             time_t now = time(nullptr);
@@ -1026,7 +1041,7 @@ struct GitInputScheme : InputScheme
                 } else {
                     /* If the local ref is older than 'tarball-ttl' seconds, do a
                        git fetch to update the local ref to the remote ref. */
-                    auto st = maybeStat(localRefFile);
+                    auto st = maybeStat(*localRefFile);
                     doFetch = !st || !isCacheFileWithinTtl(settings, now, *st);
                 }
             }
@@ -1036,15 +1051,15 @@ struct GitInputScheme : InputScheme
                     return std::nullopt;
 
                 try {
-                    auto fetchRef = getAllRefsAttr(input)             ? "refs/*:refs/*"
-                                    : input.getRev()                  ? input.getRev()->gitRev()
-                                    : ref.compare(0, 5, "refs/") == 0 ? fmt("%1%:%1%", ref)
-                                    : ref == "HEAD"                   ? "HEAD:HEAD"
-                                                                      : fmt("%1%:%1%", "refs/heads/" + ref);
+                    auto fetchRef = getAllRefsAttr(input)              ? "refs/*:refs/*"
+                                    : input.getRev()                   ? input.getRev()->gitRev()
+                                    : ref->compare(0, 5, "refs/") == 0 ? fmt("%1%:%1%", *ref)
+                                    : *ref == "HEAD"                   ? "HEAD:HEAD"
+                                                                       : fmt("%1%:%1%", "refs/heads/" + *ref);
 
                     repo->fetch(repoUrl.to_string(), fetchRef, shallow);
                 } catch (Error & e) {
-                    if (!std::filesystem::exists(localRefFile))
+                    if (!localRefFile || !std::filesystem::exists(*localRefFile))
                         throw;
                     logError(e.info());
                     warn(
@@ -1054,26 +1069,35 @@ struct GitInputScheme : InputScheme
 
                 try {
                     if (!input.getRev())
-                        setWriteTime(localRefFile, now, now);
+                        setWriteTime(*localRefFile, now, now);
                 } catch (Error & e) {
-                    warn("could not update mtime for file %s: %s", PathFmt(localRefFile), e.info().msg);
+                    warn("could not update mtime for file %s: %s", PathFmt(*localRefFile), e.info().msg);
                 }
-                if (!originalRef && !storeCachedHead(repoUrl.to_string(), shallow, ref))
-                    warn("could not update cached head '%s' for '%s'", ref, repoInfo.locationToArg());
+                if (!originalRef && ref && !storeCachedHead(repoUrl.to_string(), shallow, *ref))
+                    warn("could not update cached head '%s' for '%s'", *ref, repoInfo.locationToArg());
             }
 
             if (rev) {
-                if (!repo->hasObject(*rev))
+                if (!repo->hasObject(*rev)) {
+                    if (!ref)
+                        throw Error(
+                            "Cannot find Git revision '%s' in repository '%s'! "
+                            "Please make sure that the " ANSI_BOLD "rev" ANSI_NORMAL
+                            " exists, or specify the " ANSI_BOLD "ref" ANSI_NORMAL " it is on or add " ANSI_BOLD
+                            "allRefs = true;" ANSI_NORMAL " to " ANSI_BOLD "fetchGit" ANSI_NORMAL ".",
+                            rev->gitRev(),
+                            repoInfo.locationToArg());
                     throw Error(
                         "Cannot find Git revision '%s' in ref '%s' of repository '%s'! "
                         "Please make sure that the " ANSI_BOLD "rev" ANSI_NORMAL " exists on the " ANSI_BOLD
                         "ref" ANSI_NORMAL " you've specified or add " ANSI_BOLD "allRefs = true;" ANSI_NORMAL
                         " to " ANSI_BOLD "fetchGit" ANSI_NORMAL ".",
                         rev->gitRev(),
-                        ref,
+                        *ref,
                         repoInfo.locationToArg());
+                }
             } else
-                input.attrs.insert_or_assign("rev", repo->resolveRef(ref).gitRev());
+                input.attrs.insert_or_assign("rev", repo->resolveRef(*ref).gitRev());
 
             // cache dir lock is removed at scope end; we will only use read-only operations on specific revisions in
             // the remainder
@@ -1189,7 +1213,11 @@ struct GitInputScheme : InputScheme
                         // should be the same name as the current branch in the current repository.
                         // https://git-scm.com/docs/gitmodules
                         if (submodule.branch == ".") {
-                            attrs.insert_or_assign("ref", ref);
+                            /* Unset when the top-level revision is pinned; the
+                               submodule's revision is always pinned, so it
+                               needs no branch either. */
+                            if (ref)
+                                attrs.insert_or_assign("ref", *ref);
                         } else {
                             attrs.insert_or_assign("ref", submodule.branch);
                         }
