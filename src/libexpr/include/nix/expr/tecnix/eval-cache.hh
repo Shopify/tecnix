@@ -33,8 +33,9 @@ using DependencyClosure = std::vector<DependencyEntry>;
 
 /**
  * Per-run token for the thread-local fingerprint memo: fingerprints are
- * memoized per unique path for the lifetime of one of these, so validation
- * cost scales with unique paths, not total closure entries.
+ * memoized per unique path, and data-file observations per unique (path,
+ * line), for the lifetime of one of these, so validation cost scales with
+ * unique observations, not total closure entries.
  */
 struct DependencyFingerprintCache
 {
@@ -43,12 +44,31 @@ struct DependencyFingerprintCache
     DependencyFingerprintCache();
 };
 
+/** The current fingerprint of the object at `path` (`git:<oid>;mode=<m>`, `absent`, ...). */
 std::optional<std::string>
 dependencyFingerprint(ref<SourceAccessor> accessor, std::string_view path, DependencyFingerprintCache & cache);
 
-/** Fingerprint every path, throwing if any path cannot be certified. */
+/**
+ * Whether the tree `accessor` serves still satisfies a stored fingerprint for
+ * `path`: an object fingerprint must equal the current one; a `query:`
+ * fingerprint (see data-query.hh) holds when every observation line still gets
+ * the answer it records. Anything unreadable or unknown does not hold.
+ */
+bool dependencyFingerprintHolds(
+    ref<SourceAccessor> accessor,
+    std::string_view path,
+    std::string_view fingerprint,
+    DependencyFingerprintCache & cache);
+
+/**
+ * The closure of a set of observations: plain paths fingerprint as the
+ * objects at them; data observations (`<file>\0<line>`, see data-query.hh)
+ * are grouped by file into one `query:` fingerprint each, unless the file
+ * was also observed whole, in which case its object fingerprint subsumes
+ * them. Throws if any path cannot be certified. Sorted by path.
+ */
 DependencyClosure dependencyFingerprints(
-    ref<SourceAccessor> accessor, const std::vector<std::string> & paths, DependencyFingerprintCache & cache);
+    ref<SourceAccessor> accessor, const std::vector<std::string> & observations, DependencyFingerprintCache & cache);
 
 /**
  * Reserved cache key under which target discovery stores its closure and

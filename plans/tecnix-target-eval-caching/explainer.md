@@ -177,6 +177,7 @@ git:<sha>;mode=<mode>                  clean file or directory, at this commit's
 git:<sha>;mode=<mode>;dirty=<sha256>   git base, plus a hash of uncommitted content beneath the path
 absent                                 the path does not currently exist
 absent;dirty=<sha256>                  no git object exists, but uncommitted content does
+query:<line>\n<line>…                  a data file answers these queries this way (§4.2)
 ```
 
 This path-level fingerprinting is intentionally conservative. There is room to refine the closure model from "this path's full fingerprint" toward "the specific property of this path that evaluation observed." For example, a directory listing depends on the complete child name/type map it returned — which also proves that no other child names were present — not necessarily on the full tree object ID or on every descendant's content. The current tree fingerprint is exact enough to avoid stale cache hits, but it can over-invalidate; a future closure format could record operation-specific observations such as existence, file type, executable bit, symlink target, directory child name/type sets, or file contents separately.
@@ -202,23 +203,26 @@ This is the precise sense in which the system works across commits. After a comm
 
 The same property makes the system fail-safe. A row is never believed on the strength of its key; it is believed only when proven. Format changes, corruption, and storage defects therefore all degrade into cache misses, never into wrong answers. In practice, the difference between a cold run and a warm run is the difference between roughly a minute of full tracked evaluation and well under a second — several orders of magnitude, with the gap consisting precisely of "all of evaluation" versus "fingerprint checks and output construction."
 
-### 4.2 Synthetic keys: parts of the manifest
+### 4.2 Fingerprints are observations; `query:` records answers, not objects
 
-Not every closure key is a file. A target that looks up one zone in `.meta/manifest.json` depends on that zone's entry, not on the whole file, and recording the file would invalidate every such target whenever any zone is added or renumbered. The manifest builtins therefore record *synthetic* keys, each naming one observation of the manifest. This is the complete list:
+A fingerprint records what evaluation observed about a path, and a closure holds while the tree still yields the same observations. `git:<oid>;mode=<m>` is the object observed at the path; `absent` records that none was. For a *data file* that a target only queried, the object is more than the target observed: a target that looks up one zone in `.meta/manifest.json` depends on that zone's entry, not on the whole file, and recording the file's oid would invalidate every such target whenever any zone is added or renumbered. `builtins.tecnixQueryFile` therefore records the question it asked and the answer it saw, and the file's closure entry becomes a list of such observations:
 
-| key | recorded by | fingerprint changes exactly when |
-|---|---|---|
-| `.meta/manifest.json#<zonePath>` | `builtins.tectonixManifestEntry zonePath` | the JSON value of that zone's entry (any field, not only `id`) changes, appears, or disappears |
-| `.meta/manifest.json#keys` | `builtins.tectonixManifestKeys` | the set of zone paths (manifest keys) changes |
-| `.meta/manifest.json#id/<zoneId>` | `builtins.tectonixManifestIdToPath zoneId` | a different zone path, or none, is the first in sorted order whose entry has the id `zoneId` |
+```
+".meta/manifest.json": "query:json\tget\t//areas/tools/dev\t{\"id\":\"W-c10e84\"}\njson\thas\t//areas\ttrue"
+```
 
-The builtins read the manifest through the same accessor as every other tracked read (§7), so a value and the fingerprint of its key always describe the same manifest. The grammar is exact:
+The key is still the repo path, so everything that only knows paths keeps working: a change to the file still maps to every target that read or queried it (`tec query affected-targets` is conservative, not wrong), and the row format is untouched. What changes is how validation proves the entry: an object fingerprint must equal the current one; a `query:` fingerprint holds when every line, re-asked of the file as the current tree serves it, gets the recorded answer. A target that both queried a file and read it whole records the oid alone, which implies every answer.
 
-- A key is synthetic if and only if it begins with `.meta/manifest.json#`. Every other key is a repo-relative path, even one that contains `#`; splitting arbitrary keys at `#` is wrong.
-- The fragment after that prefix is `keys`, or `id/` followed by a zone id (everything after `id/`, verbatim), or a zone path, which begins with `//`. `tectonixManifestEntry` given an argument that does not begin with `//` records the whole file, `.meta/manifest.json`, so the three forms never overlap.
-- A synthetic key depends on the file `.meta/manifest.json`. A consumer of closure keys (for example, one mapping changed files to affected targets) that cannot interpret a fragment must treat any change to that file as affecting the key; one that can compares the named observation of the manifest before and after the change.
+The format, exactly (`src/libexpr/include/nix/expr/tecnix/data-query.hh` is normative):
 
-Reading the whole manifest (the `unsafeTectonixInternalManifest*` builtins, or `builtins.readFile` of the file) still records the plain path `.meta/manifest.json`.
+- `query:` followed by observation lines separated by `\n`, deduplicated and sorted bytewise.
+- A line is `<format>\t<op>\t<fixed args…>\t<at segment…>\t<answer>`: `json` or `toml`; `get`, `has`, `keys` or `find` (`find` carries `where` and `value` before the segments); the object keys walked from the root; and the answer last, so a variable number of segments is unambiguous.
+- An answer is `absent`, the compact JSON of the result when that is at most 64 bytes, or `sha256:<hex>` of it otherwise. Compact JSON escapes control characters, and the builtin rejects string arguments containing tab, newline or NUL, so a line is split, never unescaped.
+- Validation and evaluation compute answers with the same function on the same parsed document, so they cannot disagree. A line that does not parse, an op or format this evaluator does not know, or a file that no longer parses, does not hold: a miss, never a stale hit.
+
+The file is parsed once per evaluation (shared by every query on it) and once per validation run (shared across threads); each distinct `(path, line)` is checked once per run, so the cost scales with unique observations, like path fingerprints. Reads of the queried file record nothing themselves: the query is the observation. A missing file answers every query as an empty document would, and that answer is recorded, so a target that observed a file's absence is invalidated when the file appears with the key it asked about, and not before.
+
+This is the first instance of the refinement anticipated above, from "this path's full fingerprint" toward "the property of this path that evaluation observed". Reading the whole manifest (the `unsafeTectonixInternalManifest*` builtins, or `builtins.readFile` of the file) still records the object fingerprint.
 
 ---
 

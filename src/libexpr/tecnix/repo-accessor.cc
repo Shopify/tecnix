@@ -778,20 +778,30 @@ ref<SourceAccessor> getTecnixRepoAccessor(EvalState & state)
     return *tecnixData(state)->tecnixRepoAccessor;
 }
 
-const nlohmann::json & getTecnixManifestJson(EvalState & state)
+std::optional<std::string> readSourceFileUnrecorded(SourceAccessor & accessor, const CanonPath & path)
 {
-    std::call_once(tecnixData(state)->tecnixManifestJsonFlag, [&state]() {
-        // getTecnixRepoAccessor always builds a TecnixSourceAccessor.
-        auto & accessor = static_cast<TecnixSourceAccessor &>(*getTecnixRepoAccessor(state));
-        auto content = accessor.readFileUnrecorded(CanonPath(".meta/manifest.json"));
-        try {
-            tecnixData(state)->tecnixManifestJson = std::make_unique<nlohmann::json>(nlohmann::json::parse(content));
-        } catch (nlohmann::json::parse_error & e) {
-            throw Error(
-                "cannot parse '.meta/manifest.json' at commit '%s': %s", requireTectonixGitSha(state), e.what());
-        }
-    });
-    return *tecnixData(state)->tecnixManifestJson;
+    // Stats are untracked by design (see TecnixSourceAccessor::maybeLstat).
+    auto st = accessor.maybeLstat(path);
+    if (!st || st->type != SourceAccessor::tRegular)
+        return std::nullopt;
+    if (auto * tecnix = dynamic_cast<TecnixSourceAccessor *>(&accessor))
+        return tecnix->readFileUnrecorded(path);
+    return accessor.readFile(path);
+}
+
+std::optional<CanonPath> tecnixRepoRelativePath(EvalState & state, const SourcePath & path)
+{
+    // The mount is created by `tecnixTargets` before it imports the resolver,
+    // on the calling thread, so by the time any evaluation can ask, this
+    // optional is settled.
+    auto & mount = tecnixData(state)->tecnixRepoMountStorePath;
+    auto * accessor = &*path.accessor;
+    if (!mount || (accessor != &*state.rootFS && accessor != &*state.storeFS))
+        return std::nullopt;
+    auto mountPath = CanonPath(state.store->printStorePath(*mount));
+    if (!path.path.isWithin(mountPath))
+        return std::nullopt;
+    return path.path.removePrefix(mountPath);
 }
 
 StorePath mountTecnixRepoAccessor(EvalState & state)

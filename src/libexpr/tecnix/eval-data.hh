@@ -49,6 +49,9 @@ struct EvalTecnixModuleCacheEntry
 
 using EvalTecnixModuleCache = boost::concurrent_flat_map<std::string, EvalTecnixModuleCacheEntry>;
 
+/** Parsed data files (`std::optional<nlohmann::json>`, see data-query.hh). */
+using EvalDataFileCache = boost::concurrent_flat_map<std::string, std::shared_ptr<const std::optional<nlohmann::json>>>;
+
 /**
  * A `builtins.tecnixMemoize` table key: the memoized function, identified by
  * the address of its value, and the key it was called with. `Lookup` is the
@@ -176,10 +179,13 @@ struct EvalState::TecnixEvalData
     mutable std::once_flag tecnixRepoAccessorFlag;
     mutable std::optional<ref<SourceAccessor>> tecnixRepoAccessor;
 
-    /** `.meta/manifest.json` as `tecnixRepoAccessor` serves it, parsed
-        (thread-safe via once_flag). */
-    mutable std::once_flag tecnixManifestJsonFlag;
-    mutable std::unique_ptr<nlohmann::json> tecnixManifestJson;
+    /**
+     * Data files `builtins.tecnixQueryFile` has read, parsed once per
+     * evaluation and shared by every query on them, keyed by the file's
+     * `SourcePath` and format (`<path>\0<format>`). Reads record nothing;
+     * each query records its own observation.
+     */
+    const ref<EvalDataFileCache> dataFileCache = make_ref<EvalDataFileCache>();
 
     /**
      * Virtual store path where the Tecnix repo-wide accessor is lazily mounted.

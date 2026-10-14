@@ -17,12 +17,24 @@ const std::string & getManifestContent(const EvalState & state);
 const nlohmann::json & getManifestJson(const EvalState & state);
 StorePath getLegacyTectonixZoneStorePath(EvalState & state, std::string_view zonePath);
 ref<SourceAccessor> getTecnixRepoAccessor(EvalState & state);
+
 /**
- * `.meta/manifest.json` as the Tecnix repo accessor serves it (the view that
- * also fingerprints Tecnix dependencies), parsed once per evaluation. The
- * read records nothing: callers record the part of the manifest they observe.
+ * The regular file at `path`, read without recording a Tecnix dependency on
+ * it, or nullopt if there is no regular file there. For a caller that records
+ * its own, finer-grained observation of the file instead (`tecnixQueryFile`,
+ * and the cache validator checking such an observation). Through a Tecnix
+ * repo accessor the read is genuinely unrecorded; any other accessor records
+ * whatever its reads record.
  */
-const nlohmann::json & getTecnixManifestJson(EvalState & state);
+std::optional<std::string> readSourceFileUnrecorded(SourceAccessor & accessor, const CanonPath & path);
+
+/**
+ * Where `path` lies in the Tecnix repo, if it is under the repo accessor's
+ * mount (`mountTecnixRepoAccessor`): the repo-relative path, which is what
+ * tracked reads of it record and what fingerprints are keyed by. Nullopt
+ * for any other path, and when no repo accessor has been mounted.
+ */
+std::optional<CanonPath> tecnixRepoRelativePath(EvalState & state, const SourcePath & path);
 
 /** Resolve a checkout's HEAD to a commit SHA (throws if it has none). */
 std::string resolveCheckoutHeadRev(const std::string & checkoutPath);

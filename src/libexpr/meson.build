@@ -188,6 +188,7 @@ sources = files(
   'root-value.cc',
   'search-path.cc',
   'symbol-table.cc',
+  'tecnix/data-query.cc',
   'tecnix/eval-cache.cc',
   'tecnix/repo-accessor.cc',
   'tecnix/source-accessors.cc',

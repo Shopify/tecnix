@@ -83,6 +83,7 @@ Use this as a review checklist for source-dependency tracking and target-eval ca
 
 - **Public dependency output remains path-to-fingerprint data.**
   - Internal storage may use IDs/dictionaries, but the public dependency shape remains compact `path = fingerprint` entries.
+  - A fingerprint records an observation of the path, not necessarily its object id: `query:` fingerprints record the answers a data file gave (explainer §4.2). Validation must prove the observed result by recomputing it from the current tree with the same code evaluation used, and anything it cannot interpret is a miss.
 
 ## Public API boundaries
 

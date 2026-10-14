@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # builtins.tecnixMemoize: `g = builtins.tecnixMemoize f` is `f`, with each
 # `f k` evaluated once per evaluation and shared. What tracked calls record, and
-# that tracked and untracked results stay apart, is in manifest-tracking.sh.
+# that tracked and untracked results stay apart, is in data-query.sh.
 
 # shellcheck disable=SC2016
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"

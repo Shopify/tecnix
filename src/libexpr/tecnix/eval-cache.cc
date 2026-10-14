@@ -7,6 +7,7 @@
 
 #include "nix/expr/tecnix/eval-cache.hh"
 #include "nix/expr/tecnix/eval-cache-row.hh"
+#include "nix/expr/tecnix/data-query.hh"
 
 #include "nix/expr/eval-inline.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
@@ -26,11 +27,10 @@
 #include <atomic>
 #include <ctime>
 #include <limits>
+#include <map>
 #include <string>
 #include <string_view>
 #include <variant>
-#include <nlohmann/json.hpp>
-#include "nix/util/hash.hh"
 #include <vector>
 
 namespace nix {
@@ -47,13 +47,17 @@ DependencyFingerprintCache::DependencyFingerprintCache()
 {
 }
 
+/** A data file as this run's tree serves it; null if it exists but does not parse. */
+using DependencyDataFile = std::shared_ptr<const ParsedDataFile>;
+
 struct DependencyFingerprintThreadLocalCache
 {
     uint64_t generation = 0;
     boost::unordered_flat_map<std::string, std::optional<std::string>, StringViewHash, std::equal_to<>> fingerprints;
-    /** Cached parsed manifest JSON for synthetic path fingerprinting (per-batch). */
-    std::optional<nlohmann::json> cachedManifest;
-    bool manifestChecked = false;
+    /** Whether a data observation still holds, keyed by `<path>\0<line>`. */
+    boost::unordered_flat_map<std::string, bool, StringViewHash, std::equal_to<>> observations;
+    /** Parsed data files, keyed by `<path>\0<format>`. */
+    std::map<std::string, DependencyDataFile, std::less<>> dataFiles;
 
     DependencyFingerprintThreadLocalCache()
     {
@@ -567,17 +571,6 @@ struct TecnixEvalCache
             return CurrentFingerprints{.accessor = accessor, .fingerprintCache = &fingerprintCache};
         }
 
-        std::optional<std::string_view> currentFingerprint(uint32_t pathId, CurrentFingerprints & current) const
-        {
-            auto p = path(pathId);
-            if (!p)
-                return std::nullopt;
-            auto cached = dependencyFingerprintCached(current.accessor, *p, *current.fingerprintCache);
-            if (!cached || !*cached)
-                return std::nullopt;
-            return std::string_view(**cached);
-        }
-
         bool candidateMatches(uint32_t candidateIndex, CurrentFingerprints & currentFingerprints) const
         {
             auto pairStart = candidatePairStart(candidateIndex);
@@ -593,9 +586,11 @@ struct TecnixEvalCache
                 auto fingerprintId = pairFingerprint(pairIndex);
                 if (!pathId || !fingerprintId || *pathId >= pathCount || *fingerprintId >= fingerprintCount)
                     return false;
-                auto currentFp = currentFingerprint(*pathId, currentFingerprints);
+                auto p = path(*pathId);
                 auto expectedFp = fingerprint(*fingerprintId);
-                if (!currentFp || !expectedFp || *currentFp != *expectedFp)
+                if (!p || !expectedFp
+                    || !dependencyFingerprintHolds(
+                        currentFingerprints.accessor, *p, *expectedFp, *currentFingerprints.fingerprintCache))
                     return false;
             }
             return true;
@@ -1356,46 +1351,10 @@ static DependencyFingerprintThreadLocalCache & getDependencyFingerprintThreadCac
     if (threadCache.generation != cache.generation) {
         threadCache.generation = cache.generation;
         threadCache.fingerprints.clear();
-        // The parsed manifest belongs to the accessor this generation reads.
-        threadCache.cachedManifest.reset();
-        threadCache.manifestChecked = false;
+        threadCache.observations.clear();
+        threadCache.dataFiles.clear();
     }
     return threadCache;
-}
-
-static std::optional<std::string> manifestPathFingerprint(const nlohmann::json & manifest, std::string_view suffix)
-{
-    constexpr std::string_view keysToken = "keys";
-    if (suffix == keysToken) {
-        // Fingerprint the sorted key list
-        std::vector<std::string> keys;
-        keys.reserve(manifest.size());
-        for (auto & [k, v] : manifest.items())
-            keys.push_back(k);
-        std::sort(keys.begin(), keys.end());
-        std::string concatenated;
-        for (auto & k : keys)
-            concatenated += k + "\n";
-        auto hash = hashString(HashAlgorithm::SHA256, concatenated);
-        return "manifest-keys:" + hash.to_string(HashFormat::Base64, false);
-    }
-    constexpr std::string_view idPrefix = "id/";
-    if (suffix.starts_with(idPrefix)) {
-        auto zoneId = suffix.substr(idPrefix.size());
-        for (auto & [path, value] : manifest.items()) {
-            if (value.contains("id") && value.at("id").is_string() && value.at("id").get<std::string>() == zoneId)
-                return "manifest-id:" + std::string(zoneId) + "=" + path;
-        }
-        return "manifest-id:" + std::string(zoneId) + "=absent";
-    }
-    // suffix is a zone path like "//zone/path"
-    auto it = manifest.find(std::string(suffix));
-    if (it == manifest.end())
-        return "manifest-entry:" + std::string(suffix) + "=absent";
-    // Entries are { "id": "W-xxxxxx" }; fingerprint from the entry JSON
-    auto entryStr = it->dump();
-    auto hash = hashString(HashAlgorithm::SHA256, entryStr);
-    return "manifest-entry:" + std::string(suffix) + "=" + hash.to_string(HashFormat::Base64, false);
 }
 
 static const std::optional<std::string> *
@@ -1407,26 +1366,7 @@ dependencyFingerprintCached(ref<SourceAccessor> accessor, std::string_view path,
     if (it != threadCache.fingerprints.end())
         return &it->second;
 
-    std::optional<std::string> fp;
-    constexpr std::string_view manifestPrefix = ".meta/manifest.json#";
-    if (path.starts_with(manifestPrefix)) {
-        // Synthetic manifest path: fingerprint from manifest content, not the
-        // filesystem. This lets per-entry tracking avoid whole-file invalidation.
-        if (!threadCache.manifestChecked) {
-            threadCache.manifestChecked = true;
-            try {
-                auto content = accessor->readFile(CanonPath(".meta/manifest.json"));
-                threadCache.cachedManifest = nlohmann::json::parse(content);
-            } catch (...) {
-                threadCache.cachedManifest = std::nullopt;
-            }
-        }
-        if (threadCache.cachedManifest)
-            fp = manifestPathFingerprint(*threadCache.cachedManifest, path.substr(manifestPrefix.size()));
-    } else {
-        auto [_, rawFp] = accessor->getFingerprint(CanonPath(path));
-        fp = std::move(rawFp);
-    }
+    auto [_, fp] = accessor->getFingerprint(CanonPath(path));
     auto inserted = threadCache.fingerprints.emplace(std::string(path), std::move(fp)).first;
     return &inserted->second;
 }
@@ -1440,17 +1380,106 @@ dependencyFingerprint(ref<SourceAccessor> accessor, std::string_view path, Depen
     return *fp;
 }
 
-DependencyClosure dependencyFingerprints(
-    ref<SourceAccessor> accessor, const std::vector<std::string> & paths, DependencyFingerprintCache & cache)
+/**
+ * The data file at `path` as this run's tree serves it, parsed as `format`,
+ * once per thread per run. The read records nothing: the observations being
+ * checked are the observation of this file, and recording the whole file
+ * here would put it back into the closure of whatever evaluation is
+ * validating (#80's memo rows validate inside a tracked evaluation).
+ */
+static DependencyDataFile dependencyDataFile(
+    ref<SourceAccessor> accessor,
+    std::string_view path,
+    DataFormat format,
+    DependencyFingerprintThreadLocalCache & threadCache)
 {
+    std::string key(path);
+    key += '\0';
+    key += dataFormatName(format);
+    if (auto it = threadCache.dataFiles.find(key); it != threadCache.dataFiles.end())
+        return it->second;
+
+    DependencyDataFile file;
+    try {
+        auto content = readSourceFileUnrecorded(*accessor, CanonPath(path));
+        file = std::make_shared<const ParsedDataFile>(
+            content ? ParsedDataFile(parseDataFile(format, *content)) : ParsedDataFile());
+    } catch (DataFileParseError & e) {
+        debug("tecnix: data file '%s' does not parse as %s: %s", path, dataFormatName(format), e.what());
+    }
+    threadCache.dataFiles.emplace(std::move(key), file);
+    return file;
+}
+
+/** Whether one observation of the data file at `path` still holds. */
+static bool dataObservationHolds(
+    ref<SourceAccessor> accessor, std::string_view path, std::string_view line, DependencyFingerprintCache & cache)
+{
+    auto & threadCache = getDependencyFingerprintThreadCache(cache);
+
+    static thread_local std::string memoKey;
+    memoKey.clear();
+    appendDataAccess(memoKey, path, line);
+    if (auto it = threadCache.observations.find(memoKey); it != threadCache.observations.end())
+        return it->second;
+
+    bool holds = false;
+    if (auto observation = parseDataObservation(line)) {
+        if (auto file = dependencyDataFile(accessor, path, observation->query.format, threadCache)) {
+            static thread_local std::string answer;
+            answer.clear();
+            appendDataQueryAnswer(answer, evaluateDataQuery(*file, observation->query));
+            holds = answer == observation->answer;
+        }
+    }
+    threadCache.observations.emplace(memoKey, holds);
+    return holds;
+}
+
+bool dependencyFingerprintHolds(
+    ref<SourceAccessor> accessor,
+    std::string_view path,
+    std::string_view fingerprint,
+    DependencyFingerprintCache & cache)
+{
+    auto lines = dataQueryFingerprintLines(fingerprint);
+    if (!lines) {
+        auto current = dependencyFingerprintCached(accessor, path, cache);
+        return current && *current && **current == fingerprint;
+    }
+    for (auto line : *lines)
+        if (!dataObservationHolds(accessor, path, line, cache))
+            return false;
+    return true;
+}
+
+DependencyClosure dependencyFingerprints(
+    ref<SourceAccessor> accessor, const std::vector<std::string> & observations, DependencyFingerprintCache & cache)
+{
+    // Data observations by file; a file also observed whole drops out, since
+    // its object fingerprint implies every answer.
+    std::map<std::string_view, std::vector<std::string_view>> queried;
+    std::vector<std::string_view> paths;
+    for (auto & observation : observations) {
+        if (auto data = splitDataAccess(observation))
+            queried[data->file].push_back(data->line);
+        else
+            paths.push_back(observation);
+    }
+
     DependencyClosure result;
-    result.reserve(paths.size());
-    for (auto & path : paths) {
+    result.reserve(paths.size() + queried.size());
+    for (auto path : paths) {
         auto fp = dependencyFingerprint(accessor, path, cache);
         if (!fp)
             throw Error("failed to fingerprint Tecnix dependency path '%s'", path);
-        result.push_back({path, std::move(*fp)});
+        result.push_back({std::string(path), std::move(*fp)});
+        queried.erase(path);
     }
+    for (auto & [file, lines] : queried)
+        result.push_back({std::string(file), dataQueryFingerprint(std::move(lines))});
+
+    std::sort(result.begin(), result.end(), [](auto & a, auto & b) { return a.path < b.path; });
     return result;
 }
 

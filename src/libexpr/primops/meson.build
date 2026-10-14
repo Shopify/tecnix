@@ -10,6 +10,7 @@ sources += files(
   'fetchMercurial.cc',
   'fetchTree.cc',
   'fromTOML.cc',
+  'tecnix-query.cc',
   'tecnix.cc',
   'tectonix.cc',
 )

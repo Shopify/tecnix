@@ -5,7 +5,7 @@ suites += {
     'base-env.sh',
     'builtins.sh',
     'gc.sh',
-    'manifest-tracking.sh',
+    'data-query.sh',
     'ingestion-stats.sh',
     'memoize.sh',
   ],
