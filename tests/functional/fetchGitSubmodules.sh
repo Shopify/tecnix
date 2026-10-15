@@ -420,3 +420,63 @@ test_legacy_export_with_submodules() {
       | grepQuiet "NAR hash mismatch"
 }
 test_legacy_export_with_submodules
+
+# A pinned revision needs no default branch: fetching one from a remote must not
+# ask the remote for its HEAD (`git ls-remote --symref`), neither for the
+# top-level repository nor for a submodule without a `branch` in `.gitmodules`.
+# Each of those lookups is a network round trip, and a full timeout when the
+# remote does not answer.
+test_pinned_rev_skips_default_branch_lookup() {
+  local repoA=$TEST_ROOT/pinnedRevA
+  local repoB=$TEST_ROOT/pinnedRevB
+  local repoC=$TEST_ROOT/pinnedRevC
+  rm -rf "$repoA" "$repoB" "$repoC" "$TEST_HOME"/.cache/nix
+
+  createGitRepo "$repoC"
+  addGitContent "$repoC"
+
+  createGitRepo "$repoB"
+  git -C "$repoB" submodule add "$repoC" c
+  addGitContent "$repoB"
+
+  createGitRepo "$repoA"
+  git -C "$repoA" submodule add "$repoB" b
+  addGitContent "$repoA"
+
+  local rev
+  rev=$(git -C "$repoA" rev-parse HEAD)
+
+  # Record every git invocation Nix makes.
+  local shimDir=$TEST_ROOT/pinnedRevGitShim
+  local calls=$TEST_ROOT/pinnedRevGitCalls
+  local realGit
+  realGit=$(type -P git)
+  mkdir -p "$shimDir"
+  rm -f "$calls"
+  cat > "$shimDir/git" <<SHIM
+#!/bin/sh
+echo "\$*" >> "$calls"
+exec "$realGit" "\$@"
+SHIM
+  chmod +x "$shimDir/git"
+
+  local out
+  out=$(_NIX_FORCE_HTTP=1 PATH="$shimDir:$PATH" nix eval --impure --raw --expr \
+    "(builtins.fetchGit { url = \"file://$repoA\"; rev = \"$rev\"; submodules = true; }).outPath")
+  test -e "$out"/content
+  test -e "$out"/b/content
+  test -e "$out"/b/c/content
+
+  # The shim saw the fetches, so it was on the path Nix used ...
+  grepQuiet fetch "$calls"
+  # ... and none of them looked up a default branch.
+  grepQuietInverse ls-remote "$calls"
+
+  # Without a pinned revision the default branch is still looked up.
+  rm -f "$calls"
+  rm -rf "$TEST_HOME"/.cache/nix
+  _NIX_FORCE_HTTP=1 PATH="$shimDir:$PATH" nix eval --impure --raw --expr \
+    "(builtins.fetchGit { url = \"file://$repoA\"; }).outPath" >/dev/null
+  grepQuiet ls-remote "$calls"
+}
+test_pinned_rev_skips_default_branch_lookup
