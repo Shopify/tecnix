@@ -84,7 +84,11 @@ Strings EvalSettings::getDefaultNixPath()
 {
     Strings res;
     auto add = [&](const std::filesystem::path & p, const std::string & s = std::string()) {
-        if (std::filesystem::exists(p)) {
+        /* A directory the filesystem will not even stat (EACCES, or EPERM
+           from a sandbox that excludes /nix/var/nix/profiles) is not a
+           default search path; it is not a reason to refuse to evaluate. */
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) {
             if (s.empty()) {
                 res.push_back(p.string());
             } else {

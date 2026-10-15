@@ -7,8 +7,10 @@
 #include "nix/store/async-path-writer.hh"
 #include "nix/store/derivations.hh"
 #include "nix/store/local-store.hh"
+#include "nix/store/globals.hh"
 #include "nix/util/file-system.hh"
 #include "nix/util/finally.hh"
+#include "nix/util/users.hh"
 
 namespace nix {
 
@@ -151,6 +153,35 @@ TEST(nix_isAllowedURI, non_scheme_colon)
     ASSERT_TRUE(isAllowedURI("https://foo/bar:", allowed));
     ASSERT_TRUE(isAllowedURI("https://foo/bar:/baz", allowed));
     ASSERT_FALSE(isAllowedURI("https://foo/bar:baz", allowed));
+}
+
+/* The default search path lists the channel directories that exist. One the
+   filesystem refuses to stat (here EACCES, through a parent without search
+   permission; EPERM from a sandbox is the same to exists()) is left out, and
+   must not make every impure evaluation fail. */
+TEST(EvalSettings, getDefaultNixPathSkipsUnreadableChannels)
+{
+    if (isRootUser())
+        GTEST_SKIP() << "root is never refused a stat";
+
+    auto tmp = createTempDir();
+    auto root = tmp / "state" / "profiles" / "per-user" / "root";
+    createDirs(root);
+    std::filesystem::permissions(root, std::filesystem::perms::none);
+    Finally cleanup([&] {
+        std::filesystem::permissions(root, std::filesystem::perms::owner_all);
+        deletePath(tmp);
+    });
+
+    auto savedStateDir = settings.nixStateDir;
+    Finally restoreStateDir([&] { settings.nixStateDir = savedStateDir; });
+    settings.nixStateDir = tmp / "state";
+
+    auto channels = (root / "channels").string();
+    Strings res;
+    ASSERT_NO_THROW(res = EvalSettings::getDefaultNixPath());
+    for (auto & entry : res)
+        ASSERT_THAT(entry, testing::Not(testing::HasSubstr(channels)));
 }
 
 class EvalStateTest : public LibExprTest
