@@ -31,6 +31,20 @@
 
 namespace nix::daemon {
 
+#ifndef _WIN32
+static std::optional<Client> currentClient;
+
+void setClient(std::optional<Client> client)
+{
+    currentClient = client;
+}
+
+std::optional<Client> getClient()
+{
+    return currentClient;
+}
+#endif
+
 Sink & operator<<(Sink & sink, const Logger::Fields & fields)
 {
     sink << fields.size();

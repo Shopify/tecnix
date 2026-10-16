@@ -128,10 +128,27 @@ protected:
 
     bool fileExists(const std::string & path) override;
 
+    /**
+     * Whether a failed transfer means that the file doesn't exist. S3
+     * answers 403 for a missing object when the bucket isn't listable, so
+     * by default a 403 counts as missing. A store that answers 403 only
+     * for denied access overrides this, so that a credential problem is
+     * reported rather than taken for a cache miss.
+     */
+    virtual bool isMissing(const FileTransferError & e) const
+    {
+        return e.error == FileTransfer::NotFound || e.error == FileTransfer::Forbidden;
+    }
+
     void upsertFile(
         const std::string & path, RestartableSource & source, const std::string & mimeType, uint64_t sizeHint) override;
 
-    FileTransferRequest makeRequest(std::string_view path);
+    /**
+     * Create a request for the given path (a URL relative to the cache
+     * URI). Subclasses can override this to rewrite the URL or add
+     * authentication.
+     */
+    virtual FileTransferRequest makeRequest(std::string_view path);
 
     /**
      * Uploads data to the binary cache.
