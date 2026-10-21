@@ -1,12 +1,12 @@
 #include "nix/cmd/command.hh"
-#include "nix/cmd/installables.hh"
 #include "nix/main/common-args.hh"
 #include "nix/main/shared.hh"
 #include "nix/store/store-api.hh"
+#include "nix/store/local-fs-store.hh"
 
 #include <nlohmann/json.hpp>
 
-namespace nix {
+using namespace nix;
 
 /* This serialization code is diferent from the canonical (single)
    derived path serialization because:
@@ -106,12 +106,19 @@ builtPathsWithResultToJSON(const std::vector<BuiltPathWithResult> & buildables, 
     return res;
 }
 
-struct CmdBuild : InstallablesCommand, MixOutLinkByDefault, MixDryRun, MixJSON, MixProfile, MixPrintOutPaths
+struct CmdBuild : InstallablesCommand, MixOutLinkByDefault, MixDryRun, MixJSON, MixProfile
 {
+    bool printOutputPaths = false;
     BuildMode buildMode = bmNormal;
 
     CmdBuild()
     {
+        addFlag({
+            .longName = "print-out-paths",
+            .description = "Print the resulting output paths",
+            .handler = {&printOutputPaths, true},
+        });
+
         addFlag({
             .longName = "rebuild",
             .description = "Rebuild an already built package and compare the result to the existing store paths.",
@@ -154,11 +161,23 @@ struct CmdBuild : InstallablesCommand, MixOutLinkByDefault, MixDryRun, MixJSON, 
         if (json)
             logger->cout("%s", builtPathsWithResultToJSON(buildables, *store).dump());
 
-        auto builtPaths = toBuiltPaths(buildables);
+        createOutLinksMaybe(buildables, store);
 
-        createOutLinksMaybe(builtPaths, store);
-
-        printOutPathsMaybe(builtPaths, store);
+        if (printOutputPaths) {
+            logger->stop();
+            for (auto & buildable : buildables) {
+                std::visit(
+                    overloaded{
+                        [&](const BuiltPath::Opaque & bo) { logger->cout(store->printStorePath(bo.path)); },
+                        [&](const BuiltPath::Built & bfd) {
+                            for (auto & output : bfd.outputs) {
+                                logger->cout(store->printStorePath(output.second));
+                            }
+                        },
+                    },
+                    buildable.path.raw());
+            }
+        }
 
         BuiltPaths buildables2;
         for (auto & b : buildables)
@@ -168,5 +187,3 @@ struct CmdBuild : InstallablesCommand, MixOutLinkByDefault, MixDryRun, MixJSON, 
 };
 
 static auto rCmdBuild = registerCommand<CmdBuild>("build");
-
-} // namespace nix

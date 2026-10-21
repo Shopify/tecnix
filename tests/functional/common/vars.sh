@@ -82,6 +82,6 @@ fi
 # Very common, shorthand helps
 # Used in other files
 # shellcheck disable=SC2034
-config_nix="${TEST_ROOT}/config.nix"
+config_nix="${_NIX_TEST_BUILD_DIR}/config.nix"
 
 fi # COMMON_VARS_SH_SOURCED

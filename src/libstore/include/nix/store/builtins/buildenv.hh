@@ -25,9 +25,6 @@ struct Package
 
 class BuildEnvFileConflictError final : public CloneableError<BuildEnvFileConflictError, Error>
 {
-private:
-    void anchor() override;
-
 public:
     const std::filesystem::path fileA;
     const std::filesystem::path fileB;

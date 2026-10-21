@@ -22,10 +22,13 @@ public:
     };
 
     ~nix_api_store_test_base() override
-    try {
-        nix::deletePath(nixDir);
-    } catch (...) {
-        nix::ignoreExceptionInDestructor();
+    {
+        if (exists(std::filesystem::path{nixDir})) {
+            for (auto & path : std::filesystem::recursive_directory_iterator(nixDir)) {
+                std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+            }
+            std::filesystem::remove_all(nixDir);
+        }
     }
 
     std::string nixDir;
@@ -76,23 +79,23 @@ class nix_api_store_test : public nix_api_store_test_base
 {
 public:
     nix_api_store_test()
-        : nix_api_store_test_base{} {};
-
-    void SetUp() override
+        : nix_api_store_test_base{}
     {
-#ifdef _WIN32
-        GTEST_SKIP() << "Wine does not support symlinks needed for local store gcroots";
-#endif
-        store = open_local_store();
-    }
+        init_local_store();
+    };
 
     ~nix_api_store_test() override
     {
-        if (store)
-            nix_store_free(store);
+        nix_store_free(store);
     }
 
-    Store * store = nullptr;
+    Store * store;
+
+protected:
+    void init_local_store()
+    {
+        store = open_local_store();
+    }
 };
 
 } // namespace nixC

@@ -4,6 +4,8 @@ source common.sh
 
 TODO_NixOS
 
+clearStore
+
 ## Test `nix-collect-garbage -d`
 
 # TODO make `nix-env` doesn't work with CA derivations, and make

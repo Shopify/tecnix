@@ -5,13 +5,14 @@
 #include "nix/store/store-open.hh"
 #include "nix/util/file-system.hh"
 #include "nix/util/hash.hh"
+#include "nix/util/tests/test-data.hh"
 
 #ifndef _WIN32
 
 #  include <filesystem>
 #  include <fstream>
 
-namespace nix {
+using namespace nix;
 
 static void BM_RegisterValidPathsDerivations(benchmark::State & state)
 {
@@ -22,7 +23,7 @@ static void BM_RegisterValidPathsDerivations(benchmark::State & state)
 
         auto tmpRoot = createTempDir();
         auto realStoreDir = tmpRoot / "nix/store";
-        createDirs(realStoreDir);
+        std::filesystem::create_directories(realStoreDir);
 
         std::shared_ptr<Store> store = openStore(fmt("local?root=%s", tmpRoot.string()));
         auto localStore = std::dynamic_pointer_cast<LocalStore>(store);
@@ -66,7 +67,7 @@ static void BM_RegisterValidPathsDerivations(benchmark::State & state)
         state.PauseTiming();
         localStore.reset();
         store.reset();
-        deletePath(tmpRoot);
+        std::filesystem::remove_all(tmpRoot);
         state.ResumeTiming();
     }
 
@@ -74,7 +75,5 @@ static void BM_RegisterValidPathsDerivations(benchmark::State & state)
 }
 
 BENCHMARK(BM_RegisterValidPathsDerivations)->Arg(10);
-
-} // namespace nix
 
 #endif

@@ -1,5 +1,6 @@
 #include <string_view>
 
+#include "nix/util/nar-accessor.hh"
 #include "nix/util/tests/json-characterization.hh"
 
 namespace nix {

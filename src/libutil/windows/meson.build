@@ -9,7 +9,6 @@ sources += files(
   'muxable-pipe.cc',
   'os-string.cc',
   'processes.cc',
-  'signals.cc',
   'users.cc',
   'windows-async-pipe.cc',
   'windows-environment.cc',

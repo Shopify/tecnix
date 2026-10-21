@@ -5,8 +5,6 @@ namespace nix::fetchers {
 
 Settings::Settings() {}
 
-void Settings::anchor() {}
-
 } // namespace nix::fetchers
 
 namespace nix {

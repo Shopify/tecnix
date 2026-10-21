@@ -3,7 +3,7 @@
 #include "nix/store/store-api.hh"
 #include "nix/store/local-fs-store.hh"
 
-namespace nix {
+using namespace nix;
 
 struct CmdCopy : virtual CopyCommand, virtual BuiltPathsCommand, MixProfile, MixNoCheckSigs
 {
@@ -75,5 +75,3 @@ struct CmdCopy : virtual CopyCommand, virtual BuiltPathsCommand, MixProfile, Mix
 };
 
 static auto rCmdCopy = registerCommand<CmdCopy>("copy");
-
-} // namespace nix

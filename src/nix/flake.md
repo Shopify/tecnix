@@ -95,8 +95,6 @@ Here are some examples of flake references in their URL-like representation:
   branch of a Git repository.
 * `git+https://github.com/NixOS/patchelf?ref=master&rev=f34751b88bd07d7f44f5cd3200fb4122bf916c7e`:
   A specific branch *and* revision of a Git repository.
-* `git+https://github.com/NixOS/patchelf?ref=refs/tags/0.18.0`: A specific
-  tag of a Git repository.
 * `https://github.com/NixOS/patchelf/archive/master.tar.gz`: A tarball
   flake.
 
@@ -140,7 +138,7 @@ The following generic flake reference attributes are supported:
 
 * `narHash`: The hash of the
   [Nix Archive (NAR) serialisation][Nix Archive]
-  (in [SRI](@docroot@/glossary.md#gloss-sri) format) of the
+  (in SRI format) of the
   contents of the flake. This is useful for flake types such as
   tarballs that lack a unique content identifier such as a Git commit
   hash.
@@ -455,7 +453,7 @@ The following attributes are supported in `flake.nix`:
   * `lastModified`: The commit time of the revision `rev` as an integer
     denoting the number of seconds since 1970.
 
-  * `narHash`: The SHA-256 (in [SRI](@docroot@/glossary.md#gloss-sri) format) of the
+  * `narHash`: The SHA-256 (in SRI format) of the
     [Nix Archive (NAR) serialisation][Nix Archive]
     NAR serialization of the flake's source tree.
 

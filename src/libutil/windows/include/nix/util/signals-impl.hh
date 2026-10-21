@@ -2,13 +2,8 @@
 ///@file
 
 #include "nix/util/types.hh"
-#include "nix/util/fun.hh"
-
-#include <memory>
 
 namespace nix {
-
-class InterruptCallback;
 
 /* User interruption. */
 
@@ -43,15 +38,5 @@ struct ReceiveInterrupts
      */
     ~ReceiveInterrupts() {}
 };
-
-inline std::unique_ptr<InterruptCallback> createSignalCallback(SignalType type, fun<void()> callback)
-{
-    return {};
-}
-
-inline std::unique_ptr<InterruptCallback> createInterruptCallback(fun<void()> callback)
-{
-    return {};
-}
 
 } // namespace nix

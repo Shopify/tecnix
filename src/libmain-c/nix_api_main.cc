@@ -1,3 +1,5 @@
+#include "nix_api_store.h"
+#include "nix_api_store_internal.h"
 #include "nix_api_util.h"
 #include "nix_api_util_internal.h"
 

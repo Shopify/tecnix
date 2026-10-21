@@ -5,7 +5,7 @@
 #include "nix/cmd/legacy.hh"
 #include "man-pages.hh"
 
-namespace nix {
+using namespace nix;
 
 static int main_nix_copy_closure(int argc, char ** argv)
 {
@@ -62,12 +62,10 @@ static int main_nix_copy_closure(int argc, char ** argv)
         for (auto & path : storePaths)
             storePaths2.insert(from->followLinksToStorePath(path));
 
-        copyClosure(*from, *to, storePaths2, NoRepair, NoCheckSigs, useSubstitutes, includeOutputs);
+        copyClosure(*from, *to, storePaths2, NoRepair, NoCheckSigs, useSubstitutes);
 
         return 0;
     }
 }
 
 static RegisterLegacyCommand r_nix_copy_closure("nix-copy-closure", main_nix_copy_closure);
-
-} // namespace nix

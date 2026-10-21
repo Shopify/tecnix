@@ -9,10 +9,6 @@
 
 namespace nix {
 
-void QueryActiveBuildsStore::anchor() {}
-
-void TrackActiveBuildsStore::anchor() {}
-
 UserInfo UserInfo::fromUid(uid_t uid)
 {
     UserInfo info;

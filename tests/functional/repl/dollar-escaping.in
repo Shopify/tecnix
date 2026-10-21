@@ -1,2 +1,0 @@
-# COM: Check dollar escaping https://github.com/NixOS/nix/issues/4909
-"$" + "{hi}"

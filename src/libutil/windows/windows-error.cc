@@ -1,12 +1,12 @@
-#include "nix/util/error.hh"
+#ifdef _WIN32
 
-#include <error.h>
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#  include "nix/util/error.hh"
+
+#  include <error.h>
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
 
 namespace nix::windows {
-
-void windows::WinError::anchor() {}
 
 std::string WinError::renderError(DWORD lastError)
 {
@@ -33,3 +33,4 @@ std::string WinError::renderError(DWORD lastError)
 }
 
 } // namespace nix::windows
+#endif

@@ -228,7 +228,7 @@ struct CmdNarioList : Command, MixJSON, MixLongListing
         struct Config : StoreConfig
         {
             Config(const Params & params)
-                : StoreConfig(params, FilePathType::Unix)
+                : StoreConfig(params)
             {
             }
 
@@ -236,8 +236,6 @@ struct CmdNarioList : Command, MixJSON, MixLongListing
             {
                 abort();
             }
-
-            void anchor() override {}
         };
 
         struct ListingStore : Store
@@ -328,8 +326,6 @@ struct CmdNarioList : Command, MixJSON, MixLongListing
             {
                 unsupported("registerDrvOutput");
             }
-
-            void anchor() override {}
         };
 
         auto source{getNarioSource()};

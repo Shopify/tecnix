@@ -4,29 +4,24 @@
 
 namespace nix {
 
-void WorkerSettings::anchor() {}
-
 TimedOut::TimedOut(time_t maxDuration)
     : CloneableError(BuildResult::Failure::TimedOut, "timed out after %1% seconds", maxDuration)
     , maxDuration(maxDuration)
 {
 }
 
-void TimedOut::anchor() {}
-
-void Goal::anchor() {}
-
 using Co = nix::Goal::Co;
 using promise_type = nix::Goal::promise_type;
+using ChildEvents = decltype(promise_type::childEvents);
 
-void Goal::ChildEvents::pushChildEvent(ChildOutput event)
+void ChildEvents::pushChildEvent(ChildOutput event)
 {
     if (childTimeout)
         return; // Already timed out, ignore
     childOutputs.push(std::move(event));
 }
 
-void Goal::ChildEvents::pushChildEvent(ChildEOF event)
+void ChildEvents::pushChildEvent(ChildEOF event)
 {
     if (childTimeout)
         return; // Already timed out, ignore
@@ -34,20 +29,20 @@ void Goal::ChildEvents::pushChildEvent(ChildEOF event)
     childEOF = std::move(event);
 }
 
-void Goal::ChildEvents::pushChildEvent(TimedOut event)
+void ChildEvents::pushChildEvent(TimedOut event)
 {
     // Timeout is immediate - flush pending events
     childOutputs = {};
     childEOF.reset();
-    childTimeout = std::make_unique<TimedOut>(std::move(event));
+    childTimeout = std::move(event);
 }
 
-bool Goal::ChildEvents::hasChildEvent() const
+bool ChildEvents::hasChildEvent() const
 {
     return !childOutputs.empty() || childEOF || childTimeout;
 }
 
-Goal::ChildEvent Goal::ChildEvents::popChildEvent()
+Goal::ChildEvent ChildEvents::popChildEvent()
 {
     if (!childOutputs.empty()) {
         auto event = std::move(childOutputs.front());
@@ -57,28 +52,23 @@ Goal::ChildEvent Goal::ChildEvents::popChildEvent()
     if (childEOF)
         return *std::exchange(childEOF, std::nullopt);
     if (childTimeout)
-        return std::exchange(childTimeout, nullptr);
+        return *std::exchange(childTimeout, std::nullopt);
     unreachable();
 }
 
 using handle_type = nix::Goal::handle_type;
 using Suspend = nix::Goal::Suspend;
 
-Co::Co(Co && rhs) noexcept
+Co::Co(Co && rhs)
 {
     this->handle = rhs.handle;
     rhs.handle = nullptr;
 }
 
-Co & Co::operator=(Co && rhs) noexcept
+void Co::operator=(Co && rhs)
 {
-    if (handle) {
-        handle.promise().alive = false;
-        handle.destroy();
-    }
-    handle = rhs.handle;
+    this->handle = rhs.handle;
     rhs.handle = nullptr;
-    return *this;
 }
 
 Co::~Co()
@@ -167,7 +157,9 @@ std::coroutine_handle<> nix::Goal::Co::await_suspend(handle_type caller)
 
 bool CompareGoalPtrs::operator()(const GoalPtr & a, const GoalPtr & b) const
 {
-    return a->keyCached() < b->keyCached();
+    std::string s1 = a->key();
+    std::string s2 = b->key();
+    return s1 < s2;
 }
 
 void addToWeakGoals(WeakGoals & goals, GoalPtr p)
@@ -283,19 +275,22 @@ void Goal::work()
 
 void Goal::handleChildOutput(Descriptor fd, std::string_view data)
 {
-    childEvents.pushChildEvent(ChildOutput{fd, std::string{data}});
+    assert(top_co);
+    top_co->handle.promise().childEvents.pushChildEvent(ChildOutput{fd, std::string{data}});
     worker.wakeUp(shared_from_this());
 }
 
 void Goal::handleEOF(Descriptor fd)
 {
-    childEvents.pushChildEvent(ChildEOF{fd});
+    assert(top_co);
+    top_co->handle.promise().childEvents.pushChildEvent(ChildEOF{fd});
     worker.wakeUp(shared_from_this());
 }
 
 void Goal::timedOut(TimedOut && ex)
 {
-    childEvents.pushChildEvent(std::move(ex));
+    assert(top_co);
+    top_co->handle.promise().childEvents.pushChildEvent(std::move(ex));
     worker.wakeUp(shared_from_this());
 }
 
@@ -309,13 +304,6 @@ Goal::Co Goal::yield()
 Goal::Co Goal::waitForAWhile()
 {
     worker.waitForAWhile(shared_from_this());
-    co_await Suspend{};
-    co_return Return{};
-}
-
-Goal::Co Goal::waitUntilWoken()
-{
-    worker.waitForCompletion(shared_from_this());
     co_await Suspend{};
     co_return Return{};
 }

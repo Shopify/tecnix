@@ -2,10 +2,14 @@
 
 source common.sh
 
+clearStore
+clearCache
+
 nix-store --generate-binary-cache-key cache1.example.org "$TEST_ROOT/sk1" "$TEST_ROOT/pk1"
 pk1=$(cat "$TEST_ROOT/pk1")
 
-export REMOTE_STORE="file://$cacheDir"
+export REMOTE_STORE_DIR="$TEST_ROOT/remote_store"
+export REMOTE_STORE="file://$REMOTE_STORE_DIR"
 
 ensureCorrectlyCopied () {
     attrPath="$1"
@@ -14,7 +18,7 @@ ensureCorrectlyCopied () {
 
 testOneCopy () {
     clearStore
-    clearBinaryCache
+    rm -rf "$REMOTE_STORE_DIR"
 
     attrPath="$1"
     nix copy -vvvv --to "$REMOTE_STORE" "$attrPath" --file ./content-addressed.nix \

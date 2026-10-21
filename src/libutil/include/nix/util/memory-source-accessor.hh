@@ -108,10 +108,6 @@ VariantT<RegularContents, recur>::operator<=>(const VariantT<RegularContents, re
  */
 struct MemorySourceAccessor : virtual SourceAccessor
 {
-private:
-    void anchor() override;
-
-public:
     using File = fso::VariantT<std::string, true>;
 
     std::optional<File> root;
@@ -152,10 +148,6 @@ public:
  */
 struct MemorySink : FileSystemObjectSink
 {
-private:
-    void anchor() override;
-
-public:
     MemorySourceAccessor & dst;
 
     MemorySink(MemorySourceAccessor & dst)

@@ -1,4 +1,0 @@
-# COM: inherit from current scope
-foo = 42
-inherit foo
-foo

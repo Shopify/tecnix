@@ -7,10 +7,6 @@ namespace nix {
 
 struct LogStore : public virtual Store
 {
-private:
-    void anchor() override;
-
-public:
     inline static std::string operationName = "Build log storage and retrieval";
 
     /**

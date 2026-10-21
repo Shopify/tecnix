@@ -1,1 +1,0 @@
-builtins.substring { } "foo" true

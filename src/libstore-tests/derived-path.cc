@@ -1,3 +1,5 @@
+#include <regex>
+
 #include <gtest/gtest.h>
 #include <rapidcheck/gtest.h>
 
@@ -92,6 +94,8 @@ TEST_F(DerivedPathTest, built_built_xp)
         MissingExperimentalFeature);
 }
 
+#ifndef COVERAGE
+
 /* TODO: Disabled due to the following error:
 
        path '00000000000000000000000000000000-0^0' is not a valid store path:
@@ -110,6 +114,8 @@ RC_GTEST_FIXTURE_PROP(DerivedPathTest, prop_round_rip, (const DerivedPath & o))
     xpSettings.set("experimental-features", "dynamic-derivations");
     RC_ASSERT(o == DerivedPath::parse(*store, o.to_string(*store), xpSettings));
 }
+
+#endif
 
 /* ----------------------------------------------------------------------------
  * JSON

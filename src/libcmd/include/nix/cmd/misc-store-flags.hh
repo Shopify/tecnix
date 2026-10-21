@@ -1,6 +1,3 @@
-#pragma once
-/// @file
-
 #include "nix/util/args.hh"
 #include "nix/store/content-address.hh"
 

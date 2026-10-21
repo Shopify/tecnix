@@ -4,6 +4,8 @@ source common.sh
 
 TODO_NixOS
 
+clearStore
+
 outPath=$(nix-build dependencies.nix --no-out-link)
 drvPath=$(nix path-info --json "$outPath" | jq -r .\""$outPath"\".deriver)
 

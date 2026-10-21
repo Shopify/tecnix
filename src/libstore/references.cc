@@ -3,16 +3,12 @@
 #include "nix/util/hash.hh"
 #include "nix/util/base-nix-32.hh"
 
+#include <map>
 #include <cstdlib>
+#include <mutex>
 #include <algorithm>
 
 namespace nix {
-
-void RefScanSink::anchor() {}
-
-void HashModuloSink::anchor() {}
-
-void RewritingSink::anchor() {}
 
 static constexpr auto refLength = StorePath::HashLen;
 
@@ -78,7 +74,7 @@ void RewritingSink::operator()(std::string_view data)
     std::string s(prev);
     s.append(data);
 
-    s = rewriteStrings(s, rewrites, &matches, pos);
+    s = rewriteStrings(s, rewrites);
 
     prev = s.size() < maxRewriteSize ? s
            : maxRewriteSize == 0     ? ""
@@ -103,7 +99,6 @@ void RewritingSink::flush()
 
 HashModuloSink::HashModuloSink(HashAlgorithm ha, const std::string & modulus)
     : hashSink(ha)
-    // Zero out self-references (the "modulus").
     , rewritingSink(modulus, std::string(modulus.size(), 0), hashSink)
 {
 }

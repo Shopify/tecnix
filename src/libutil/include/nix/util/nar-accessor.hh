@@ -20,8 +20,6 @@ struct NarAccessor : SourceAccessor
      * Get the NAR listing structure.
      */
     virtual const NarListing & getListing() const = 0;
-
-    ~NarAccessor() override;
 };
 
 /**

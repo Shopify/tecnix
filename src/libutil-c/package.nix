@@ -7,7 +7,6 @@
   # Configuration Options
 
   version,
-  withPluginCAPI,
 }:
 
 let
@@ -36,7 +35,6 @@ mkMesonLibrary (finalAttrs: {
   ];
 
   mesonFlags = [
-    (lib.mesonBool "plugin-c-api" withPluginCAPI)
   ];
 
   meta = {

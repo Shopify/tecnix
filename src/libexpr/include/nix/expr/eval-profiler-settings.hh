@@ -7,6 +7,10 @@ namespace nix {
 
 enum struct EvalProfilerMode { disabled, flamegraph };
 
-NIX_DECLARE_CONFIG_SERIALISER(EvalProfilerMode)
+template<>
+EvalProfilerMode BaseSetting<EvalProfilerMode>::parse(const std::string & str) const;
+
+template<>
+std::string BaseSetting<EvalProfilerMode>::to_string() const;
 
 } // namespace nix

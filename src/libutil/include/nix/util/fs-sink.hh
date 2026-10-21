@@ -14,10 +14,6 @@ namespace nix {
  */
 struct CreateRegularFileSink : virtual Sink
 {
-private:
-    void anchor() override;
-
-public:
     /**
      * If set to true, the sink will not be called with the contents
      * of the file. `preallocateContents()` will still be called to
@@ -36,12 +32,6 @@ public:
 
 struct FileSystemObjectSink
 {
-private:
-    /* VTable anchor to avoid weak linkage of the vtable - it breaks
-       dynamic_cast across shared libraries on Darwin. */
-    virtual void anchor();
-
-public:
     virtual ~FileSystemObjectSink() = default;
 
     virtual void createDirectory(const CanonPath & path) = 0;
@@ -78,10 +68,6 @@ public:
  */
 struct ExtendedFileSystemObjectSink : virtual FileSystemObjectSink
 {
-private:
-    void anchor() override;
-
-public:
     /**
      * Create a hard link. The target must be the path of a previously
      * encountered file relative to the root of the FSO.
@@ -100,10 +86,6 @@ void copyRecursive(
  */
 struct NullFileSystemObjectSink : FileSystemObjectSink
 {
-private:
-    void anchor() override;
-
-public:
     void createDirectory(const CanonPath & path) override {}
 
     void createSymlink(const CanonPath & path, const std::string & target) override {}
@@ -116,10 +98,6 @@ public:
  */
 struct RestoreSink : FileSystemObjectSink
 {
-private:
-    void anchor() override;
-
-public:
     std::filesystem::path dstPath;
     /**
      * File descriptor for the directory located at dstPath. Used for *at
@@ -154,10 +132,6 @@ public:
  */
 struct RegularFileSink : FileSystemObjectSink
 {
-private:
-    void anchor() override;
-
-public:
     bool regular = true;
     Sink & sink;
 
@@ -168,13 +142,11 @@ public:
 
     void createDirectory(const CanonPath & path) override
     {
-        /* FIXME: Throw an error here. */
         regular = false;
     }
 
     void createSymlink(const CanonPath & path, const std::string & target) override
     {
-        /* FIXME: Throw an error here. */
         regular = false;
     }
 

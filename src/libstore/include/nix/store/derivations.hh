@@ -200,7 +200,7 @@ struct DerivationType
     /**
      * Impure derivation type
      *
-     * This is similar at build-time to the content addressed, not sandboxed, not fixed
+     * This is similar at build-time to the content addressed, not standboxed, not fixed
      * type, but has some restrictions on its usage.
      */
     struct Impure
@@ -209,16 +209,7 @@ struct DerivationType
         auto operator<=>(const Impure &) const = default;
     };
 
-    /**
-     * A builtin:substitute derivation.
-     */
-    struct Substituted
-    {
-        bool operator==(const Substituted &) const = default;
-        auto operator<=>(const Substituted &) const = default;
-    };
-
-    typedef std::variant<InputAddressed, ContentAddressed, Impure, Substituted> Raw;
+    typedef std::variant<InputAddressed, ContentAddressed, Impure> Raw;
 
     Raw raw;
 
@@ -302,7 +293,7 @@ struct BasicDerivation
     BasicDerivation(const BasicDerivation &) = default;
     BasicDerivation & operator=(BasicDerivation &&) = default;
     BasicDerivation & operator=(const BasicDerivation &) = default;
-    virtual ~BasicDerivation();
+    virtual ~BasicDerivation() {};
 
     bool isBuiltin() const;
 
@@ -437,11 +428,6 @@ struct Derivation : BasicDerivation
     void fillInOutputPaths(Store & store);
 
     Derivation() = default;
-    Derivation(Derivation &&) = default;
-    Derivation(const Derivation &) = default;
-    Derivation & operator=(Derivation &&) = default;
-    Derivation & operator=(const Derivation &) = default;
-    ~Derivation() override;
 
     Derivation(const BasicDerivation & bd)
         : BasicDerivation(bd)
@@ -522,39 +508,34 @@ std::string outputPathName(std::string_view drvName, OutputNameView outputName);
  * derivations (fixed-output or not) will have a different hash for each
  * output.
  */
-struct DrvHashModulo
+struct DrvHash
 {
     /**
-     * Single hash for the derivation
-     *
-     * This is for an input-addressed derivation that doesn't
-     * transitively depend on any floating-CA derivations.
+     * Map from output names to hashes
      */
-    using DrvHash = Hash;
+    std::map<std::string, Hash> hashes;
+
+    enum struct Kind : bool {
+        /**
+         * Statically determined derivations.
+         * This hash will be directly used to compute the output paths
+         */
+        Regular,
+
+        /**
+         * Floating-output derivations (and their reverse dependencies).
+         */
+        Deferred,
+    };
 
     /**
-     * Known CA drv's output hashes, for fixed-output derivations whose
-     * output hashes are always known since they are fixed up-front.
+     * The kind of derivation this is, simplified for just "derivation hash
+     * modulo" purposes.
      */
-    using CaOutputHashes = std::map<std::string, Hash>;
-
-    /**
-     * This derivation doesn't yet have known output hashes.
-     *
-     * Either because itself is floating CA, or it (transtively) depends
-     * on a floating CA derivation.
-     */
-    using DeferredDrv = std::monostate;
-
-    using Raw = std::variant<DrvHash, CaOutputHashes, DeferredDrv>;
-
-    Raw raw;
-
-    bool operator==(const DrvHashModulo &) const = default;
-    // auto operator <=> (const DrvHashModulo &) const = default;
-
-    MAKE_WRAPPER_CONSTRUCTOR(DrvHashModulo);
+    Kind kind;
 };
+
+void operator|=(DrvHash::Kind & self, const DrvHash::Kind & other) noexcept;
 
 /**
  * Returns hashes with the details of fixed-output subderivations
@@ -580,17 +561,15 @@ struct DrvHashModulo
  * ATerm, after subderivations have been likewise expunged from that
  * derivation.
  */
-DrvHashModulo hashDerivationModulo(Store & store, const Derivation & drv, bool maskOutputs);
+DrvHash hashDerivationModulo(Store & store, const Derivation & drv, bool maskOutputs);
 
 /**
- * If a derivation is input addressed and doesn't yet have its input
- * addressed (is deferred) try using `hashDerivationModulo`.
+ * Return a map associating each output to a hash that uniquely identifies its
+ * derivation (modulo the self-references).
  *
- * Does nothing if not deferred input-addressed, or
- * `hashDerivationModulo` indicates it is missing inputs' output paths
- * and is not yet ready (and must stay deferred).
+ * \todo What is the Hash in this map?
  */
-void resolveInputAddressed(Store & store, Derivation & drv);
+std::map<std::string, Hash> staticOutputHashes(Store & store, const Derivation & drv);
 
 struct DrvHashFct
 {
@@ -605,7 +584,7 @@ struct DrvHashFct
 /**
  * Memoisation of hashDerivationModulo().
  */
-typedef boost::concurrent_flat_map<StorePath, DrvHashModulo, DrvHashFct> DrvHashes;
+typedef boost::concurrent_flat_map<StorePath, DrvHash, DrvHashFct> DrvHashes;
 
 // FIXME: global, though at least thread-safe.
 extern DrvHashes drvHashes;
@@ -635,5 +614,5 @@ constexpr unsigned expectedJsonVersionDerivation = 4;
 } // namespace nix
 
 JSON_IMPL_WITH_XP_FEATURES(nix::DerivationOutput)
-JSON_IMPL_WITH_XP_FEATURES(nix::BasicDerivation)
 JSON_IMPL_WITH_XP_FEATURES(nix::Derivation)
+JSON_IMPL_WITH_XP_FEATURES(nix::BasicDerivation)

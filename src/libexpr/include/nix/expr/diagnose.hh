@@ -28,7 +28,11 @@ enum struct Diagnose {
     Fatal,
 };
 
-NIX_DECLARE_CONFIG_SERIALISER(Diagnose)
+template<>
+Diagnose BaseSetting<Diagnose>::parse(const std::string & str) const;
+
+template<>
+std::string BaseSetting<Diagnose>::to_string() const;
 
 /**
  * Check a diagnostic setting and either do nothing, log a warning, or throw an error.
@@ -44,7 +48,7 @@ NIX_DECLARE_CONFIG_SERIALISER(Diagnose)
  * @throws The error returned by mkError if level is `Fatal` and mkError returns a value
  */
 template<typename F>
-void diagnose(const Setting<Diagnose> & setting, const F & mkError)
+void diagnose(const Setting<Diagnose> & setting, F && mkError)
 {
     auto withError = [&](bool fatal, auto && handler) {
         auto maybeError = mkError(fatal);
@@ -64,7 +68,7 @@ void diagnose(const Setting<Diagnose> & setting, const F & mkError)
         withError(false, [](auto && error) { logWarning(error.info()); });
         return;
     case Diagnose::Fatal:
-        withError(true, [](auto && error) { throw std::forward<decltype(error)>(error); });
+        withError(true, [](auto && error) { throw std::move(error); });
         return;
     }
 }

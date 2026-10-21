@@ -3,10 +3,13 @@
 #include "nix/util/environment-variables.hh"
 #include "nix/util/file-system.hh"
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
 
 namespace nix {
+
+using namespace nix::windows;
 
 std::string getUserName()
 {
@@ -15,7 +18,7 @@ std::string getUserName()
     if (!GetUserNameA(nullptr, &size)) {
         auto lastError = GetLastError();
         if (lastError != ERROR_INSUFFICIENT_BUFFER)
-            throw windows::WinError(lastError, "cannot figure out size of user name");
+            throw WinError(lastError, "cannot figure out size of user name");
     }
 
     std::string name;
@@ -26,7 +29,7 @@ std::string getUserName()
 
     // Retrieve the username
     if (!GetUserNameA(&name[0], &size))
-        throw windows::WinError("cannot figure out user name");
+        throw WinError("cannot figure out user name");
 
     return name;
 }
@@ -47,3 +50,4 @@ bool isRootUser()
 }
 
 } // namespace nix
+#endif

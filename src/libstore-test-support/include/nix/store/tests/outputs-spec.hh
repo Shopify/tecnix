@@ -1,7 +1,7 @@
 #pragma once
 ///@file
 
-#include <exception> // IWYU pragma: keep (Needed by rapidcheck on Darwin and FreeBSD)
+#include <exception> // Needed by rapidcheck on Darwin
 #include <rapidcheck/gen/Arbitrary.h>
 
 #include "nix/store/outputs-spec.hh"
@@ -9,11 +9,12 @@
 #include "nix/store/tests/path.hh"
 
 namespace rc {
+using namespace nix;
 
 template<>
-struct Arbitrary<nix::OutputsSpec>
+struct Arbitrary<OutputsSpec>
 {
-    static Gen<nix::OutputsSpec> arbitrary();
+    static Gen<OutputsSpec> arbitrary();
 };
 
 } // namespace rc

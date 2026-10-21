@@ -1,20 +1,9 @@
 #include "nix/fetchers/attrs.hh"
+#include "nix/fetchers/fetchers.hh"
 
 #include <nlohmann/json.hpp>
 
 namespace nix::fetchers {
-
-ResolvedAttr forceAttr(const Attr & attr)
-{
-    return std::visit(
-        overloaded{
-            [](const LazyAttr & lazy) -> ResolvedAttr { return lazy->compute(); },
-            [](const std::string & v) -> ResolvedAttr { return v; },
-            [](uint64_t v) -> ResolvedAttr { return v; },
-            [](const Explicit<bool> & v) -> ResolvedAttr { return v; },
-        },
-        attr);
-}
 
 Attrs jsonToAttrs(const nlohmann::json & json)
 {
@@ -41,12 +30,11 @@ nlohmann::json attrsToJSON(const Attrs & attrs)
         /* The __final attribute is purely internal, so never serialize it. */
         if (attr.first == "__final")
             continue;
-        auto resolved = forceAttr(attr.second);
-        if (auto v = std::get_if<uint64_t>(&resolved)) {
+        if (auto v = std::get_if<uint64_t>(&attr.second)) {
             json[attr.first] = *v;
-        } else if (auto v = std::get_if<std::string>(&resolved)) {
+        } else if (auto v = std::get_if<std::string>(&attr.second)) {
             json[attr.first] = *v;
-        } else if (auto v = std::get_if<Explicit<bool>>(&resolved)) {
+        } else if (auto v = std::get_if<Explicit<bool>>(&attr.second)) {
             json[attr.first] = v->t;
         } else
             unreachable();
@@ -54,23 +42,12 @@ nlohmann::json attrsToJSON(const Attrs & attrs)
     return json;
 }
 
-std::optional<LazyAttr> maybeGetLazyAttr(const Attrs & attrs, const std::string & name)
-{
-    auto i = attrs.find(name);
-    if (i == attrs.end())
-        return {};
-    if (auto v = std::get_if<LazyAttr>(&i->second))
-        return *v;
-    return {};
-}
-
 std::optional<std::string> maybeGetStrAttr(const Attrs & attrs, const std::string & name)
 {
     auto i = attrs.find(name);
     if (i == attrs.end())
         return {};
-    auto resolved = forceAttr(i->second);
-    if (auto v = std::get_if<std::string>(&resolved))
+    if (auto v = std::get_if<std::string>(&i->second))
         return *v;
     throw Error("input attribute '%s' is not a string %s", name, attrsToJSON(attrs).dump());
 }
@@ -88,8 +65,7 @@ std::optional<uint64_t> maybeGetIntAttr(const Attrs & attrs, const std::string &
     auto i = attrs.find(name);
     if (i == attrs.end())
         return {};
-    auto resolved = forceAttr(i->second);
-    if (auto v = std::get_if<uint64_t>(&resolved))
+    if (auto v = std::get_if<uint64_t>(&i->second))
         return *v;
     throw Error("input attribute '%s' is not an integer", name);
 }
@@ -107,8 +83,7 @@ std::optional<bool> maybeGetBoolAttr(const Attrs & attrs, const std::string & na
     auto i = attrs.find(name);
     if (i == attrs.end())
         return {};
-    auto resolved = forceAttr(i->second);
-    if (auto v = std::get_if<Explicit<bool>>(&resolved))
+    if (auto v = std::get_if<Explicit<bool>>(&i->second))
         return v->t;
     throw Error("input attribute '%s' is not a Boolean", name);
 }
@@ -125,12 +100,11 @@ StringMap attrsToQuery(const Attrs & attrs)
 {
     StringMap query;
     for (auto & attr : attrs) {
-        auto resolved = forceAttr(attr.second);
-        if (auto v = std::get_if<uint64_t>(&resolved)) {
+        if (auto v = std::get_if<uint64_t>(&attr.second)) {
             query.insert_or_assign(attr.first, fmt("%d", *v));
-        } else if (auto v = std::get_if<std::string>(&resolved)) {
+        } else if (auto v = std::get_if<std::string>(&attr.second)) {
             query.insert_or_assign(attr.first, *v);
-        } else if (auto v = std::get_if<Explicit<bool>>(&resolved)) {
+        } else if (auto v = std::get_if<Explicit<bool>>(&attr.second)) {
             query.insert_or_assign(attr.first, v->t ? "1" : "0");
         } else
             unreachable();

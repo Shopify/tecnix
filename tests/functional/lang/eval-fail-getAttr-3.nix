@@ -1,1 +1,0 @@
-builtins.getAttr "foo" { }

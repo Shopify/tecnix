@@ -34,30 +34,9 @@ struct Fetch
     void fetch(
         const std::string & content,
         const CanonPath & pointerFilePath,
-        Sink & sink,
+        StringSink & sink,
         std::function<void(uint64_t)> sizeCallback) const;
     std::vector<nlohmann::json> fetchUrls(const std::vector<Pointer> & pointers) const;
 };
-
-struct LfsApiInfo
-{
-    std::string endpoint;
-    std::optional<std::string> authHeader;
-};
-
-/**
- * Derive the LFS API endpoint of a plain Git remote URL the way git-lfs
- * does: `<remote>.git/info/lfs`.
- * @see https://github.com/git-lfs/git-lfs/blob/main/docs/api/server-discovery.md
- */
-ParsedURL lfsEndpointForRemote(ParsedURL url);
-
-/**
- * Resolve the authentication for an LFS API endpoint (as produced by
- * `lfsEndpointForRemote()` or configured via `lfs.url`): via
- * `git-lfs-authenticate` for SSH remotes, and `git credential fill`
- * otherwise. The endpoint is used as-is.
- */
-LfsApiInfo getLfsApi(ParsedURL url);
 
 } // namespace nix::lfs

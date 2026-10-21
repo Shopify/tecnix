@@ -2,6 +2,7 @@
 ///@file
 
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <variant>
 
@@ -84,12 +85,12 @@ struct DerivationOptions
      * Either one set of checks for all outputs, or separate checks
      * per-output.
      */
-    std::variant<OutputChecks, std::map<std::string, OutputChecks, std::less<>>> outputChecks = OutputChecks{};
+    std::variant<OutputChecks, std::map<std::string, OutputChecks>> outputChecks = OutputChecks{};
 
     /**
      * Whether to avoid scanning for references for a given output.
      */
-    std::map<std::string, bool, std::less<>> unsafeDiscardReferences;
+    std::map<std::string, bool> unsafeDiscardReferences;
 
     /**
      * In non-structured mode, all bindings specified in the derivation
@@ -122,7 +123,7 @@ struct DerivationOptions
      * attributes give to the builder. The set of paths in the original JSON
      * is replaced with a list of `PathInfo` in JSON format.
      */
-    std::map<std::string, std::set<Input>, std::less<>> exportReferencesGraph;
+    std::map<std::string, std::set<Input>> exportReferencesGraph;
 
     /**
      * env: __sandboxProfile

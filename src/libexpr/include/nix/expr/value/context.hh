@@ -11,8 +11,6 @@ namespace nix {
 
 class BadNixStringContextElem final : public CloneableError<BadNixStringContextElem, Error>
 {
-    void anchor() override;
-
 public:
     std::string_view raw;
 

@@ -20,7 +20,7 @@ text=$(cat "$outPath/hello")
 TODO_NixOS
 
 # Directed delete: $outPath is not reachable from a root, so it should
-# be deletable.
+# be deleteable.
 nix-store --delete "$outPath" --ignore-liveness
 [[ ! -e $outPath/hello ]]
 

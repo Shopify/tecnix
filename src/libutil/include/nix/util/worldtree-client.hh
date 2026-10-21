@@ -62,7 +62,6 @@ struct RpcError : std::runtime_error
 {
     ErrorCode code;
     RpcError(ErrorCode code, const std::string & msg);
-    ~RpcError() override;
 };
 
 /// A transport- or framing-level failure: the connection dropped, a frame was
@@ -71,7 +70,6 @@ struct RpcError : std::runtime_error
 struct ProtocolError : std::runtime_error
 {
     using std::runtime_error::runtime_error;
-    ~ProtocolError() override;
 };
 
 /// One `zone_tree_shas` result: a zone's working-tree subtree oid. `treeSha` is

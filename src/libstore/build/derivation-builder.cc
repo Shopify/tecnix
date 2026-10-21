@@ -25,13 +25,3 @@ void adl_serializer<ExternalBuilder>::to_json(json & json, const ExternalBuilder
 }
 
 } // namespace nlohmann
-
-namespace nix {
-
-void BuilderFailureError::anchor() {}
-
-void DerivationBuilder::anchor() {}
-
-DerivationBuilderCallbacks::~DerivationBuilderCallbacks() {}
-
-} // namespace nix

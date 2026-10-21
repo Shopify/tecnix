@@ -40,7 +40,6 @@
 #include <set>
 #include <span>
 #include <functional>
-#include <span>
 #include <vector>
 
 namespace nix {
@@ -84,24 +83,18 @@ class EvalCache;
  */
 class CallDepth
 {
-public:
-    /**
-     * Current Nix call stack depth, used with `max-call-depth`
-     * setting to throw stack overflow hopefully before we run out of
-     * system stack. The fiber scheduler saves/restores this on fiber
-     * switches, since several fibers, each with their own call chain,
-     * are interleaved on the same thread.
-     */
-    [[gnu::tls_model("initial-exec")]] thread_local static size_t callDepth;
+    size_t & count;
 
-    CallDepth()
+public:
+    CallDepth(size_t & count)
+        : count(count)
     {
-        ++callDepth;
+        ++count;
     }
 
     ~CallDepth()
     {
-        --callDepth;
+        --count;
     }
 };
 
@@ -191,13 +184,6 @@ struct Constant
      * Whether the constant is impure, and not available in pure mode.
      */
     bool impureOnly = false;
-
-    /**
-     * Experimental feature required to use this constant, if any.
-     * Only used for documentation; the caller is responsible for
-     * not adding the constant when the feature is disabled.
-     */
-    std::optional<ExperimentalFeature> experimentalFeature;
 };
 
 typedef std::map<std::string, RootValue> ValMap;
@@ -516,15 +502,7 @@ private:
 
     LookupPath lookupPath;
 
-    struct LookupPathResolvedState
-    {
-        SourcePath path;
-        const ref<boost::concurrent_flat_map<CanonPath, std::optional<SourcePath>>> resolvedPaths;
-    };
-
-    const ref<
-        boost::
-            concurrent_flat_map<std::string, std::shared_ptr<LookupPathResolvedState>, StringViewHash, std::equal_to<>>>
+    const ref<boost::concurrent_flat_map<std::string, std::optional<SourcePath>, StringViewHash, std::equal_to<>>>
         lookupPathResolved;
 
     /**
@@ -677,10 +655,9 @@ public:
      *
      * If the specified search path element is a URI, download it.
      *
-     * If it is not found, return `nullptr`.
+     * If it is not found, return `std::nullopt`.
      */
-    std::shared_ptr<LookupPathResolvedState>
-    resolveLookupPathPath(const LookupPath::Path & elem, bool initAccessControl = false);
+    std::optional<SourcePath> resolveLookupPathPath(const LookupPath::Path & elem, bool initAccessControl = false);
 
     /**
      * Evaluate an expression to normal form
@@ -963,6 +940,13 @@ private:
         const SourcePath & basePath,
         const std::shared_ptr<StaticEnv> & staticEnv);
 
+    /**
+     * Current Nix call stack depth, used with `max-call-depth`
+     * setting to throw stack overflow hopefully before we run out of
+     * system stack.
+     */
+    [[gnu::tls_model("initial-exec")]] thread_local static size_t callDepth;
+
 public:
 
     /**
@@ -1060,10 +1044,7 @@ public:
      */
     void mkSingleDerivedPathString(const SingleDerivedPath & p, Value & v);
 
-    /**
-     * @brief Concatenate values with an n-ary version of the `++` operator.
-     */
-    void concatLists(Value & v, std::span<Value * const> lists, const PosIdx pos, std::string_view errorCtx);
+    void concatLists(Value & v, size_t nrLists, Value * const * lists, const PosIdx pos, std::string_view errorCtx);
 
     /**
      * Print statistics, if enabled.
@@ -1147,10 +1128,6 @@ private:
     Counter nrFunctionCalls;
 
 public:
-    // Buffers allocated in Wasm guests on behalf of host functions (e.g. `read_file_v2`).
-    Counter nrWasmGuestAllocs;
-    Counter wasmGuestAllocBytes;
-
     Counter nrThunksAwaited;
     Counter nrThunksAwaitedSlow;
     Counter microsecondsWaiting;
@@ -1193,7 +1170,7 @@ private:
 public:
 
     /**
-     * Evaluation context. This context is propagated to worker threads when a value is evaluated
+     * Per-thread evaluation context. This context is propagated to worker threads when a value is evaluated
      * asynchronously.
      */
     struct EvalContext
@@ -1201,35 +1178,25 @@ public:
         std::shared_ptr<const Provenance> provenance;
     };
 
-    /**
-     * The evaluation context of the current execution context: a
-     * fiber's own context while a fiber is running (`Executor::runFiber()`
-     * swaps it with the context stored in the fiber record on every
-     * switch-in/out, which is just a pointer exchange, i.e. doesn't
-     * touch the `provenance` shared_ptr's atomic reference count), or
-     * the thread's own context otherwise.
-     */
     [[gnu::tls_model("initial-exec")]] thread_local static EvalContext evalContext;
 
     /**
      * Create a work item that propagates the current evaluation context.
      *
      * Tecnix tracked evaluation must not spawn work: work items capture only
-     * owned state, but a tracking context is a non-owning pointer into the
-     * spawner's stack, and contexts are confined to the fiber or thread that
-     * created them by design (`Executor::runFiber()` swaps
-     * `currentTecnixThreadState` on every fiber switch; the only cross-fiber
-     * dependency channel is the published label on a finished value).
-     * Detached prefetch sites skip spawning under tracking; anything else
-     * fails loudly here instead of dangling.
+     * owned state, but a tracking context is a non-owning pointer into
+     * another thread's stack, and contexts are thread-confined by design (the
+     * only cross-thread dependency channel is the published label on a
+     * finished value). Detached prefetch sites skip spawning under tracking;
+     * anything else fails loudly here instead of dangling.
      */
     template<typename T>
     auto makeWork(T && t)
     {
         if (currentTecnixThreadState.trackingContext)
             throw Error("Tecnix tracked evaluation must not spawn parallel evaluation work");
-        return [this, t{std::move(t)}, evalContext(evalContext)]() mutable {
-            this->evalContext = std::move(evalContext);
+        return [this, t{std::move(t)}, evalContext(evalContext)]() {
+            this->evalContext = evalContext;
             t();
         };
     }

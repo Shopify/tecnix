@@ -4,7 +4,11 @@ source common.sh
 
 TODO_NixOS
 
-export REMOTE_STORE="file://$cacheDir"
+clearStore
+
+rm -f "$TEST_ROOT"/result
+
+export REMOTE_STORE=file:$TEST_ROOT/remote_store
 echo 'require-sigs = false' >> "$test_nix_conf"
 
 restartDaemon

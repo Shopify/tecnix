@@ -8,9 +8,8 @@ namespace nix {
 class AutoRemoveJail
 {
     static constexpr int INVALID_JAIL = -1;
-public:
     int jid = INVALID_JAIL;
-    std::vector<std::filesystem::path> childrenMounts;
+public:
     AutoRemoveJail() = default;
     AutoRemoveJail(int jid);
     AutoRemoveJail(const AutoRemoveJail &) = delete;

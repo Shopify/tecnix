@@ -15,7 +15,6 @@
       "type": "directory"
     },
     "foo": {
-      "executable": false,
       "size": 15,
       "type": "regular"
     }

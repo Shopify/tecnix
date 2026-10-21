@@ -4,6 +4,7 @@
 #include <memory>
 #include <type_traits>
 
+#include "nix/util/compression-algo.hh"
 #include "nix/util/fun.hh"
 #include "nix/util/types.hh"
 #include "nix/util/util.hh"
@@ -20,13 +21,6 @@ namespace nix {
  */
 struct Sink
 {
-private:
-    /* VTable anchor to avoid weak linkage of the vtable - it breaks
-       dynamic_cast across shared libraries on Darwin. */
-    virtual void anchor();
-
-public:
-
     virtual ~Sink() {}
 
     virtual void operator()(std::string_view data) = 0;
@@ -40,19 +34,13 @@ public:
 /**
  * Just throws away data.
  */
-class NullSink : public Sink
+struct NullSink : Sink
 {
-    void anchor() override;
-
-public:
     void operator()(std::string_view data) override {}
 };
 
-class FinishSink : public virtual Sink
+struct FinishSink : virtual Sink
 {
-    void anchor() override;
-
-public:
     virtual void finish() = 0;
 };
 
@@ -60,11 +48,8 @@ public:
  * A buffered abstract sink. Warning: a BufferedSink should not be
  * used from multiple threads concurrently.
  */
-class BufferedSink : public virtual Sink
+struct BufferedSink : virtual Sink
 {
-    void anchor() override;
-
-public:
     size_t bufSize, bufPos;
     std::unique_ptr<char[]> buffer;
 
@@ -79,14 +64,6 @@ public:
 
     void flush();
 
-    /**
-     * Check whether the buffer has unflushed data.
-     */
-    bool hasData() const noexcept
-    {
-        return bufPos;
-    }
-
 protected:
 
     virtual void writeUnbuffered(std::string_view data) = 0;
@@ -97,12 +74,6 @@ protected:
  */
 struct Source
 {
-private:
-    /* VTable anchor to avoid weak linkage of the vtable - it breaks
-       dynamic_cast across shared libraries on Darwin. */
-    virtual void anchor();
-
-public:
     virtual ~Source() {}
 
     /**
@@ -125,19 +96,7 @@ public:
         return true;
     }
 
-    /**
-     * Read the rest of this `Source` into `sink`.
-     */
     void drainInto(Sink & sink);
-
-    /**
-     * Read exactly 'len' bytes and write them to 'sink'.
-     *
-     * Virtual in anticipation that some `Source` implementations, like
-     * `FdSource` may eventually be able to provide more performant
-     * implementations of this function.
-     */
-    virtual void drainInto(Sink & sink, uint64_t len);
 
     std::string drain();
 
@@ -148,11 +107,8 @@ public:
  * A buffered abstract source. Warning: a BufferedSource should not be
  * used from multiple threads concurrently.
  */
-class BufferedSource : public virtual Source
+struct BufferedSource : virtual Source
 {
-    void anchor() override;
-
-public:
     size_t bufSize, bufPosIn, bufPosOut;
     std::unique_ptr<char[]> buffer;
 
@@ -183,11 +139,8 @@ protected:
 /**
  * Source type that can be restarted.
  */
-class RestartableSource : public virtual Source
+struct RestartableSource : virtual Source
 {
-    void anchor() override;
-
-public:
     virtual void restart() = 0;
 };
 
@@ -196,18 +149,8 @@ public:
  */
 struct FdSink : BufferedSink
 {
-private:
-    void anchor() override;
-
-public:
     Descriptor fd;
     size_t written = 0;
-    /**
-     * A hint to the sink as to whether the destination is a regular file.
-     * Specifying a true for a non regular file doesn't affect correctness - only
-     * efficiency.
-     */
-    bool isRegularFile:1 = false;
 
     FdSink()
         : fd(INVALID_DESCRIPTOR)
@@ -223,7 +166,6 @@ public:
     FdSink(const FdSink &) = delete;
     FdSink & operator=(const FdSink &) = delete;
 
-    // NOLINTNEXTLINE(performance-noexcept-move-constructor) - can throw
     FdSink & operator=(FdSink && s)
     {
         flush();
@@ -248,10 +190,6 @@ private:
  */
 struct FdSource : BufferedSource, RestartableSource
 {
-private:
-    void anchor() override;
-
-public:
     Descriptor fd;
     size_t read = 0;
     BackedStringView endOfFileError{"unexpected end-of-file"};
@@ -293,11 +231,8 @@ private:
 /**
  * A sink that writes data to a string.
  */
-class StringSink : public Sink
+struct StringSink : Sink
 {
-    void anchor() override;
-
-public:
     std::string s;
 
     StringSink() {}
@@ -315,28 +250,18 @@ public:
 /**
  * A source that reads data from a string.
  */
-class StringSource : public RestartableSource
+struct StringSource : RestartableSource
 {
-    void anchor() override;
-
-    /* Put behind a shared_ptr to make sure that copies and moves don't invalidate pointers
-       into a small string buffer. */
-    std::shared_ptr<const std::string> sOwned;
-
-public:
     std::string_view s;
     size_t pos;
 
-    StringSource(std::string && s)
-        : sOwned(std::make_shared<std::string>(std::move(s)))
-        , s(*sOwned)
-        , pos(0)
-    {
-    }
+    // NOTE: Prevent unintentional dangling views when an implicit conversion
+    // from std::string -> std::string_view occurs when the string is passed
+    // by rvalue.
+    StringSource(std::string &&) = delete;
 
     StringSource(std::string_view s)
-        : sOwned(nullptr)
-        , s(s)
+        : s(s)
         , pos(0)
     {
     }
@@ -357,13 +282,49 @@ public:
 };
 
 /**
- * A sink that writes all incoming data to two other sinks.
+ * Compresses a RestartableSource using the specified compression method.
+ *
+ * @note currently this buffers the entire compressed data stream in memory. In the future it may instead compress data
+ * on demand, lazily pulling from the original `RestartableSource`. In that case, the `size()` method would go away
+ * because we would not in fact know the compressed size in advance.
  */
-class TeeSink : public Sink
+struct CompressedSource : RestartableSource
 {
-    void anchor() override;
+private:
+    std::string compressedData;
+    CompressionAlgo compressionMethod;
+    StringSource stringSource;
 
 public:
+    /**
+     * Compress a RestartableSource using the specified compression method.
+     *
+     * @param source The source data to compress
+     * @param compressionMethod The compression method to use
+     */
+    CompressedSource(RestartableSource & source, CompressionAlgo compressionMethod);
+
+    size_t read(char * data, size_t len) override
+    {
+        return stringSource.read(data, len);
+    }
+
+    void restart() override
+    {
+        stringSource.restart();
+    }
+
+    uint64_t size() const
+    {
+        return compressedData.size();
+    }
+};
+
+/**
+ * A sink that writes all incoming data to two other sinks.
+ */
+struct TeeSink : Sink
+{
     Sink &sink1, &sink2;
 
     TeeSink(Sink & sink1, Sink & sink2)
@@ -382,11 +343,8 @@ public:
 /**
  * Adapter class of a Source that saves all data read to a sink.
  */
-class TeeSource : public Source
+struct TeeSource : Source
 {
-    void anchor() override;
-
-public:
     Source & orig;
     Sink & sink;
 
@@ -407,11 +365,8 @@ public:
 /**
  * A reader that consumes the original Source until 'size'.
  */
-class SizedSource : public Source
+struct SizedSource : Source
 {
-    void anchor() override;
-
-public:
     Source & orig;
     size_t remain;
 
@@ -448,13 +403,23 @@ public:
 };
 
 /**
+ * A sink that that just counts the number of bytes given to it
+ */
+struct LengthSink : Sink
+{
+    uint64_t length = 0;
+
+    void operator()(std::string_view data) override
+    {
+        length += data.size();
+    }
+};
+
+/**
  * A wrapper source that counts the number of bytes read from it.
  */
-class LengthSource : public Source
+struct LengthSource : Source
 {
-    void anchor() override;
-
-public:
     Source & next;
 
     LengthSource(Source & next)
@@ -475,11 +440,8 @@ public:
 /**
  * Convert a function into a sink.
  */
-class LambdaSink : public Sink
+struct LambdaSink : Sink
 {
-    void anchor() override;
-
-public:
     typedef fun<void(std::string_view data)> data_t;
     typedef fun<void()> cleanup_t;
 
@@ -512,11 +474,8 @@ public:
 /**
  * Convert a function into a source.
  */
-class LambdaSource : public Source
+struct LambdaSource : Source
 {
-    void anchor() override;
-
-public:
     typedef fun<size_t(char *, size_t)> lambda_t;
 
     lambda_t lambda;
@@ -536,11 +495,8 @@ public:
  * Chain two sources together so after the first is exhausted, the second is
  * used
  */
-class ChainSource : public Source
+struct ChainSource : Source
 {
-    void anchor() override;
-
-public:
     Source &source1, &source2;
     bool useSecond = false;
 
@@ -632,10 +588,6 @@ inline uint64_t readLongLong(Source & source)
     return readNum<uint64_t>(source);
 }
 
-/**
- * Read padding bytes to align `len` up to a multiple of 8. Throws
- * SerialisationError if any padding byte is non-zero.
- */
 void readPadding(size_t len, Source & source);
 size_t readString(char * buf, size_t max, Source & source);
 std::string readString(Source & source, size_t max = std::numeric_limits<size_t>::max());
@@ -661,6 +613,31 @@ Source & operator>>(Source & in, bool & b)
 Error readError(Source & source);
 
 /**
+ * An adapter that converts a std::basic_istream into a source.
+ */
+struct StreamToSourceAdapter : Source
+{
+    std::shared_ptr<std::basic_istream<char>> istream;
+
+    StreamToSourceAdapter(std::shared_ptr<std::basic_istream<char>> istream)
+        : istream(istream)
+    {
+    }
+
+    size_t read(char * data, size_t len) override
+    {
+        if (!istream->read(data, len)) {
+            if (istream->eof()) {
+                if (istream->gcount() == 0)
+                    throw EndOfFile("end of file");
+            } else
+                throw Error("I/O error in StreamToSourceAdapter");
+        }
+        return istream->gcount();
+    }
+};
+
+/**
  * A source that reads a distinct format of concatenated chunks back into its
  * logical form, in order to guarantee a known state to the original stream,
  * even in the event of errors.
@@ -668,16 +645,13 @@ Error readError(Source & source);
  * Use with FramedSink, which also allows the logical stream to be terminated
  * in the event of an exception.
  */
-class FramedSource : public Source
+struct FramedSource : Source
 {
     Source & from;
     bool eof = false;
     std::vector<char> pending;
     size_t pos = 0;
 
-    void anchor() override;
-
-public:
     FramedSource(Source & from)
         : from(from)
     {
@@ -696,8 +670,8 @@ public:
                     auto n = readInt(from);
                     if (!n)
                         break;
-                    pending.resize(n);
-                    from(pending.data(), n);
+                    std::vector<char> data(n);
+                    from(data.data(), n);
                 }
             }
         } catch (...) {
@@ -716,12 +690,11 @@ public:
                 eof = true;
                 return 0;
             }
-            pending.resize(len);
+            pending = std::vector<char>(len);
             pos = 0;
             from(pending.data(), len);
         }
 
-        assert(pending.size() > pos); /* Sanity check. */
         auto n = std::min(len, pending.size() - pos);
         memcpy(data, pending.data() + pos, n);
         pos += n;
@@ -735,14 +708,11 @@ public:
  * The `checkError` function can be used to terminate the stream when you
  * detect that an error has occurred. It does so by throwing an exception.
  */
-class FramedSink : public nix::BufferedSink
+struct FramedSink : nix::BufferedSink
 {
     BufferedSink & to;
     fun<void()> checkError;
 
-    void anchor() override;
-
-public:
     FramedSink(BufferedSink & to, fun<void()> && checkError)
         : to(to)
         , checkError(checkError)
@@ -777,14 +747,11 @@ public:
 /**
  * A wrapper source that ensures that at least a specified number of bytes are read from the underlying source.
  */
-class EnsureRead : public Source
+struct EnsureRead : Source
 {
     Source & source;
     uint64_t bytesRead = 0, bytesExpected;
 
-    void anchor() override;
-
-public:
     EnsureRead(Source & source, uint64_t bytesExpected)
         : source(source)
         , bytesExpected(bytesExpected)

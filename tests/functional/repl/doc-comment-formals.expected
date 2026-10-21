@@ -2,8 +2,7 @@ Nix <nix version>
 Type :? for help.
 
 nix-repl> :l doc-comments.nix
-Added 13 variables.
-compact, constant, curriedArgs, documentedFormals, floatedIn, lib, measurement, multiply, nonStrict, strict, strictPost, strictPre, unambiguous
+Added <number omitted> variables.
 
 nix-repl> "Note that this is not yet complete"
 "Note that this is not yet complete"

@@ -8,7 +8,7 @@ project(
     'warning_level=1',
     'errorlogs=true', # Please print logs for tests that fail
   ],
-  meson_version : '>= 1.8',
+  meson_version : '>= 1.1',
   license : 'LGPL-2.1-or-later',
 )
 
@@ -47,32 +47,15 @@ headers = files(
 subdir('nix-meson-build-support/export-all-symbols')
 subdir('nix-meson-build-support/windows-version')
 
-# For linking -c bindings into the cli for plugins.
-build_both_libraries = get_option('plugin-c-api')
-
-library_kwargs = {
-  'dependencies' : deps_public + deps_private + deps_other,
-  'include_directories' : include_dirs,
-  'link_args' : linker_export_flags,
-  'install' : true,
-}
-
-if build_both_libraries
-  this_libraries = both_libraries(
-    'nixexprc',
-    sources,
-    kwargs : library_kwargs,
-    override_options : [ 'b_lto=false' ],
-  )
-else
-  this_library = library(
-    'nixexprc',
-    sources,
-    kwargs : library_kwargs,
-  )
-endif
-
-plugin_c_api_enabled = build_both_libraries
+this_library = library(
+  'nixexprc',
+  sources,
+  dependencies : deps_public + deps_private + deps_other,
+  include_directories : include_dirs,
+  link_args : linker_export_flags,
+  prelink : prelink, # For C++ static initializers
+  install : true,
+)
 
 install_headers(headers, preserve_path : true)
 

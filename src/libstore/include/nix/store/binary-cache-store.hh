@@ -16,14 +16,7 @@ class RemoteFSAccessor;
 
 struct BinaryCacheStoreConfig : virtual StoreConfig
 {
-private:
-    void anchor() override;
-
-public:
-    BinaryCacheStoreConfig(const Params & params)
-        : StoreConfig(params, FilePathType::Unix)
-    {
-    }
+    using StoreConfig::StoreConfig;
 
     Setting<CompressionAlgo> compression{
         this,
@@ -46,8 +39,8 @@ public:
           fetch debug info on demand
         )"};
 
-    Setting<std::optional<AbsolutePath>> secretKeyFile{
-        this, std::nullopt, "secret-key", "Path to the secret key used to sign the binary cache."};
+    Setting<AbsolutePath> secretKeyFile{
+        this, "", "secret-key", "Path to the secret key used to sign the binary cache."};
 
     Setting<std::string> secretKeyFiles{
         this, "", "secret-keys", "List of comma-separated paths to the secret keys used to sign the binary cache."};
@@ -62,11 +55,7 @@ public:
         this,
         false,
         "parallel-compression",
-        R"(
-          Enable multi-threaded compression of NARs. This is currently only available for `xz` and `zstd`.
-
-          If not set explicitly, defaults to `true` when `compression` is `zstd` and `false` otherwise.
-        )"};
+        "Enable multi-threaded compression of NARs. This is currently only available for `xz` and `zstd`."};
 
     Setting<int> compressionLevel{
         this,
@@ -96,26 +85,14 @@ struct alignas(8) /* Work around ASAN failures on i686-linux. */
     Config & config;
 
 private:
-    void anchor() override;
-
     std::vector<std::unique_ptr<Signer>> signers;
 
 protected:
 
     /**
      * The prefix under which realisation infos will be stored
-     *
-     * @note The previous (still experimental, though) hash-keyed
-     * realisations were under "realisations". "build trace" is a better
-     * name anyways (issue #11895). This is call "v2" accordingly.
-     *
-     * While we're experimenting, we'll freely increase this version
-     * number. Old build traces will just be "abandoned" at the old URL.
-     * When we are done experimenting, we'll try lean more on versioning
-     * the build trace entries themselves than the entire directory, for
-     * a smoother migration path.
      */
-    constexpr const static std::string realisationsPrefix = "build-trace-v2";
+    constexpr const static std::string realisationsPrefix = "realisations";
 
     constexpr const static std::string cacheInfoFile = "nix-cache-info";
 
@@ -134,7 +111,7 @@ protected:
     /**
      * Compute the path to the given realisation
      *
-     * It's `${realisationsPrefix}/${drvPath}/${outputName}`.
+     * It's `${realisationsPrefix}/${drvOutput}.doi`.
      */
     std::string makeRealisationPath(const DrvOutput & id);
 

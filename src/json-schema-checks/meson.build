@@ -6,7 +6,7 @@
 project(
   'nix-json-schema-checks',
   version : files('.version'),
-  meson_version : '>= 1.8',
+  meson_version : '>= 1.1',
   license : 'LGPL-2.1-or-later',
 )
 
@@ -52,13 +52,6 @@ schemas = [
     ],
   },
   {
-    'stem' : 'signature',
-    'schema' : schema_dir / 'signature-v2.yaml',
-    'files' : [
-      'simple.json',
-    ],
-  },
-  {
     'stem' : 'deriving-path',
     'schema' : schema_dir / 'deriving-path-v1.yaml',
     'files' : [
@@ -69,9 +62,12 @@ schemas = [
   },
   {
     'stem' : 'build-trace-entry',
-    'schema' : schema_dir / 'build-trace-entry-v3.yaml',
+    'schema' : schema_dir / 'build-trace-entry-v2.yaml',
     'files' : [
       'simple.json',
+      # The field is no longer supported, but we want to show that we
+      # ignore it during parsing.
+      'with-dependent-realisations.json',
       'with-signature.json',
     ],
   },
@@ -98,17 +94,6 @@ schemas += [
     'files' : [
       'dyn-dep-derivation.json',
       'simple-derivation.json',
-      'try-resolve' / 'no-inputs-before.json',
-      'try-resolve' / 'with-inputs-before.json',
-      'try-resolve' / 'resolution-failure-before.json',
-    ],
-  },
-  {
-    'stem' : 'derivation',
-    'schema' : schema_dir / 'derivation-resolved-v4.yaml',
-    'files' : [
-      'try-resolve' / 'no-inputs-after.json',
-      'try-resolve' / 'with-inputs-after.json',
     ],
   },
   {
@@ -169,20 +154,20 @@ schemas += [
   # Match overall
   {
     'stem' : 'store-object-info',
-    'schema' : schema_dir / 'store-object-info-v3.yaml',
+    'schema' : schema_dir / 'store-object-info-v2.yaml',
     'files' : [
-      'json-3' / 'pure.json',
-      'json-3' / 'impure.json',
-      'json-3' / 'empty_pure.json',
-      'json-3' / 'empty_impure.json',
+      'json-2' / 'pure.json',
+      'json-2' / 'impure.json',
+      'json-2' / 'empty_pure.json',
+      'json-2' / 'empty_impure.json',
     ],
   },
   {
     'stem' : 'nar-info',
-    'schema' : schema_dir / 'store-object-info-v3.yaml',
+    'schema' : schema_dir / 'store-object-info-v2.yaml',
     'files' : [
-      'json-3' / 'pure.json',
-      'json-3' / 'impure.json',
+      'json-2' / 'pure.json',
+      'json-2' / 'impure.json',
     ],
   },
   {
@@ -197,32 +182,32 @@ schemas += [
   # Match exact variant
   {
     'stem' : 'store-object-info',
-    'schema' : schema_dir / 'store-object-info-v3.yaml#/$defs/base',
+    'schema' : schema_dir / 'store-object-info-v2.yaml#/$defs/base',
     'files' : [
-      'json-3' / 'pure.json',
-      'json-3' / 'empty_pure.json',
+      'json-2' / 'pure.json',
+      'json-2' / 'empty_pure.json',
     ],
   },
   {
     'stem' : 'store-object-info',
-    'schema' : schema_dir / 'store-object-info-v3.yaml#/$defs/impure',
+    'schema' : schema_dir / 'store-object-info-v2.yaml#/$defs/impure',
     'files' : [
-      'json-3' / 'impure.json',
-      'json-3' / 'empty_impure.json',
+      'json-2' / 'impure.json',
+      'json-2' / 'empty_impure.json',
     ],
   },
   {
     'stem' : 'nar-info',
-    'schema' : schema_dir / 'store-object-info-v3.yaml#/$defs/base',
+    'schema' : schema_dir / 'store-object-info-v2.yaml#/$defs/base',
     'files' : [
-      'json-3' / 'pure.json',
+      'json-2' / 'pure.json',
     ],
   },
   {
     'stem' : 'nar-info',
-    'schema' : schema_dir / 'store-object-info-v3.yaml#/$defs/narInfo',
+    'schema' : schema_dir / 'store-object-info-v2.yaml#/$defs/narInfo',
     'files' : [
-      'json-3' / 'impure.json',
+      'json-2' / 'impure.json',
     ],
   },
 ]

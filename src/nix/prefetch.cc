@@ -3,13 +3,15 @@
 #include "nix/main/shared.hh"
 #include "nix/store/store-open.hh"
 #include "nix/store/filetransfer.hh"
+#include "nix/util/finally.hh"
 #include "nix/main/loggers.hh"
 #include "nix/util/tarfile.hh"
 #include "nix/expr/attr-path.hh"
 #include "nix/expr/eval-inline.hh"
 #include "nix/cmd/legacy.hh"
-#include "nix/util/source-accessor.hh"
+#include "nix/util/posix-source-accessor.hh"
 #include "nix/cmd/misc-store-flags.hh"
+#include "nix/util/terminal.hh"
 #include "nix/util/environment-variables.hh"
 #include "nix/util/url.hh"
 #include "nix/store/path.hh"
@@ -20,7 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace nix {
+using namespace nix;
 
 /* If ‘url’ starts with ‘mirror://’, then resolve it using the list of
    mirrors defined in Nixpkgs. */
@@ -359,5 +361,3 @@ struct CmdStorePrefetchFile : StoreCommand, MixJSON
 };
 
 static auto rCmdStorePrefetchFile = registerCommand2<CmdStorePrefetchFile>({"store", "prefetch-file"});
-
-} // namespace nix

@@ -18,6 +18,7 @@ create table if not exists Refs (
     foreign key (reference) references ValidPaths(id) on delete restrict
 );
 
+create index if not exists IndexReferrer on Refs(referrer);
 create index if not exists IndexReference on Refs(reference);
 
 -- Paths can refer to themselves, causing a tuple (N, N) in the Refs

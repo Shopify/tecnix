@@ -45,7 +45,7 @@ struct DerivationGoal : public Goal
      */
     DerivationGoal(
         const StorePath & drvPath,
-        ref<const Derivation> drv,
+        const Derivation & drv,
         const OutputName & wantedOutput,
         Worker & worker,
         BuildMode buildMode,
@@ -64,7 +64,9 @@ private:
     /**
      * The derivation stored at drvPath.
      */
-    ref<const Derivation> drv;
+    std::unique_ptr<Derivation> drv;
+
+    const Hash outputHash;
 
     const BuildMode buildMode;
 

@@ -27,19 +27,22 @@ protected:
     ref<DummyStoreConfig> config;
 };
 
+static Derivation makeSimpleDrv()
+{
+    Derivation drv;
+    drv.name = "simple-derivation";
+    drv.platform = "system";
+    drv.builder = "foo";
+    drv.args = {"bar", "baz"};
+    drv.env = StringPairs{{"BIG_BAD", "WOLF"}};
+    return drv;
+}
+
 } // namespace
 
 TEST_F(WriteDerivationTest, addToStoreFromDumpCalledOnce)
 {
-    auto drv = []() {
-        Derivation drv;
-        drv.name = "simple-derivation";
-        drv.platform = "system";
-        drv.builder = "foo";
-        drv.args = {"bar", "baz"};
-        drv.env = StringPairs{{"BIG_BAD", "WOLF"}};
-        return drv;
-    }();
+    auto drv = makeSimpleDrv();
 
     auto path1 = store->writeDerivation(drv, NoRepair);
     config->readOnly = true;

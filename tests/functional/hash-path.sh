@@ -73,6 +73,7 @@ try2 () {
     fi
 }
 
+rm -rf "$TEST_ROOT/hash-path"
 mkdir "$TEST_ROOT/hash-path"
 echo "Hello World" > "$TEST_ROOT/hash-path/hello"
 

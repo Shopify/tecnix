@@ -3,11 +3,9 @@
 #include "nix/util/url-parts.hh"
 #include "nix/store/path.hh"
 
-#include <boost/regex.hpp>
-
 namespace nix::fetchers {
 
-boost::regex flakeRegex("[a-zA-Z][a-zA-Z0-9_-]*", boost::regex::ECMAScript);
+std::regex flakeRegex("[a-zA-Z][a-zA-Z0-9_-]*", std::regex::ECMAScript);
 
 struct IndirectInputScheme : InputScheme
 {
@@ -41,7 +39,7 @@ struct IndirectInputScheme : InputScheme
             throw BadURL("GitHub URL '%s' is invalid", url);
 
         std::string id = path[0];
-        if (!boost::regex_match(id, flakeRegex))
+        if (!std::regex_match(id, flakeRegex))
             throw BadURL("'%s' is not a valid flake ID", id);
 
         // FIXME: forbid query params?
@@ -94,7 +92,7 @@ struct IndirectInputScheme : InputScheme
     std::optional<Input> inputFromAttrs(const Settings & settings, const Attrs & attrs) const override
     {
         auto id = getStrAttr(attrs, "id");
-        if (!boost::regex_match(id, flakeRegex))
+        if (!std::regex_match(id, flakeRegex))
             throw BadURL("'%s' is not a valid flake ID", id);
 
         Input input{};

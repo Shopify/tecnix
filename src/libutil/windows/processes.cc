@@ -25,10 +25,14 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#ifdef _WIN32
+
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
 
 namespace nix {
+
+using namespace nix::windows;
 
 Pid::Pid() {}
 
@@ -62,7 +66,7 @@ int Pid::kill(bool allowInterrupts)
     debug("killing process %1%", pid.get());
 
     if (!TerminateProcess(pid.get(), 1))
-        logError(windows::WinError("terminating process %1%", pid.get()).info());
+        logError(WinError("terminating process %1%", pid.get()).info());
 
     return wait(allowInterrupts);
 }
@@ -74,26 +78,31 @@ int Pid::wait(bool allowInterrupts)
     assert(pid.get() != INVALID_DESCRIPTOR);
     DWORD status = WaitForSingleObject(pid.get(), INFINITE);
     if (status != WAIT_OBJECT_0)
-        throw windows::WinError("waiting for process %1%", pid.get());
+        throw WinError("waiting for process %1%", pid.get());
 
     DWORD exitCode = 0;
     if (GetExitCodeProcess(pid.get(), &exitCode) == FALSE)
-        throw windows::WinError("getting exit code of process %1%", pid.get());
+        throw WinError("getting exit code of process %1%", pid.get());
 
     pid.close();
     return exitCode;
 }
 
 // TODO: Merge this with Unix's runProgram since it's identical logic.
-std::string runProgram(std::filesystem::path program, bool lookupPath, const OsStrings & args, bool isInteractive)
+std::string runProgram(
+    std::filesystem::path program,
+    bool lookupPath,
+    const OsStrings & args,
+    const std::optional<std::string> & input,
+    bool isInteractive)
 {
     auto res = runProgram(
         RunOptions{
             .program = program,
             .lookupPath = lookupPath,
             .args = args,
-            .isInteractive = isInteractive,
-        });
+            .input = input,
+            .isInteractive = isInteractive});
 
     if (!statusOk(res.first))
         throw ExecError(res.first, "program %s %s", PathFmt(program), statusToString(res.first));
@@ -119,7 +128,7 @@ void setFDInheritable(AutoCloseFD & fd, bool inherit)
 {
     if (fd.get() != INVALID_DESCRIPTOR) {
         if (!SetHandleInformation(fd.get(), HANDLE_FLAG_INHERIT, inherit ? HANDLE_FLAG_INHERIT : 0)) {
-            throw windows::WinError("Couldn't disable inheriting of handle");
+            throw WinError("Couldn't disable inheriting of handle");
         }
     }
 }
@@ -139,7 +148,7 @@ AutoCloseFD nullFD()
         0,
         NULL);
     if (!nul.get()) {
-        throw windows::WinError("Couldn't open NUL device");
+        throw WinError("Couldn't open NUL device");
     }
     // Let this handle be inheritable by child processes
     setFDInheritable(nul, true);
@@ -192,7 +201,7 @@ OsString windowsEscape(const OsString & str, bool cmd)
     return buffer + L'"';
 }
 
-Pid spawnProcess(const std::filesystem::path & realProgram, const RunOptions & options, Pipe & out)
+Pid spawnProcess(const std::filesystem::path & realProgram, const RunOptions & options, Pipe & out, Pipe & in)
 {
     // Setup pipes.
     if (options.standardOut) {
@@ -201,13 +210,17 @@ Pid spawnProcess(const std::filesystem::path & realProgram, const RunOptions & o
     } else {
         out.writeSide = nullFD();
     }
-
-    AutoCloseFD in = nullFD();
+    if (options.standardIn) {
+        // Don't inherit the write end of the input pipe
+        setFDInheritable(in.writeSide, false);
+    } else {
+        in.readSide = nullFD();
+    }
 
     STARTUPINFOW startInfo = {0};
     startInfo.cb = sizeof(startInfo);
     startInfo.dwFlags = STARTF_USESTDHANDLES;
-    startInfo.hStdInput = in.get();
+    startInfo.hStdInput = in.readSide.get();
     startInfo.hStdOutput = out.writeSide.get();
     startInfo.hStdError = out.writeSide.get();
 
@@ -247,7 +260,7 @@ Pid spawnProcess(const std::filesystem::path & realProgram, const RunOptions & o
             &startInfo,
             &procInfo)
         == 0) {
-        throw windows::WinError("CreateProcessW failed (%1%)", os_string_to_string(cmdline));
+        throw WinError("CreateProcessW failed (%1%)", os_string_to_string(cmdline));
     }
 
     // Convert these to use RAII
@@ -260,30 +273,60 @@ Pid spawnProcess(const std::filesystem::path & realProgram, const RunOptions & o
     Descriptor job = CreateJobObjectW(NULL, NULL);
     if (job == NULL) {
         TerminateProcess(procInfo.hProcess, 0);
-        throw windows::WinError("Couldn't create job object for child process");
+        throw WinError("Couldn't create job object for child process");
     }
     if (AssignProcessToJobObject(job, procInfo.hProcess) == FALSE) {
         TerminateProcess(procInfo.hProcess, 0);
-        throw windows::WinError("Couldn't assign child process to job object");
+        throw WinError("Couldn't assign child process to job object");
     }
     if (ResumeThread(procInfo.hThread) == (DWORD) -1) {
         TerminateProcess(procInfo.hProcess, 0);
-        throw windows::WinError("Couldn't resume child process thread");
+        throw WinError("Couldn't resume child process thread");
     }
 
     return process;
+}
+
+// TODO: Merge this with Unix's runProgram since it's identical logic.
+// Output = error code + "standard out" output stream
+std::pair<int, std::string> runProgram(RunOptions && options)
+{
+    StringSink sink;
+    options.standardOut = &sink;
+
+    int status = 0;
+
+    try {
+        runProgram2(options);
+    } catch (ExecError & e) {
+        status = e.status;
+    }
+
+    return {status, std::move(sink.s)};
 }
 
 void runProgram2(const RunOptions & options)
 {
     checkInterrupt();
 
+    assert(!(options.standardIn && options.input));
+
+    std::unique_ptr<Source> source_;
+    Source * source = options.standardIn;
+
+    if (options.input) {
+        source_ = std::make_unique<StringSource>(*options.input);
+        source = source_.get();
+    }
+
     /* Create a pipe. */
-    Pipe out;
+    Pipe out, in;
     // TODO: I copied this from unix but this is handled again in spawnProcess, so might be weird to split it up like
     // this
     if (options.standardOut)
         out.create();
+    if (source)
+        in.create();
 
     std::filesystem::path realProgram = options.program;
     // TODO: Implement shebang / program interpreter lookup on Windows
@@ -291,16 +334,52 @@ void runProgram2(const RunOptions & options)
 
     auto suspension = logger->suspendIf(options.isInteractive);
 
-    Pid pid = spawnProcess(interpreter.has_value() ? *interpreter : realProgram, options, out);
+    Pid pid = spawnProcess(interpreter.has_value() ? *interpreter : realProgram, options, out, in);
 
     // TODO: This is identical to unix, deduplicate?
     out.writeSide.close();
+
+    std::thread writerThread;
+
+    std::promise<void> promise;
+
+    Finally doJoin([&] {
+        if (writerThread.joinable())
+            writerThread.join();
+    });
+
+    if (source) {
+        in.readSide.close();
+        writerThread = std::thread([&] {
+            try {
+                std::vector<char> buf(8 * 1024);
+                while (true) {
+                    size_t n;
+                    try {
+                        n = source->read(buf.data(), buf.size());
+                    } catch (EndOfFile &) {
+                        break;
+                    }
+                    writeFull(in.writeSide.get(), {buf.data(), n});
+                }
+                promise.set_value();
+            } catch (...) {
+                promise.set_exception(std::current_exception());
+            }
+            in.writeSide.close();
+        });
+    }
 
     if (options.standardOut)
         drainFD(out.readSide.get(), *options.standardOut);
 
     /* Wait for the child to finish. */
     int status = pid.wait();
+
+    /* Wait for the writer thread to finish. */
+    if (source)
+        promise.get_future().get();
+
     if (status)
         throw ExecError(status, "program %1% %2%", PathFmt(options.program), statusToString(status));
 }
@@ -325,3 +404,5 @@ int execvpe(const wchar_t * file0, const wchar_t * const argv[], const wchar_t *
 }
 
 } // namespace nix
+
+#endif

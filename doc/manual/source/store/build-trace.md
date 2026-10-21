@@ -8,7 +8,7 @@
 
 The *build trace* is a [memoization table](https://en.wikipedia.org/wiki/Memoization) for builds.
 It maps the inputs of builds to the outputs of builds.
-Each *[entry]{#entry}* in the build trace maps a [derivation][derivation] to a map of [output] names to [store objects][store object].
+Concretely, that means it maps [derivations][derivation] to maps of [output] names to [store objects][store object].
 
 In general the derivations used as a key should be [*resolved*](./resolution.md).
 A build trace with all-resolved-derivation keys is also called a *base build trace* for extra clarity.

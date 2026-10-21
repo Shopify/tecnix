@@ -13,7 +13,7 @@
 #include "nix/util/config-global.hh"
 #include "self-exe.hh"
 
-namespace nix {
+using namespace nix;
 
 /**
  * Settings related to upgrading Nix itself.
@@ -36,7 +36,7 @@ struct UpgradeSettings : Config
 
 UpgradeSettings upgradeSettings;
 
-static GlobalConfig::Register rUpgradeSettings(&upgradeSettings);
+static GlobalConfig::Register rSettings(&upgradeSettings);
 
 struct CmdUpgradeNix : MixDryRun, StoreCommand
 {
@@ -74,5 +74,3 @@ struct CmdUpgradeNix : MixDryRun, StoreCommand
 };
 
 static auto rCmdUpgradeNix = registerCommand<CmdUpgradeNix>("upgrade-nix");
-
-} // namespace nix

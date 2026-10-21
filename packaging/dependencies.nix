@@ -16,52 +16,19 @@ in
 scope: {
   inherit stdenv;
 
-  mimalloc =
-    (
-      if lib.versionAtLeast pkgs.mimalloc.version "3.3.2" then
-        pkgs.mimalloc
-      else
-        pkgs.mimalloc.overrideAttrs rec {
-          version = "3.3.2";
-          src = pkgs.fetchFromGitHub {
-            owner = "microsoft";
-            repo = "mimalloc";
-            tag = "v${version}";
-            hash = "sha256-GZ37qQVDe9jgMb4Coe5oKvgaLTspZDlSkS5rdy1MfUU=";
-          };
-        }
-    ).overrideAttrs
-      (attrs: {
-        cmakeFlags = (attrs.cmakeFlags or [ ]) ++ [
-          # Don't `madvise(MADV_HUGEPAGE)` the 1 GiB arenas that
-          # mimalloc reserves. With the common kernel setting
-          # `transparent_hugepage/defrag=madvise`, that hint makes
-          # every first touch of a 2 MiB region in the arena attempt
-          # a huge page allocation with synchronous direct compaction.
-          # On a machine with fragmented physical memory this fails
-          # almost every time and costs several milliseconds per
-          # fault, which more than doubled the CPU time of evaluating
-          # large flakes. Defining this preprocessor macro only skips
-          # the `madvise()` call. (The cmake option `MI_NO_THP` and
-          # the runtime option `MIMALLOC_ALLOW_THP=0` are not
-          # equivalent: they also call `prctl(PR_SET_THP_DISABLE)`,
-          # which disables huge pages for the entire process and is
-          # inherited by the programs that `nix run` etc. execute.)
-          "-DMI_EXTRA_CPPDEFS=MI_NO_THP"
-        ];
-      });
-
   boehmgc =
     (pkgs.boehmgc.override {
       enableLargeConfig = true;
       inherit stdenv;
     }).overrideAttrs
       (attrs: {
-        src = inputs.bdwgc;
-
-        nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [
-          pkgs.buildPackages.autoreconfHook
-        ];
+        # Reduce contention on the GC allocation lock during parallel
+        # evaluation by handing out multiple heap blocks worth of
+        # objects per lock acquisition in GC_generic_malloc_many().
+        # The default batch size is set via GC_MANY_BLOCKS_DEFAULT
+        # below and can be overridden at runtime through the
+        # GC_MALLOC_MANY_BLOCKS environment variable.
+        patches = (attrs.patches or [ ]) ++ [ ./patches/boehmgc-batch-malloc-many.patch ];
 
         env = (attrs.env or { }) // {
           # Increase the initial mark stack size to avoid stack
@@ -74,24 +41,6 @@ scope: {
             [
               "-DINITIAL_MARK_STACK_SIZE=1048576"
               "-DGC_MANY_BLOCKS_DEFAULT=64"
-              # Disable black-listing (avoiding allocation on pages that
-              # false pointers refer to). The black lists are hash
-              # tables covering 8 GiB of address space; on larger heaps
-              # they alias and saturate, at which point the allocator
-              # cannot find any usable block for pointer-containing
-              # objects and aborts with "Too many retries in
-              # GC_allocobj" (bdwgc issues #691, #726). Nix doesn't
-              # benefit much from black-listing since interior pointers
-              # are disabled.
-              "-DNO_BLACK_LISTING"
-              # Serve allocations up to 1520 bytes (95 granules) from
-              # the per-thread freelists instead of taking the global
-              # allocation lock. The default (25, i.e. <= 384 bytes) is
-              # too small for parallel evaluation: e.g. a typical
-              # derivation attrset (~46 attrs) is a 752-byte Bindings,
-              # of which nixpkgs evaluation does hundreds of thousands,
-              # all serialized on GC_allocate_ml.
-              "-DGC_TINY_FREELISTS=96"
             ]
             # For some reason that is not clear, it is wanting to use libgcc_eh which is not available.
             # Force this to be built with compiler-rt & libunwind over libgcc_eh works.
@@ -137,28 +86,28 @@ scope: {
             (prevAttrs.postInstall or "");
       });
 
-  curl = pkgs.curl.override {
-    http3Support = !pkgs.stdenv.hostPlatform.isWindows;
-    # Make sure we enable all the dependencies for Content-Encoding/Transfer-Encoding decompression.
-    zstdSupport = true;
-    brotliSupport = true;
-    zlibSupport = true;
-    # libpsl uses a data file needed at runtime, not useful for nix.
-    pslSupport = !stdenv.hostPlatform.isStatic;
-    idnSupport = !stdenv.hostPlatform.isStatic;
-  };
+  curl =
+    (pkgs.curl.override {
+      http3Support = !pkgs.stdenv.hostPlatform.isWindows;
+      # Make sure we enable all the dependencies for Content-Encoding/Transfer-Encoding decompression.
+      zstdSupport = true;
+      brotliSupport = true;
+      zlibSupport = true;
+      # libpsl uses a data file needed at runtime, not useful for nix.
+      pslSupport = !stdenv.hostPlatform.isStatic;
+      idnSupport = !stdenv.hostPlatform.isStatic;
+    }).overrideAttrs
+      {
+        # TODO: Fix in nixpkgs. Static build with brotli is marked as broken, but it's not the case.
+        # Remove once https://github.com/NixOS/nixpkgs/pull/494111 lands in the 25.11 channel.
+        meta.broken = false;
+      };
 
   libblake3 =
     (pkgs.libblake3.override {
       inherit stdenv;
       # Nixpkgs disables tbb on static
-      useTBB =
-        !(
-          stdenv.hostPlatform.isWindows
-          || stdenv.hostPlatform.isStatic
-          # Some tbb tests fail with libc++.
-          || (stdenv.cc.libcxx != null && stdenv.cc.libcxx.isLLVM)
-        );
+      useTBB = !(stdenv.hostPlatform.isWindows || stdenv.hostPlatform.isStatic);
     })
     # For some reason that is not clear, it is wanting to use libgcc_eh which is not available.
     # Force this to be built with compiler-rt & libunwind over libgcc_eh works.
@@ -185,56 +134,6 @@ scope: {
           }
       );
 
-  sqlite =
-    if !stdenv.hostPlatform.isWindows then
-      pkgs.sqlite
-    else
-      pkgs.sqlite.overrideAttrs (prevAttrs: {
-        nativeBuildInputs = lib.filter (x: !(x.pname == "tcl")) prevAttrs.nativeBuildInputs or [ ];
-        configureFlags = (lib.filter (x: !(lib.hasPrefix "--with-tcl" x)) prevAttrs.configureFlags) ++ [
-          "--disable-tcl"
-        ];
-      });
-
-  libgit2 = pkgs.libgit2.overrideAttrs (
-    finalAttrs: prevAttrs: {
-      version = "2.0.0-rc.1";
-      src = pkgs.fetchFromGitHub {
-        owner = "libgit2";
-        repo = "libgit2";
-        rev = "ae45d0d168f7e8dbfdb8c623589cb51caac96ab3";
-        hash = "sha256-3sbqHm37SOwBeFgtjI2DLN6kx1F7G2N1m6rRIkqDXNI=";
-      };
-      patches = prevAttrs.patches or [ ] ++ [
-        ./patches/0002-memory-config.patch
-        ./patches/0003-packbuilder-correct-config.patch
-
-        # Fix a use-after-free crash when `git_thread_create` fails during
-        # pack building (e.g. with EAGAIN under thread pressure), leaving
-        # orphaned delta-search worker threads running while the
-        # packbuilder is freed.
-        # TODO: we can probably drop this patch since we're not finding deltas anymore.
-        ./patches/libgit2-packbuilder-dont-fail-on-thread-create-error.patch
-
-        # Tecnix: `GIT_RMDIR_EMPTY_PARENTS` calls rmdir() on parent paths
-        # with a trailing slash, which on macOS resolves a symlink in that
-        # position and acts on its target (deleting an unrelated empty
-        # directory, or failing with EINVAL on macOS 27 for a link to an
-        # ancestor). The upstream test suite trips over it on any
-        # case-insensitive filesystem on macOS 27, i.e. the default Nix
-        # store volume. To be submitted upstream.
-        ./patches/libgit2-rmdir-empty-parent-trailing-slash.patch
-      ];
-      separateDebugInfo = true;
-      # Nixpkgs derives `meta.changelog` from `src.tag`, which is null
-      # here since we fetch an untagged commit. This would be harmless
-      # except that nixpkgs variants with provenance support
-      # (`derivationWithMeta`) force `meta.changelog` at derivation
-      # instantiation time, causing an eval error.
-      meta = builtins.removeAttrs prevAttrs.meta [ "changelog" ];
-    }
-  );
-
   # TODO Hack until https://github.com/NixOS/nixpkgs/issues/45462 is fixed.
   boost =
     (pkgs.boost.override {
@@ -255,12 +154,6 @@ scope: {
         installPhase = lib.replaceStrings [ "--without-python" ] [ "" ] old.installPhase;
       });
 
-  # Build opentelemetry-cpp against the standard library, so that its
-  # API uses `std::string_view`, `std::shared_ptr` etc. instead of its
-  # own `nostd::` back-ports. This is an ABI switch, so it has to be
-  # done when building the library, not just on our side.
-  opentelemetry-cpp = pkgs.opentelemetry-cpp.override { cxxStandard = "20"; };
-
   wasmtime = pkgs.callPackage ./wasmtime.nix { };
 
   sentry-native = (pkgs.callPackage ./sentry-native.nix { }).override {
@@ -274,5 +167,21 @@ scope: {
 
     # Required for configuration detection for getsockname (for automatic port allocation for `nix serve`)
     __darwinAllowLocalNetworking = true;
+  });
+
+  libgit2 = pkgs.libgit2.overrideAttrs (old: {
+    separateDebugInfo = true;
+
+    patches = old.patches or [ ] ++ [
+      # Fix a use-after-free crash when `git_thread_create` fails during
+      # pack building (e.g. with EAGAIN under thread pressure), leaving
+      # orphaned delta-search worker threads running while the
+      # packbuilder is freed.
+      ./patches/libgit2-packbuilder-dont-fail-on-thread-create-error.patch
+
+      # Don't let GIT_RMDIR_EMPTY_PARENTS rmdir() through a symlink: on macOS
+      # a trailing slash makes rmdir() act on the link's target.
+      ./patches/libgit2-rmdir-empty-parent-trailing-slash.patch
+    ];
   });
 }

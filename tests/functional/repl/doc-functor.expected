@@ -2,8 +2,7 @@ Nix <nix version>
 Type :? for help.
 
 nix-repl> :l doc-functor.nix
-Added 13 variables.
-diverging, doubler, helper, helper2, helper3, lib, makeOverridable, makeVeryOverridable, multiplier, multiply, recursive, recursive2, square
+Added <number omitted> variables.
 
 nix-repl> :doc multiplier
 Function `__functor`\

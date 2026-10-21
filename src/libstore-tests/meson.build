@@ -8,7 +8,7 @@ project(
     'warning_level=1',
     'errorlogs=true', # Please print logs for tests that fail
   ],
-  meson_version : '>= 1.8',
+  meson_version : '>= 1.1',
   license : 'LGPL-2.1-or-later',
 )
 
@@ -60,17 +60,13 @@ sources = files(
   'derivation-advanced-attrs.cc',
   'derivation/external-formats.cc',
   'derivation/invariants.cc',
-  'derivations.cc',
   'derived-path.cc',
   'downstream-placeholder.cc',
   'dummy-store.cc',
-  'filetransfer-request.cc',
-  'filetransfer-retry.cc',
   'gcs-url.cc',
   'http-binary-cache-store.cc',
   'legacy-ssh-store.cc',
   'local-binary-cache-store.cc',
-  'local-fs-store.cc',
   'local-overlay-store.cc',
   'local-store.cc',
   'machines.cc',
@@ -78,7 +74,6 @@ sources = files(
   'nar-info-disk-cache.cc',
   'nar-info.cc',
   'nix_api_store.cc',
-  'outputs-query.cc',
   'outputs-spec.cc',
   'path-info.cc',
   'path.cc',
@@ -88,7 +83,6 @@ sources = files(
   's3-url.cc',
   'serve-protocol.cc',
   'ssh-store.cc',
-  'store-open.cc',
   'store-reference.cc',
   'uds-remote-store.cc',
   'worker-protocol.cc',
@@ -112,19 +106,14 @@ this_exe = executable(
   cpp_pch : do_pch ? [ 'pch/precompiled-headers.hh' ] : [],
 )
 
-test_env = {
-  '_NIX_TEST_UNIT_DATA' : meson.current_source_dir() / 'data',
-  'HOME' : meson.current_build_dir() / 'test-home',
-}
-
-if host_machine.system() != 'windows'
-  test_env += {'NIX_REMOTE' : meson.current_build_dir() / 'test-home' / 'store'}
-endif
-
 test(
   meson.project_name(),
   this_exe,
-  env : test_env,
+  env : {
+    '_NIX_TEST_UNIT_DATA' : meson.current_source_dir() / 'data',
+    'HOME' : meson.current_build_dir() / 'test-home',
+    'NIX_REMOTE' : meson.current_build_dir() / 'test-home' / 'store',
+  },
   protocol : 'gtest',
 )
 

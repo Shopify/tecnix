@@ -2,14 +2,8 @@
 
 namespace nix {
 
-namespace {
-
 struct UnionSourceAccessor : SourceAccessor
 {
-private:
-    void anchor() override {};
-
-public:
     std::vector<ref<SourceAccessor>> accessors;
     std::shared_ptr<SourceAccessor> displayAccessor;
 
@@ -75,12 +69,6 @@ public:
         return SourceAccessor::showPath(path);
     }
 
-    void invalidateCache() override
-    {
-        for (auto & accessor : accessors)
-            accessor->invalidateCache();
-    }
-
     std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override
     {
         for (auto & accessor : accessors) {
@@ -130,9 +118,13 @@ public:
         }
         return nullptr;
     }
-};
 
-} // namespace
+    void invalidateCache(const CanonPath & path) override
+    {
+        for (auto & accessor : accessors)
+            accessor->invalidateCache(path);
+    }
+};
 
 ref<SourceAccessor>
 makeUnionSourceAccessor(std::vector<ref<SourceAccessor>> && accessors, std::shared_ptr<SourceAccessor> displayAccessor)

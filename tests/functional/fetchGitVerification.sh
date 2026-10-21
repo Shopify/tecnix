@@ -7,6 +7,8 @@ requireGit
 
 enableFeatures "verified-fetches"
 
+clearStoreIfPossible
+
 repo="$TEST_ROOT/git"
 
 # generate signing keys

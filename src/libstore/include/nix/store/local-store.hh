@@ -37,9 +37,8 @@ struct LocalSettings;
 
 struct LocalBuildStoreConfig : virtual LocalFSStoreConfig
 {
-private:
-    void anchor() override;
 
+private:
     /**
       Input for computing the build directory. See `getBuildDir()`.
      */
@@ -83,16 +82,11 @@ struct LocalStoreConfig : std::enable_shared_from_this<LocalStoreConfig>,
                           virtual LocalFSStoreConfig,
                           virtual LocalBuildStoreConfig
 {
-    LocalStoreConfig(const Params & params)
-        : StoreConfig(params, FilePathType::Native)
-        , LocalFSStoreConfig(params)
-    {
-    }
+    using LocalFSStoreConfig::LocalFSStoreConfig;
 
     LocalStoreConfig(const std::filesystem::path & path, const Params & params);
 
 private:
-    void anchor() override;
 
     /**
      * An indirection so that we don't need to refer to global settings
@@ -149,7 +143,7 @@ public:
           Whether to request garbage collector roots from an external daemon.
 
           When enabled, the garbage collector connects to a Unix domain socket
-          at [`<state-dir>`](@docroot@/store/types/local-store.md#store-local-store-state)`/gc-roots-socket/socket` to discover additional roots
+          at [`<state-dir>`](@docroot@/store/types/local-store.md#store-option-state)`/gc-roots-socket/socket` to discover additional roots
           that should not be collected. This is useful when the Nix daemon runs
           without root privileges and cannot scan `/proc` for runtime roots.
 
@@ -179,15 +173,11 @@ public:
     StoreReference getReference() const override;
 };
 
-MakeError(PathInUse, Error);
-
 class LocalStore : public virtual IndirectRootStore,
                    public virtual GcStore,
                    public virtual TrackActiveBuildsStore,
                    public virtual QueryActiveBuildsStore
 {
-    void anchor() override;
-
 public:
 
     using Config = LocalStoreConfig;
@@ -223,7 +213,6 @@ private:
          */
         bool gcRunning = false;
         std::shared_future<void> gcFuture;
-        std::thread gcThread;
 
         /**
          * How much disk space was available after the previous
@@ -290,9 +279,6 @@ public:
     std::map<std::string, std::optional<StorePath>>
     queryStaticPartialDerivationOutputMap(const StorePath & path) override;
 
-    std::optional<StorePath>
-    queryStaticPartialDerivationOutput(const StorePath & path, const std::string & outputName) override;
-
     std::optional<StorePath> queryPathFromHashPart(const std::string & hashPart) override;
 
     bool pathInfoIsUntrusted(const ValidPathInfo &) override;
@@ -313,7 +299,7 @@ public:
         RepairFlag repair,
         std::shared_ptr<const Provenance> provenance) override;
 
-    void addTempRoots(const StorePathSet & paths, bool skipIfSlow) override;
+    void addTempRoots(const StorePathSet & paths) override;
 
 private:
 
@@ -507,7 +493,7 @@ private:
 
     void openDB(State & state, bool create);
 
-    void upgradeDBSchema(State & state, bool isNew);
+    void upgradeDBSchema(State & state);
 
     void makeStoreWritable();
 

@@ -1,12 +1,11 @@
+#include "nix/store/globals.hh"
 #include "nix/store/nar-info.hh"
-#include "nix/store/store-dir-config.hh"
+#include "nix/store/store-api.hh"
 #include "nix/util/strings.hh"
 #include "nix/util/json-utils.hh"
 #include "nix/util/provenance.hh"
 
 namespace nix {
-
-void NarInfo::anchor() {}
 
 NarInfo::NarInfo(const StoreDirConfig & store, const std::string & s, const std::string & whence)
     : UnkeyedValidPathInfo(store, Hash::dummy)                                          // FIXME: hack
@@ -54,12 +53,7 @@ NarInfo::NarInfo(const StoreDirConfig & store, const std::string & s, const std:
         } else if (name == "URL")
             url = value;
         else if (name == "Compression")
-            try {
-                /* XXX: Empty strings used to fall back to the bzip2 normalisation below. Is this intentional? */
-                compression = value.empty() ? CompressionAlgo::bzip2 : parseCompressionAlgo(value);
-            } catch (UnknownCompressionMethod & e) {
-                throw corrupt("invalid Compression");
-            }
+            compression = value;
         else if (name == "FileHash")
             fileHash = parseHashField(value);
         else if (name == "FileSize") {
@@ -98,8 +92,8 @@ NarInfo::NarInfo(const StoreDirConfig & store, const std::string & s, const std:
         line += 1;
     }
 
-    if (!compression)
-        compression = CompressionAlgo::bzip2;
+    if (compression == "")
+        compression = "bzip2";
 
     if (!havePath || !haveNarHash || url.empty() || narSize == 0) {
         line = 0; // don't include line information in the error
@@ -117,8 +111,8 @@ std::string NarInfo::to_string(const StoreDirConfig & store) const
     std::string res;
     res += "StorePath: " + store.printStorePath(path) + "\n";
     res += "URL: " + url + "\n";
-    assert(compression);
-    res += "Compression: " + showCompressionAlgo(*compression) + "\n";
+    assert(compression != "");
+    res += "Compression: " + compression + "\n";
     if (fileHash) {
         assert(fileHash->algo == HashAlgorithm::SHA256);
         res += "FileHash: " + fileHash->to_string(HashFormat::Nix32, true) + "\n";
@@ -156,10 +150,8 @@ UnkeyedNarInfo::toJSON(const StoreDirConfig * store, bool includeImpureInfo, Pat
     if (includeImpureInfo) {
         if (!url.empty())
             jsonObject["url"] = url;
-        /* XXX: Why is this conditional??? Empty `Compression: ' fields in .narinfo have always
-           been treated as bzip2. */
-        if (compression)
-            jsonObject["compression"] = showCompressionAlgo(*compression);
+        if (!compression.empty())
+            jsonObject["compression"] = compression;
         if (fileHash) {
             if (format == PathInfoJsonFormat::V1)
                 jsonObject["downloadHash"] = fileHash->to_string(HashFormat::SRI, true);
@@ -186,9 +178,8 @@ UnkeyedNarInfo UnkeyedNarInfo::fromJSON(const StoreDirConfig * store, const nloh
     if (auto * url = get(obj, "url"))
         res.url = getString(*url);
 
-    /* XXX: Why is this conditional??? */
     if (auto * compression = get(obj, "compression"))
-        res.compression = parseCompressionAlgo(getString(*compression));
+        res.compression = getString(*compression);
 
     if (auto * downloadHash = get(obj, "downloadHash")) {
         if (format == PathInfoJsonFormat::V1)

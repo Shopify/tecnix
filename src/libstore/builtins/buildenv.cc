@@ -10,8 +10,6 @@
 
 namespace nix {
 
-void BuildEnvFileConflictError::anchor() {}
-
 RegisterBuiltinBuilder::BuiltinBuilders & RegisterBuiltinBuilder::builtinBuilders()
 {
     static RegisterBuiltinBuilder::BuiltinBuilders builders;

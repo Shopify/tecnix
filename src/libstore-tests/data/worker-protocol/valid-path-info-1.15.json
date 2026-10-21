@@ -10,7 +10,7 @@
     "signatures": [],
     "storeDir": "/nix/store",
     "ultimate": false,
-    "version": 3
+    "version": 2
   },
   {
     "ca": null,
@@ -26,6 +26,6 @@
     "signatures": [],
     "storeDir": "/nix/store",
     "ultimate": false,
-    "version": 3
+    "version": 2
   }
 ]

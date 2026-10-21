@@ -14,7 +14,6 @@
   boehmgc,
   libgit2,
   nlohmann_json,
-  sqlite,
   toml11,
   wasmtime,
 
@@ -71,7 +70,6 @@ mkMesonLibrary (finalAttrs: {
   ];
 
   buildInputs = [
-    sqlite
     toml11
   ]
   ++ lib.optional enableWasm wasmtime;

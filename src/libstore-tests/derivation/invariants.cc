@@ -6,6 +6,8 @@
 #include "nix/store/dummy-store-impl.hh"
 #include "nix/util/tests/json-characterization.hh"
 
+#include "derivation/test-support.hh"
+
 namespace nix {
 
 class FillInOutputPathsTest : public LibStoreTest, public JsonCharacterizationTest<Derivation>

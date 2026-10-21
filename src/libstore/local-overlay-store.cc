@@ -5,14 +5,11 @@
 #include "nix/util/os-string.hh"
 #include "nix/store/realisation.hh"
 #include "nix/util/processes.hh"
+#include "nix/util/url.hh"
 #include "nix/store/store-open.hh"
 #include "nix/store/store-registration.hh"
 
 namespace nix {
-
-void LocalOverlayStoreConfig::anchor() {}
-
-void LocalOverlayStore::anchor() {}
 
 std::string LocalOverlayStoreConfig::doc()
 {
@@ -49,9 +46,6 @@ LocalOverlayStore::LocalOverlayStore(ref<const Config> config)
     , config{config}
     , lowerStore(openStore(config->lowerStoreUri.get()).dynamic_pointer_cast<LocalFSStore>())
 {
-    if (!config->upperLayer.isOverridden())
-        throw Error("overlay store at %s requires the 'upper-layer' setting", PathFmt(config->realStoreDir.get()));
-
     if (config->checkMount.get()) {
         std::smatch match;
         std::string mountInfo;
@@ -104,30 +98,14 @@ void LocalOverlayStore::queryPathInfoUncached(
                 return callbackPtr->rethrow();
             }
             // If we don't have it, check lower store
-            lowerStore->queryPathInfo(path, {[this, path, callbackPtr](std::future<ref<const ValidPathInfo>> fut) {
+            lowerStore->queryPathInfo(path, {[path, callbackPtr](std::future<ref<const ValidPathInfo>> fut) {
                                           try {
-                                              /* Copy the lower store object up into the
-                                                 upper DB, so that subsequent queries (such
-                                                 as derivation output lookups) find it there,
-                                                 and so that we return an info whose DB id
-                                                 belongs to the upper DB rather than the
-                                                 lower one. */
-                                              registerLowerPath(*fut.get());
+                                              (*callbackPtr)(fut.get().get_ptr());
                                           } catch (...) {
                                               return callbackPtr->rethrow();
                                           }
-                                          LocalStore::queryPathInfoUncached(path, std::move(*callbackPtr));
                                       }});
         }});
-}
-
-void LocalOverlayStore::registerLowerPath(const ValidPathInfo & info)
-{
-    // recur on references, syncing entire closure.
-    for (auto & r : info.references)
-        if (r != info.path)
-            isValidPath(r);
-    LocalStore::registerValidPath(info);
 }
 
 void LocalOverlayStore::queryRealisationUncached(
@@ -162,9 +140,15 @@ bool LocalOverlayStore::isValidPathUncached(const StorePath & path)
     if (res)
         return res;
     res = lowerStore->isValidPath(path);
-    if (res)
+    if (res) {
         // Get path info from lower store so upper DB genuinely has it.
-        registerLowerPath(*lowerStore->queryPathInfo(path));
+        auto p = lowerStore->queryPathInfo(path);
+        // recur on references, syncing entire closure.
+        for (auto & r : p->references)
+            if (r != path)
+                isValidPath(r);
+        LocalStore::registerValidPath(*p);
+    }
     return res;
 }
 
@@ -276,7 +260,7 @@ LocalStore::VerificationResult LocalOverlayStore::verifyAllValidPaths(RepairFlag
     StorePathSet done;
 
     auto existsInStoreDir = [&](const StorePath & storePath) {
-        return pathExists(config->realStoreDir.get() / storePath.to_string());
+        return pathExists((config->realStoreDir.get() / storePath.to_string()).string());
     };
 
     bool errors = false;
@@ -296,10 +280,10 @@ void LocalOverlayStore::remountIfNecessary()
     if (!_remountRequired)
         return;
 
-    if (auto & hook = config->remountHook.get()) {
-        runProgram(*hook, false, {config->realStoreDir.get().native()});
-    } else {
+    if (config->remountHook.get().empty()) {
         warn("%s needs remounting, set remount-hook to do this automatically", PathFmt(config->realStoreDir.get()));
+    } else {
+        runProgram(config->remountHook.get(), false, {config->realStoreDir.get().native()});
     }
 
     _remountRequired = false;

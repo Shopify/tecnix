@@ -13,7 +13,7 @@
 #include <dirent.h>
 #include <mntent.h>
 
-namespace nix::linux {
+namespace nix {
 
 std::optional<std::filesystem::path> getCgroupFS()
 {
@@ -193,4 +193,4 @@ std::set<pid_t> getPidsInCgroup(const std::filesystem::path & cgroup)
     return result;
 }
 
-} // namespace nix::linux
+} // namespace nix

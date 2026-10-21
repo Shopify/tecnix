@@ -15,8 +15,6 @@ struct ExperimentalFeatureDetails
     std::string_view trackingUrl;
 };
 
-void MissingExperimentalFeature::anchor() {}
-
 /**
  * If two different PRs both add an experimental feature, and we just
  * used a number for this, we *wouldn't* get merge conflict and the
@@ -27,7 +25,7 @@ void MissingExperimentalFeature::anchor() {}
  * feature, we either have no issue at all if few features are not added
  * at the end of the list, or a proper merge conflict if they are.
  */
-constexpr size_t numXpFeatures = 1 + static_cast<size_t>(Xp::BakedDerivations);
+constexpr size_t numXpFeatures = 1 + static_cast<size_t>(Xp::CNSA);
 
 constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails = {{
     {
@@ -314,17 +312,6 @@ constexpr std::array<ExperimentalFeatureDetails, numXpFeatures> xpFeatureDetails
             Enable support for keys and signatures using algorithms from the
             Commercial National Security Algorithm (CNSA) Suite: ECDSA P-384
             and ML-DSA-44, ML-DSA-65, and ML-DSA-87.
-        )",
-        .trackingUrl = "",
-    },
-    {
-        .tag = Xp::BakedDerivations,
-        .name = "baked-derivations",
-        .description = R"(
-            Enable *baked derivations*: derivations with the builder
-            `builtin:substitute` that are never built, but whose outputs are
-            obtained by substitution. This enables the `builtins.bakedDerivation`
-            function and the `nix flake bake` command.
         )",
         .trackingUrl = "",
     },

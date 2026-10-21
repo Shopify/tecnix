@@ -2,8 +2,6 @@
 
 namespace nix {
 
-void LogStore::anchor() {}
-
 std::optional<std::string> LogStore::getBuildLog(const StorePath & path)
 {
     auto maybePath = getBuildDerivationPath(path);

@@ -1,4 +1,5 @@
 #include "nix/util/config-global.hh"
+#include "nix/util/args.hh"
 #include "nix/util/finally.hh"
 #include "nix/util/logging.hh"
 #include "nix_api_util.h"

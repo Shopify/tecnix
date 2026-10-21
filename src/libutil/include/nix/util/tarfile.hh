@@ -1,7 +1,6 @@
 #pragma once
 ///@file
 
-#include "nix/util/compression-algo.hh"
 #include "nix/util/serialise.hh"
 #include "nix/util/fs-sink.hh"
 #include <archive.h>
@@ -14,7 +13,7 @@ struct TarArchive
     Source * source;
     std::vector<unsigned char> buffer;
 
-    void check(int err, const std::string & reason = "failed to extract archive (%s)", bool warningsAreFatal = true);
+    void check(int err, const std::string & reason = "failed to extract archive (%s)");
 
     explicit TarArchive(const std::filesystem::path & path);
 
@@ -22,8 +21,8 @@ struct TarArchive
     /// @param source - Input byte stream.
     /// @param raw - Whether to enable raw file support. For more info look in docs:
     /// https://manpages.debian.org/stretch/libarchive-dev/archive_read_format.3.en.html
-    /// @param compressionMethod - Primary compression method to use. std::nullopt means 'all'.
-    TarArchive(Source & source, bool raw = false, std::optional<CompressionAlgo> compressionMethod = std::nullopt);
+    /// @param compression_method - Primary compression method to use. std::nullopt means 'all'.
+    TarArchive(Source & source, bool raw = false, std::optional<std::string> compression_method = std::nullopt);
 
     /// Disable copy constructor. Explicitly default move assignment/constructor.
     TarArchive(const TarArchive &) = delete;
@@ -35,6 +34,8 @@ struct TarArchive
 
     ~TarArchive();
 };
+
+int getArchiveFilterCodeByName(const std::string & method);
 
 void unpackTarfile(Source & source, const std::filesystem::path & destDir);
 

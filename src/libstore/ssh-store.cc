@@ -2,6 +2,7 @@
 #include "nix/store/local-fs-store.hh"
 #include "nix/store/remote-store-connection.hh"
 #include "nix/util/source-accessor.hh"
+#include "nix/util/archive.hh"
 #include "nix/store/worker-protocol.hh"
 #include "nix/store/worker-protocol-impl.hh"
 #include "nix/util/pool.hh"
@@ -11,15 +12,11 @@
 namespace nix {
 
 SSHStoreConfig::SSHStoreConfig(const ParsedURL::Authority & authority, const Params & params)
-    : Store::Config{params, FilePathType::Unix}
-    , RemoteStore::Config{params, FilePathType::Unix}
+    : Store::Config{params}
+    , RemoteStore::Config{params}
     , CommonSSHStoreConfig{authority, params}
 {
 }
-
-void SSHStoreConfig::anchor() {}
-
-void MountedSSHStoreConfig::anchor() {}
 
 std::string SSHStoreConfig::doc()
 {
@@ -43,10 +40,6 @@ StoreReference SSHStoreConfig::getReference() const
 struct alignas(8) /* Work around ASAN failures on i686-linux. */
     SSHStore : virtual RemoteStore
 {
-private:
-    void anchor() override;
-
-public:
     using Config = SSHStoreConfig;
 
     ref<const Config> config;
@@ -76,10 +69,6 @@ protected:
 
     struct Connection : RemoteStore::Connection
     {
-    private:
-        void anchor() override;
-
-    public:
         std::unique_ptr<SSHMaster::Connection> sshConn;
 
         void closeWrite() override
@@ -104,15 +93,9 @@ protected:
     };
 };
 
-void RemoteStore::Connection::anchor() {}
-
-void SSHStore::Connection::anchor() {}
-
-void SSHStore::anchor() {}
-
 MountedSSHStoreConfig::MountedSSHStoreConfig(StringMap params)
-    : StoreConfig(params, FilePathType::Native)
-    , RemoteStoreConfig(params, FilePathType::Native)
+    : StoreConfig(params)
+    , RemoteStoreConfig(params)
     , CommonSSHStoreConfig(params)
     , SSHStoreConfig(params)
     , LocalFSStoreConfig(params)
@@ -120,8 +103,8 @@ MountedSSHStoreConfig::MountedSSHStoreConfig(StringMap params)
 }
 
 MountedSSHStoreConfig::MountedSSHStoreConfig(const ParsedURL::Authority & authority, StringMap params)
-    : StoreConfig(params, FilePathType::Native)
-    , RemoteStoreConfig(params, FilePathType::Native)
+    : StoreConfig(params)
+    , RemoteStoreConfig(params)
     , CommonSSHStoreConfig(authority, params)
     , SSHStoreConfig(authority, params)
     , LocalFSStoreConfig(params)
@@ -151,10 +134,6 @@ std::string MountedSSHStoreConfig::doc()
  */
 struct MountedSSHStore : virtual SSHStore, virtual LocalFSStore
 {
-private:
-    void anchor() override;
-
-public:
     using Config = MountedSSHStoreConfig;
 
     MountedSSHStore(ref<const Config> config)
@@ -206,15 +185,13 @@ public:
     std::filesystem::path addPermRoot(const StorePath & path, const std::filesystem::path & gcRoot) override
     {
         auto conn(getConnection());
-        conn->startOp(WorkerProto::Op::AddPermRoot);
+        conn->to << WorkerProto::Op::AddPermRoot;
         WorkerProto::write(*this, *conn, path);
         WorkerProto::write(*this, *conn, gcRoot.string());
         conn.processStderr();
         return readString(conn->from);
     }
 };
-
-void MountedSSHStore::anchor() {}
 
 ref<Store> SSHStore::Config::openStore() const
 {

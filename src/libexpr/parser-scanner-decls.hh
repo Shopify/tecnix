@@ -11,9 +11,7 @@ namespace nix {
 
 class Parser : public parser::BisonParser
 {
-public:
     using BisonParser::BisonParser;
-    ~Parser() override;
 };
 
 } // namespace nix

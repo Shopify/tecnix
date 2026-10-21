@@ -1,5 +1,7 @@
 #include "nix/util/configuration.hh"
+#include "nix/util/args.hh"
 
+#include <sstream>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 

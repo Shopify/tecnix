@@ -3,7 +3,7 @@
 #include "nix/util/archive.hh"
 #include "nix/util/terminal.hh"
 
-namespace nix {
+using namespace nix;
 
 static FdSink getNarSink()
 {
@@ -61,7 +61,7 @@ struct CmdDumpPath2 : Command
     void run() override
     {
         auto sink = getNarSink();
-        dumpPath(path, sink);
+        dumpPath(path.string(), sink);
         sink.flush();
     }
 };
@@ -77,5 +77,3 @@ struct CmdNarDumpPath : CmdDumpPath2
 
 static auto rCmdNarPack = registerCommand2<CmdDumpPath2>({"nar", "pack"});
 static auto rCmdNarDumpPath = registerCommand2<CmdNarDumpPath>({"nar", "dump-path"});
-
-} // namespace nix

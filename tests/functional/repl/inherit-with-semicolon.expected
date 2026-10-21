@@ -1,9 +1,0 @@
-Nix <nix version>
-Type :? for help.
-
-nix-repl> a = { z = 99; }
-
-nix-repl> inherit (a) z;
-
-nix-repl> z
-99

@@ -27,10 +27,9 @@ unsigned int getMaxCPU();
 // It does not seem possible to dynamically change stack size on Windows.
 #ifndef _WIN32
 /**
- * Increase the RLIMIT_STACK rlimit if it is currently smaller than `stackSize`.
- * @note Not thread safe. Calls to this should be wrapped in a std::call_once.
+ * Change the stack size.
  */
-void ensureStackSizeAtLeast(size_t stackSize);
+void setStackSize(size_t stackSize);
 #endif
 
 /**

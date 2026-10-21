@@ -167,8 +167,6 @@ struct Settings : public Config
 
 
 private:
-    void anchor() override;
-
     mutable Sync<std::shared_ptr<Cache>> _cache;
 
     mutable Sync<std::shared_ptr<GitRepo>> _tarballCache;

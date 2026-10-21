@@ -54,7 +54,7 @@ doClearStore() {
     clearProfiles
 }
 
-clearBinaryCache() {
+clearCache() {
     rm -rf "${cacheDir?}"
 }
 
@@ -102,7 +102,7 @@ killDaemon() {
       die "killDaemon: not supported when testing on NixOS. Is it really needed? If so add conditionals; e.g. if ! isTestOnNixOS; then ..."
     fi
 
-    # Don't fail trying to stop a non-existent daemon twice.
+    # Don't fail trying to stop a non-existant daemon twice.
     if [[ "${_NIX_TEST_DAEMON_PID-}" == '' ]]; then
         return
     fi
@@ -239,15 +239,12 @@ enableFeatures() {
 }
 
 onError() {
-    # Don't print the message if set +e has been explicitly set.
-    if [[ $- == *e* ]]; then
-        set +x
-        echo "$0: test failed at:" >&2
-        for ((i = 1; i < ${#BASH_SOURCE[@]}; i++)); do
-            if [[ -z ${BASH_SOURCE[i]} ]]; then break; fi
-            echo "  ${FUNCNAME[i]} in ${BASH_SOURCE[i]}:${BASH_LINENO[i-1]}" >&2
-        done
-    fi
+    set +x
+    echo "$0: test failed at:" >&2
+    for ((i = 1; i < ${#BASH_SOURCE[@]}; i++)); do
+        if [[ -z ${BASH_SOURCE[i]} ]]; then break; fi
+        echo "  ${FUNCNAME[i]} in ${BASH_SOURCE[i]}:${BASH_LINENO[i-1]}" >&2
+    done
 }
 
 # Prints an error message prefix referring to the last call into this file.
@@ -353,14 +350,8 @@ count() {
 
 trap onError ERR
 
-# Note: with newer AppArmor stacks, this restriction doesn't prevent *creating*
-# a user namespace, but denies mounting inside it, which Nix's sandbox needs.
-unprivilegedUserNamespacesSupported() {
-  ! { [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] && [[ $(< /proc/sys/kernel/apparmor_restrict_unprivileged_userns) -eq 1 ]]; }
-}
-
 requiresUnprivilegedUserNamespaces() {
-  if ! unprivilegedUserNamespacesSupported; then
+  if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] && [[ $(< /proc/sys/kernel/apparmor_restrict_unprivileged_userns) -eq 1 ]]; then
     skipTest "Unprivileged user namespaces are disabled. Run 'sudo sysctl -w /proc/sys/kernel/apparmor_restrict_unprivileged_userns=0' to allow, and run these tests."
   fi
 }
@@ -375,7 +366,7 @@ initGitRepo() {
     local extraArgs="${2-}"
 
     # shellcheck disable=SC2086 # word splitting of extraArgs is intended
-    git -C "$repo" init --initial-branch=master $extraArgs
+    git -C "$repo" init $extraArgs
     git -C "$repo" config user.email "foobar@example.com"
     git -C "$repo" config user.name "Foobar"
 }

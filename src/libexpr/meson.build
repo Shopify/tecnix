@@ -7,8 +7,10 @@ project(
     # TODO(Qyriad): increase the warning level
     'warning_level=1',
     'errorlogs=true', # Please print logs for tests that fail
+    'unity=on',
+    'unity_size=1024',
   ],
-  meson_version : '>= 1.8',
+  meson_version : '>= 1.1',
   license : 'LGPL-2.1-or-later',
 )
 
@@ -43,6 +45,7 @@ boost = dependency(
   modules : [
     'container',
     'context',
+    'thread',
   ],
   include_type : 'system',
 )
@@ -52,10 +55,6 @@ deps_other += boost
 
 nlohmann_json = dependency('nlohmann_json', version : '>= 3.9')
 deps_public += nlohmann_json
-
-# eval-cache uses `INSERT ... RETURNING` which requires >= 3.35
-sqlite = dependency('sqlite3', 'sqlite', version : '>= 3.35')
-deps_private += sqlite
 
 bdw_gc_required = get_option('gc').disable_if(
   'address' in get_option('b_sanitize'),
@@ -236,7 +235,7 @@ parser_library = static_library(
   'nixexpr-parser',
   parser_tab,
   lexer_tab,
-  'lexer-helpers.cc',
+  files('lexer-helpers.cc'),
   cpp_args : parser_library_cpp_args,
   dependencies : deps_public + deps_private + deps_other,
   include_directories : include_dirs,
@@ -247,7 +246,6 @@ parser_library = static_library(
   override_options : [
     'b_ndebug=@0@'.format(not get_option('debug')),
     'b_lto=@0@'.format(get_option('b_lto') and cxx.get_id() != 'gcc'),
-    # Unity builds mess up the recursive header dependency between flex and bison generated code.
     'unity=off',
   ],
 )

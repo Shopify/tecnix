@@ -1,4 +1,0 @@
-error:
-       … while evaluating the attribute 'foo'
-
-       error: attempt to call something which is not a function but a string: "foo1"

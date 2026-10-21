@@ -1,16 +1,25 @@
+#include "nix/util/archive.hh"
+#include "nix/util/posix-source-accessor.hh"
 #include "nix/store/store-api.hh"
 #include "nix/store/local-fs-store.hh"
+#include "nix/store/globals.hh"
 #include "nix/util/compression.hh"
 #include "nix/store/derivations.hh"
 
 namespace nix {
 
-void LocalFSStoreConfig::anchor() {}
+std::filesystem::path LocalFSStoreConfig::getDefaultStateDir()
+{
+    return settings.nixStateDir;
+}
 
-void LocalFSStore::anchor() {}
+std::filesystem::path LocalFSStoreConfig::getDefaultLogDir()
+{
+    return settings.getLogFileSettings().nixLogDir;
+}
 
 LocalFSStoreConfig::LocalFSStoreConfig(const std::filesystem::path & rootDir, const Params & params)
-    : StoreConfig(params, FilePathType::Native)
+    : StoreConfig(params)
     /* Default `?root` from `rootDir` if non set
      * NOTE: We would like to just do rootDir.set(...), which would take care of
      * all normalization and error checking for us. Unfortunately we cannot do
@@ -30,50 +39,23 @@ LocalFSStore::LocalFSStore(const Config & config)
 {
 }
 
-namespace {
-
-struct LocalStoreAccessor : SourceAccessor
+struct LocalStoreAccessor : PosixSourceAccessor
 {
-private:
-    void anchor() override {};
-
-public:
-    ref<SourceAccessor> accessor;
     ref<LocalFSStore> store;
     bool requireValidPath;
 
     LocalStoreAccessor(ref<LocalFSStore> store, bool requireValidPath)
-        : accessor(makeFSSourceAccessor(std::filesystem::path{store->config.realStoreDir.get()}))
+        : PosixSourceAccessor(std::filesystem::path{store->config.realStoreDir.get()})
         , store(store)
         , requireValidPath(requireValidPath)
     {
     }
 
-    void requireStoreObject(const StorePath & storePath)
-    {
-        if (requireValidPath && !store->maybeQueryPathInfo(storePath))
-            throw InvalidPath("path '%1%' is not a valid store path", store->printStorePath(storePath));
-    }
-
-    static StorePath getStoreObjectPath(const CanonPath & path)
-    {
-        /* See special handling of isRoot() in maybeLstat. */
-        if (path.isRoot())
-            throw BadStorePath("path '%1%' is not a valid store path", path);
-        return StorePath(*path.begin());
-    }
-
-    static std::optional<StorePath> maybeGetStoreObjectPath(const CanonPath & path)
-    try {
-        return getStoreObjectPath(path);
-    } catch (BadStorePath &) {
-        /* FIXME: Stop using exceptions for control flow. */
-        return std::nullopt;
-    }
-
     void requireStoreObject(const CanonPath & path)
     {
-        requireStoreObject(getStoreObjectPath(path));
+        auto [storePath, rest] = store->toStorePath(store->storeDir + path.abs());
+        if (requireValidPath && !store->maybeQueryPathInfo(storePath))
+            throw InvalidPath("path '%1%' is not a valid store path", store->printStorePath(storePath));
     }
 
     std::optional<Stat> maybeLstat(const CanonPath & path) override
@@ -83,75 +65,28 @@ public:
         if (path.isRoot())
             return Stat{.type = tDirectory};
 
-        /* Querying existence should not fail for things like
-           `/nix/store/foo.nix`. The store cannot contain such files (unless
-           some weird impurities sneak in, but that's UB from nix's PoV). */
-        auto maybeStorePath = maybeGetStoreObjectPath(path);
-        if (!maybeStorePath)
-            return std::nullopt;
-        requireStoreObject(*maybeStorePath);
-        return accessor->maybeLstat(path);
-    }
-
-    Stat lstat(const CanonPath & path) override
-    {
-        /* Also allow `path` to point to the entire store, which is
-           needed for resolving symlinks. */
-        if (path.isRoot())
-            return Stat{.type = tDirectory};
-
         requireStoreObject(path);
-        return accessor->lstat(path);
+        return PosixSourceAccessor::maybeLstat(path);
     }
 
     DirEntries readDirectory(const CanonPath & path) override
     {
         requireStoreObject(path);
-        return accessor->readDirectory(path);
-    }
-
-    void readDirectory(
-        const CanonPath & dirPath,
-        std::function<void(SourceAccessor & subdirAccessor, const CanonPath & subdirRelPath)> callback) override
-    {
-        requireStoreObject(dirPath);
-        return accessor->readDirectory(dirPath, std::move(callback));
+        return PosixSourceAccessor::readDirectory(path);
     }
 
     void readFile(const CanonPath & path, Sink & sink, fun<void(uint64_t)> sizeCallback) override
     {
         requireStoreObject(path);
-        return accessor->readFile(path, sink, sizeCallback);
+        return PosixSourceAccessor::readFile(path, sink, sizeCallback);
     }
 
     std::string readLink(const CanonPath & path) override
     {
         requireStoreObject(path);
-        return accessor->readLink(path);
-    }
-
-    std::string showPath(const CanonPath & path) override
-    {
-        return accessor->showPath(path);
-    }
-
-    std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override
-    {
-        return accessor->getPhysicalPath(path);
-    }
-
-    std::pair<CanonPath, std::optional<std::string>> getFingerprint(const CanonPath & path) override
-    {
-        return accessor->getFingerprint(path);
-    }
-
-    std::optional<time_t> getLastModified() override
-    {
-        return accessor->getLastModified();
+        return PosixSourceAccessor::readLink(path);
     }
 };
-
-} // namespace
 
 ref<SourceAccessor> LocalFSStore::getFSAccessor(bool requireValidPath)
 {
@@ -173,7 +108,7 @@ std::shared_ptr<SourceAccessor> LocalFSStore::getFSAccessor(const StorePath & pa
         if (!pathExists(absPath))
             return nullptr;
     }
-    return makeFSSourceAccessor(std::move(absPath));
+    return std::make_shared<PosixSourceAccessor>(std::move(absPath));
 }
 
 const std::filesystem::path LocalFSStore::drvsLogDir = "drvs";
@@ -194,7 +129,7 @@ std::optional<std::string> LocalFSStore::getBuildLogExact(const StorePath & path
 
         else if (pathExists(logBz2Path)) {
             try {
-                return decompress(CompressionAlgo::bzip2, readFile(logBz2Path));
+                return decompress("bzip2", readFile(logBz2Path));
             } catch (Error &) {
             }
         }

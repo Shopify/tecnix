@@ -1,4 +1,7 @@
+#include "nix/expr/attr-set.hh"
+#include "nix/util/configuration.hh"
 #include "nix/expr/eval.hh"
+#include "nix/store/globals.hh"
 #include "nix/expr/value.hh"
 
 #include "nix_api_expr.h"
@@ -40,8 +43,6 @@ nix_err nix_external_add_string_context(nix_c_context * context, nix_string_cont
 }
 
 } // extern "C"
-
-namespace {
 
 class NixCExternalValue : public nix::ExternalValueBase
 {
@@ -167,8 +168,6 @@ public:
 
     virtual ~NixCExternalValue() override {};
 };
-
-} // namespace
 
 extern "C" {
 

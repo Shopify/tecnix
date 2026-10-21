@@ -1,5 +1,6 @@
 #include "nix/util/current-process.hh"
-#include "nix/util/environment-variables.hh"
+#include "nix/util/file-system.hh"
+#include "nix/store/globals.hh"
 
 #include "self-exe.hh"
 #include "cli-config-private.hh"

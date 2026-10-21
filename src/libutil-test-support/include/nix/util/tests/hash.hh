@@ -6,7 +6,6 @@
 #include "nix/util/hash.hh"
 
 namespace rc {
-
 using namespace nix;
 
 template<>

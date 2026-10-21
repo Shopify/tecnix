@@ -5,7 +5,6 @@
 
   unixtools,
   apple-sdk,
-  freebsd,
 
   nix-util,
   boost,
@@ -19,22 +18,12 @@
   wasmtime,
 
   busybox-sandbox-shell ? null,
-  pkgsStatic,
 
   # Configuration Options
 
   version,
 
   embeddedSandboxShell ? stdenv.hostPlatform.isStatic && !stdenv.hostPlatform.isDarwin,
-
-  withSandboxShell ? stdenv.hostPlatform.isLinux || stdenv.hostPlatform.isFreeBSD,
-  sandboxShell ?
-    if stdenv.hostPlatform.isLinux then
-      "${busybox-sandbox-shell}/bin/busybox"
-    else if stdenv.hostPlatform.isFreeBSD then
-      "${pkgsStatic.bash}/bin/bash"
-    else
-      null,
 
   withAWS ?
     # Default is this way because there have been issues building this dependency
@@ -65,8 +54,6 @@ mkMesonLibrary (finalAttrs: {
     ./include/nix/store/meson.build
     ./linux/meson.build
     ./linux/include/nix/store/meson.build
-    ./darwin/meson.build
-    ./freebsd/meson.build
     ./unix/meson.build
     ./unix/include/nix/store/meson.build
     ./windows/meson.build
@@ -86,7 +73,6 @@ mkMesonLibrary (finalAttrs: {
     sqlite
   ]
   ++ lib.optional stdenv.hostPlatform.isLinux libseccomp
-  ++ lib.optional stdenv.hostPlatform.isFreeBSD freebsd.libjail
   ++ lib.optional withAWS aws-crt-cpp
   ++ lib.optional enableWasm wasmtime;
 
@@ -101,8 +87,8 @@ mkMesonLibrary (finalAttrs: {
     (lib.mesonEnable "s3-aws-auth" withAWS)
     (lib.mesonEnable "wasm" enableWasm)
   ]
-  ++ lib.optionals withSandboxShell [
-    (lib.mesonOption "sandbox-shell" sandboxShell)
+  ++ lib.optionals stdenv.hostPlatform.isLinux [
+    (lib.mesonOption "sandbox-shell" "${busybox-sandbox-shell}/bin/busybox")
   ];
 
   meta = {

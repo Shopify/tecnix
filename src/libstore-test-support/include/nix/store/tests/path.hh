@@ -18,17 +18,18 @@ void showValue(const StorePath & p, std::ostream & os);
 } // namespace nix
 
 namespace rc {
+using namespace nix;
 
 template<>
-struct Arbitrary<nix::StorePathName>
+struct Arbitrary<StorePathName>
 {
-    static Gen<nix::StorePathName> arbitrary();
+    static Gen<StorePathName> arbitrary();
 };
 
 template<>
-struct Arbitrary<nix::StorePath>
+struct Arbitrary<StorePath>
 {
-    static Gen<nix::StorePath> arbitrary();
+    static Gen<StorePath> arbitrary();
 };
 
 } // namespace rc

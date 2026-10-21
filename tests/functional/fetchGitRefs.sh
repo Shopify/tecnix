@@ -4,7 +4,11 @@ source common.sh
 
 requireGit
 
+clearStoreIfPossible
+
 repo="$TEST_ROOT/git"
+
+rm -rf "${repo}-tmp" "$TEST_HOME/.cache/nix"
 
 createGitRepo "$repo"
 

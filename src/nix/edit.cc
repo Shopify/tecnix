@@ -7,7 +7,7 @@
 
 #include <unistd.h>
 
-namespace nix {
+using namespace nix;
 
 struct CmdEdit : InstallableValueCommand
 {
@@ -44,20 +44,17 @@ struct CmdEdit : InstallableValueCommand
 
         logger->stop();
 
-        auto [args, tempFd, delTemp] = editorFor(file, line, /*readOnly=*/true);
-        auto program = args.front();
-        args.pop_front();
+        auto args = editorFor(file, line);
 
-        runProgram2(
-            RunOptions{
-                .program = program,
-                .lookupPath = true,
-                .args = std::move(args),
-                .isInteractive = true,
-            });
+        restoreProcessContext();
+
+        execvp(args.front().c_str(), stringsToCharPtrs(args).data());
+
+        std::string command;
+        for (const auto & arg : args)
+            command += " '" + arg + "'";
+        throw SysError("cannot run command%s", command);
     }
 };
 
 static auto rCmdEdit = registerCommand<CmdEdit>("edit");
-
-} // namespace nix

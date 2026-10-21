@@ -7,8 +7,6 @@
 #include <string>
 #include <string_view>
 
-#include "nix/util/strings.hh"
-
 namespace nix {
 
 /**
@@ -104,16 +102,6 @@ inline OsStrings toOsStrings(std::list<std::string> ss)
 #  define OS_STR(s) s
 #else
 #  define OS_STR(s) L##s
-#endif
-
-#ifdef _WIN32
-
-template<class C>
-C tokenizeString(OsStringView s, OsStringView separators = OS_STR(" \t\n\r"));
-
-extern template std::list<OsString> tokenizeString(OsStringView s, OsStringView separators);
-extern template std::vector<OsString> tokenizeString(OsStringView s, OsStringView separators);
-
 #endif
 
 } // namespace nix

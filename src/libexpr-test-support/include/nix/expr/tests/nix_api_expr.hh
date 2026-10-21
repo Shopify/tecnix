@@ -12,22 +12,21 @@ class nix_api_expr_test : public nix_api_store_test
 {
 protected:
 
-    void SetUp() override
+    nix_api_expr_test()
     {
-        nix_api_store_test::SetUp();
         nix_libexpr_init(ctx);
         state = nix_state_create(nullptr, nullptr, store);
         value = nix_alloc_value(nullptr, state);
     }
 
-    void TearDown() override
+    ~nix_api_expr_test()
     {
         nix_gc_decref(nullptr, value);
         nix_state_free(state);
     }
 
-    EvalState * state = nullptr;
-    nix_value * value = nullptr;
+    EvalState * state;
+    nix_value * value;
 };
 
 } // namespace nixC

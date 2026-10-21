@@ -2,13 +2,10 @@
 
 namespace nix {
 
-namespace {
-
-class TeeLogger final : public Logger
+struct TeeLogger : Logger
 {
     std::vector<std::unique_ptr<Logger>> loggers;
 
-public:
     TeeLogger(std::vector<std::unique_ptr<Logger>> && loggers)
         : loggers(std::move(loggers))
     {
@@ -18,12 +15,6 @@ public:
     {
         for (auto & logger : loggers)
             logger->stop();
-    };
-
-    void flush() override
-    {
-        for (auto & logger : loggers)
-            logger->flush();
     };
 
     void pause() override
@@ -50,12 +41,6 @@ public:
             logger->logEI(ei);
     }
 
-    void printException(const std::exception_ptr & ex, std::string_view programName) noexcept override
-    {
-        for (auto & logger : loggers)
-            logger->printException(ex, programName);
-    }
-
     void startActivity(
         ActivityId act,
         Verbosity lvl,
@@ -66,18 +51,6 @@ public:
     {
         for (auto & logger : loggers)
             logger->startActivity(act, lvl, type, s, fields, parent);
-    }
-
-    void startActivity(
-        ActivityId act,
-        Verbosity lvl,
-        std::string_view name,
-        ActivityMetadata metadata,
-        std::string_view s,
-        ActivityId parent) noexcept override
-    {
-        for (auto & logger : loggers)
-            logger->startActivity(act, lvl, name, metadata, s, parent);
     }
 
     void stopActivity(ActivityId act) noexcept override
@@ -96,21 +69,6 @@ public:
     {
         for (auto & logger : loggers)
             logger->result(act, type, json);
-    }
-
-    Headers getTraceContext(ActivityId act) override
-    {
-        for (auto & logger : loggers) {
-            auto headers = logger->getTraceContext(act);
-            if (!headers.empty())
-                return headers;
-        }
-        return {};
-    }
-
-    void addLogger(std::unique_ptr<Logger> logger)
-    {
-        loggers.push_back(std::move(logger));
     }
 
     void writeToStdout(std::string_view s) override
@@ -142,23 +100,14 @@ public:
     }
 };
 
-} // namespace
-
-void applyExtraLogger(std::unique_ptr<Logger> extraLogger)
+std::unique_ptr<Logger>
+makeTeeLogger(std::unique_ptr<Logger> mainLogger, std::vector<std::unique_ptr<Logger>> && extraLoggers)
 {
-    auto teeLogger = dynamic_cast<TeeLogger *>(logger);
-    if (!teeLogger) {
-        try {
-            std::vector<std::unique_ptr<Logger>> loggers;
-            loggers.push_back(std::unique_ptr<Logger>(logger));
-            teeLogger = new TeeLogger(std::move(loggers));
-        } catch (...) {
-            // `logger` is now gone so give up.
-            abort();
-        }
-        logger = teeLogger;
-    }
-    teeLogger->addLogger(std::move(extraLogger));
+    std::vector<std::unique_ptr<Logger>> allLoggers;
+    allLoggers.push_back(std::move(mainLogger));
+    for (auto & l : extraLoggers)
+        allLoggers.push_back(std::move(l));
+    return std::make_unique<TeeLogger>(std::move(allLoggers));
 }
 
 } // namespace nix

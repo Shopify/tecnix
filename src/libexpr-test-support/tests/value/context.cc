@@ -1,6 +1,7 @@
-#include <exception> // IWYU pragma: keep (Needed by rapidcheck on Darwin and FreeBSD)
+#include <exception> // Needed by rapidcheck on Darwin
 #include <rapidcheck.h>
 
+#include "nix/store/tests/path.hh"
 #include "nix/expr/tests/value/context.hh"
 
 namespace rc {

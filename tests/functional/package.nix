@@ -10,7 +10,6 @@
   jq,
   git,
   mercurial,
-  python3,
   sqlite,
   unixtools,
   util-linux,
@@ -59,8 +58,6 @@ mkMesonDerivation (
       jq
       git
       mercurial
-      # For the OpenTelemetry collector in `otel.sh`.
-      python3
       sqlite
       unixtools.script
 
@@ -95,10 +92,6 @@ mkMesonDerivation (
 
     mesonCheckFlags = [
       "--print-errorlogs"
-    ];
-
-    mesonFlags = [
-      (lib.mesonBool "plugin-c-api" nix-cli.exportsPluginCApi)
     ];
 
     doCheck = true;

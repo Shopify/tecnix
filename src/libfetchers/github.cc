@@ -1,5 +1,6 @@
 #include "nix/store/filetransfer.hh"
 #include "nix/fetchers/cache.hh"
+#include "nix/store/globals.hh"
 #include "nix/store/store-api.hh"
 #include "nix/util/types.hh"
 #include "nix/util/url-parts.hh"
@@ -12,6 +13,7 @@
 
 #include <optional>
 #include <nlohmann/json.hpp>
+#include <fstream>
 
 namespace nix::fetchers {
 
@@ -39,14 +41,16 @@ struct GitArchiveInputScheme : InputScheme
         /* This ignores empty path segments for back-compat. Older versions used a tokenizeString here. */
         auto path = url.pathSegments(/*skipEmpty=*/true) | std::ranges::to<std::vector<std::string>>();
 
-        Attrs attrs;
+        std::optional<std::string> rev;
+        std::optional<std::string> ref;
+        std::optional<std::string> host_url;
 
         auto size = path.size();
         if (size == 3) {
             if (std::regex_match(path[2], revRegex))
-                attrs.insert_or_assign("rev", path[2]);
+                rev = path[2];
             else
-                attrs.insert_or_assign("ref", path[2]);
+                ref = path[2];
         } else if (size > 3) {
             std::string rs;
             for (auto i = std::next(path.begin(), 2); i != path.end(); i++) {
@@ -55,30 +59,38 @@ struct GitArchiveInputScheme : InputScheme
                     rs += "/";
                 }
             }
-            attrs.insert_or_assign("ref", rs);
+            ref = rs;
         } else if (size < 2)
             throw BadURL("URL '%s' is invalid", url);
 
         for (auto & [name, value] : url.query) {
             if (name == "rev") {
-                if (attrs.contains(name))
+                if (rev)
                     throw BadURL("URL '%s' contains multiple commit hashes", url);
-                attrs.insert_or_assign("rev", value);
+                rev = value;
             } else if (name == "ref") {
-                if (attrs.contains(name))
+                if (ref)
                     throw BadURL("URL '%s' contains multiple branch/tag names", url);
-                attrs.insert_or_assign("ref", value);
+                ref = value;
             } else if (name == "host")
-                attrs.insert_or_assign("host", value);
-            else if (name == "narHash")
-                attrs.insert_or_assign("narHash", value);
-            else
-                throw BadURL("URL '%s' contains unknown parameter '%s'", url, name);
+                host_url = value;
+            // FIXME: barf on unsupported attributes
         }
 
+        Attrs attrs;
         attrs.insert_or_assign("type", std::string{schemeName()});
         attrs.insert_or_assign("owner", path[0]);
         attrs.insert_or_assign("repo", path[1]);
+        if (rev)
+            attrs.insert_or_assign("rev", *rev);
+        if (ref)
+            attrs.insert_or_assign("ref", *ref);
+        if (host_url)
+            attrs.insert_or_assign("host", *host_url);
+
+        auto narHash = url.query.find("narHash");
+        if (narHash != url.query.end())
+            attrs.insert_or_assign("narHash", narHash->second);
 
         return inputFromAttrs(settings, attrs);
     }

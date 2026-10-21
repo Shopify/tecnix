@@ -1,10 +1,13 @@
-#include <ioapiset.h>
+#ifdef _WIN32
+#  include <ioapiset.h>
 
-#include "nix/util/logging.hh"
-#include "nix/util/util.hh"
-#include "nix/util/muxable-pipe.hh"
+#  include "nix/util/logging.hh"
+#  include "nix/util/util.hh"
+#  include "nix/util/muxable-pipe.hh"
 
 namespace nix {
+
+using namespace nix::windows;
 
 void MuxablePipePollState::poll(HANDLE ioport, std::optional<unsigned int> timeout)
 {
@@ -14,7 +17,7 @@ void MuxablePipePollState::poll(HANDLE ioport, std::optional<unsigned int> timeo
             ioport, oentries, sizeof(oentries) / sizeof(*oentries), &removed, timeout ? *timeout : INFINITE, false)) {
         auto lastError = GetLastError();
         if (lastError != WAIT_TIMEOUT)
-            throw windows::WinError(lastError, "GetQueuedCompletionStatusEx");
+            throw WinError(lastError, "GetQueuedCompletionStatusEx");
         assert(removed == 0);
     } else {
         assert(0 < removed && removed <= sizeof(oentries) / sizeof(*oentries));
@@ -56,7 +59,7 @@ void MuxablePipePollState::iterate(
                             handleEOF((*p)->readSide.get());
                             nextp = channels.erase(p); // no need to maintain `channels` ?
                         } else if (lastError != ERROR_IO_PENDING)
-                            throw windows::WinError(lastError, "ReadFile(%s, ..)", (*p)->readSide.get());
+                            throw WinError(lastError, "ReadFile(%s, ..)", (*p)->readSide.get());
                     }
                 }
                 break;
@@ -67,3 +70,4 @@ void MuxablePipePollState::iterate(
 }
 
 } // namespace nix
+#endif

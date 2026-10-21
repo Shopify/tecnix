@@ -4,7 +4,11 @@ source common.sh
 
 requireDaemonNewerThan "2.4pre20210625"
 
-export REMOTE_STORE="file://$cacheDir"
+export REMOTE_STORE_DIR="$TEST_ROOT/remote_store"
+export REMOTE_STORE="file://$REMOTE_STORE_DIR"
+
+rm -rf "$REMOTE_STORE_DIR"
+clearStore
 
 # Build dep1 and push that to the binary cache.
 # This entails building (and pushing) current-time.

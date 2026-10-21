@@ -33,4 +33,3 @@ PPIndentWidth: 2
 BinPackArguments: false
 BreakBeforeTernaryOperators: true
 SeparateDefinitionBlocks: Always
-OneLineFormatOffRegex: "// NOFORMAT$"

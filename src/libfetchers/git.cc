@@ -1,23 +1,26 @@
-#include "nix/util/environment-variables.hh"
 #include "nix/util/error.hh"
 #include "nix/fetchers/fetchers.hh"
 #include "nix/util/users.hh"
 #include "nix/fetchers/cache.hh"
+#include "nix/store/globals.hh"
 #include "nix/util/tarfile.hh"
 #include "nix/store/store-api.hh"
+#include "nix/util/url-parts.hh"
 #include "nix/store/pathlocks.hh"
 #include "nix/util/os-string.hh"
 #include "nix/util/processes.hh"
 #include "nix/util/git.hh"
 #include "nix/fetchers/git-utils.hh"
 #include "nix/util/logging.hh"
+#include "nix/util/finally.hh"
 #include "nix/fetchers/fetch-settings.hh"
 #include "nix/util/json-utils.hh"
 #include "nix/util/archive.hh"
-#include "nix/util/memo.hh"
 #include "nix/util/mounted-source-accessor.hh"
 #include "nix/fetchers/fetch-to-store.hh"
 
+#include <regex>
+#include <string.h>
 #include <sys/time.h>
 
 #ifndef _WIN32
@@ -165,13 +168,6 @@ std::vector<PublicKey> getPublicKeys(const Attrs & attrs)
 } // end namespace
 
 static const Hash nullRev{HashAlgorithm::SHA1};
-
-static LazyAttr makeLazyAttr(fun<ResolvedAttr()> compute)
-{
-    return make_ref<LazyAttrComputation>(LazyAttrComputation{
-        .compute = memo<ResolvedAttr>(std::move(compute)),
-    });
-}
 
 struct GitInputScheme : InputScheme
 {
@@ -467,7 +463,7 @@ struct GitInputScheme : InputScheme
 
         args.push_back(destDir.native());
 
-        runProgram("git", true, args, true);
+        runProgram("git", true, args, {}, true);
     }
 
     std::optional<std::filesystem::path> getSourcePath(const Input & input) const override
@@ -527,10 +523,6 @@ struct GitInputScheme : InputScheme
                 });
 
             if (commitMsg) {
-                auto [tempFd, tempPath] = createTempFile("nix-msg");
-                AutoDelete delTemp(tempPath, /*recursive=*/false);
-                writeFull(tempFd.get(), *commitMsg);
-
                 // Pause the logger to allow for user input (such as a gpg passphrase) in `git commit`
                 auto suspension = logger->suspend();
                 runProgram(
@@ -544,10 +536,9 @@ struct GitInputScheme : InputScheme
                         OS_STR("commit"),
                         string_to_os_string(std::string(path.rel())),
                         OS_STR("-F"),
-                        tempPath.native(),
-                    });
-
-                delTemp.deletePath();
+                        OS_STR("-"),
+                    },
+                    *commitMsg);
             }
         }
     }
@@ -616,19 +607,6 @@ struct GitInputScheme : InputScheme
     bool getAllRefsAttr(const Input & input) const
     {
         return maybeGetBoolAttr(input.attrs, "allRefs").value_or(false);
-    }
-
-    /**
-     * Whether to export this input using Nix < 2.20 semantics. This is a purely internal
-     * attribute: it is set only on the submodule inputs synthesized by
-     * `getAccessorFromCommit()`, so that the export of a repository composes the export of the
-     * top-level repo with exports of its submodules using the *same* semantics. If it's absent,
-     * we're a top-level input and the `nix-219-compat` setting decides. It is deliberately not
-     * part of `allowedAttrs()`.
-     */
-    std::optional<bool> getLegacyExportAttr(const Input & input) const
-    {
-        return maybeGetBoolAttr(input.attrs, "__legacyExport");
     }
 
     RepoInfo getRepoInfo(const Input & input) const
@@ -748,12 +726,14 @@ struct GitInputScheme : InputScheme
     }
 
     uint64_t getRevCount(
-        ref<Cache> cache, const RepoInfo & repoInfo, const std::filesystem::path & repoDir, const Hash & rev) const
+        const Settings & settings,
+        const RepoInfo & repoInfo,
+        const std::filesystem::path & repoDir,
+        const Hash & rev) const
     {
-        if (GitRepo::openRepo(repoDir, {})->isShallow())
-            throw Error("'%s' is a shallow Git repository, so 'revCount' is not available", repoInfo.locationToArg());
-
         Cache::Key key{"gitRevCount", {{"rev", rev.gitRev()}}};
+
+        auto cache = settings.getCache();
 
         if (auto revCountAttrs = cache->lookup(key))
             return getIntAttr(*revCountAttrs, "revCount");
@@ -768,26 +748,11 @@ struct GitInputScheme : InputScheme
         return revCount;
     }
 
-    LazyAttr lazyRevCount(
-        const Settings & settings,
-        const RepoInfo & repoInfo,
-        const std::filesystem::path & repoDir,
-        const Hash & rev) const
-    {
-        auto cache = settings.getCache();
-        return makeLazyAttr([this, cache, repoInfo, repoDir, rev]() -> ResolvedAttr {
-            return getRevCount(cache, repoInfo, repoDir, rev);
-        });
-    }
-
     std::string getDefaultRef(const Settings & settings, const RepoInfo & repoInfo, bool shallow) const
     {
         auto head = std::visit(
             overloaded{
-                [&](const std::filesystem::path & path) -> std::optional<std::string> {
-                    /* A detached HEAD is still resolvable by libgit2. */
-                    return GitRepo::openRepo(path, {})->getWorkdirRef().value_or("HEAD");
-                },
+                [&](const std::filesystem::path & path) { return GitRepo::openRepo(path, {})->getWorkdirRef(); },
                 [&](const ParsedURL & url) { return readHeadCached(settings, url.to_string(), shallow); }},
             repoInfo.location);
         if (!head) {
@@ -806,7 +771,7 @@ struct GitInputScheme : InputScheme
                     "\n"
                     "To make it visible to Nix, run:\n"
                     "\n"
-                    "git -C %2% add -N \"%1%\"",
+                    "git -C %2% add \"%1%\"",
                     path.rel(),
                     PathFmt(repoPath));
             else
@@ -845,7 +810,6 @@ struct GitInputScheme : InputScheme
             .exportIgnore = getExportIgnoreAttr(input),
             .smudgeLfs = getLfsAttr(input),
             .submodules = getSubmodulesAttr(input),
-            .legacy = getLegacyExportAttr(input).value_or(false),
         };
     }
 
@@ -902,18 +866,10 @@ struct GitInputScheme : InputScheme
 
         Input result(input);
 
-        /* As in the uncached path, don't override attributes the caller
-           supplied. They may be lazy (see `lazyRevCount`), and a lazy
-           attribute compares unequal to its resolved value in
-           `Input::checkLocks`, so replacing one with the cached integer
-           makes a refetch of a locked input fail with a spurious
-           "mismatch in field 'revCount'". */
-        if (!result.attrs.contains("lastModified"))
-            if (auto lm = maybeGetIntAttr(cached->value, "lastModified"))
-                result.attrs.insert_or_assign("lastModified", *lm);
-        if (!result.attrs.contains("revCount"))
-            if (auto rc = maybeGetIntAttr(cached->value, "revCount"))
-                result.attrs.insert_or_assign("revCount", *rc);
+        if (auto lm = maybeGetIntAttr(cached->value, "lastModified"))
+            result.attrs.insert_or_assign("lastModified", *lm);
+        if (auto rc = maybeGetIntAttr(cached->value, "revCount"))
+            result.attrs.insert_or_assign("revCount", *rc);
 
         return std::make_pair(accessor, std::move(result));
     }
@@ -933,9 +889,7 @@ struct GitInputScheme : InputScheme
         if (!options.submodules)
             options.exportIgnore = true;
 
-        options.legacy = true;
-
-        auto fingerprint = options.makeFingerprint(rev);
+        auto fingerprint = options.makeFingerprint(rev) + ";legacy";
 
         auto cacheKey =
             makeSourcePathToHashCacheKey(fingerprint, ContentAddressMethod::Raw::NixArchive, CanonPath::root);
@@ -1061,7 +1015,7 @@ struct GitInputScheme : InputScheme
                 }
             }
 
-            createDirs(cacheDir.parent_path());
+            std::filesystem::create_directories(cacheDir.parent_path());
             PathLocks cacheDirLock({cacheDir.string()});
 
             auto repo = GitRepo::openRepo(cacheDir, {.create = true, .bare = true});
@@ -1097,15 +1051,8 @@ struct GitInputScheme : InputScheme
                     return std::nullopt;
 
                 try {
-                    static constexpr std::string_view reservedRefNamespace =
-                        "__nix_internal_fetchers_48ae34d6b380c5ec__";
-                    /* Fetch into a bucketed ref instead of leaving the rev
-                       un-refed, so a later fetch of a nearby rev can
-                       negotiate against it instead of re-downloading. */
-                    auto rev = input.getRev();
-                    auto revStr = rev ? rev->gitRev() : "";
-                    auto fetchRef = getAllRefsAttr(input) ? "refs/*:refs/*"
-                                    : rev ? fmt("%s:refs/%s/tip-%s", revStr, reservedRefNamespace, revStr.substr(0, 2))
+                    auto fetchRef = getAllRefsAttr(input)              ? "refs/*:refs/*"
+                                    : input.getRev()                   ? input.getRev()->gitRev()
                                     : ref->compare(0, 5, "refs/") == 0 ? fmt("%1%:%1%", *ref)
                                     : *ref == "HEAD"                   ? "HEAD:HEAD"
                                                                        : fmt("%1%:%1%", "refs/heads/" + *ref);
@@ -1178,7 +1125,7 @@ struct GitInputScheme : InputScheme
                     "'%s' is a shallow Git repository, but shallow repositories are only allowed when `shallow = true;` is specified",
                     repoInfo.locationToArg());
 
-            input.attrs.insert_or_assign("revCount", lazyRevCount(settings, repoInfo, repoDir, rev));
+            input.attrs.insert_or_assign("revCount", getRevCount(settings, repoInfo, repoDir, rev));
         }
 
         printTalkative("using revision %s of repo '%s'", rev.gitRev(), repoInfo.locationToArg());
@@ -1189,144 +1136,138 @@ struct GitInputScheme : InputScheme
 
         auto expectedNarHash = input.getNarHash();
 
-        /* Return an accessor for the complete tree denoted by `rev`, that is, the top-level repo
-           with any submodules mounted into it. If `legacy` is set, Nix < 2.20 semantics are used
-           (i.e. `git archive` / `git checkout`, which apply Git filters, `export-ignore` and
-           `export-subst`); the submodules are then exported using those semantics as well.
+        auto accessor = repo->getAccessor(rev, options, "«" + input.to_string(true) + "»");
 
-           Note that submodules must be mounted before the NAR hash of the tree can be compared
-           against `expectedNarHash`, since that hash covers the submodule contents as well. */
-        auto getTree = [&](bool legacy) -> nix::ref<SourceAccessor> {
-            auto options2 = options;
-            options2.legacy = legacy;
+        /* Track whether the legacy (git archive) fallback was used. If so,
+           we must not cache the result in gitRevUrl, because the legacy
+           store path has different content (exportIgnore/CRLF/export-subst
+           applied) than what the cache key (exportIgnore=0) implies. Caching
+           it would poison subsequent modern fetches of the same rev. */
+        bool usedLegacyFallback = false;
 
-            auto accessor = legacy ? getLegacyGitAccessor(settings, store, repoInfo, repoDir, rev, options2)
-                                   : repo->getAccessor(rev, options2, "«" + input.to_string(true) + "»");
-
-            /* If the repo has submodules, fetch them and return a mounted
-               input accessor consisting of the accessor for the top-level
-               repo and the accessors for the submodules. */
-            if (options2.submodules) {
-                std::map<CanonPath, nix::ref<SourceAccessor>> mounts;
-
-                for (auto & [submodule, submoduleRev] : repo->getSubmodules(rev, options2.exportIgnore)) {
-                    auto resolved = repo->resolveSubmoduleUrl(submodule.url);
-                    debug(
-                        "Git submodule %s: %s %s %s -> %s",
-                        submodule.path,
-                        submodule.url,
-                        submodule.branch,
-                        submoduleRev.gitRev(),
-                        resolved);
-                    auto fetchSubmodule = [&](bool useShallow) {
-                        fetchers::Attrs attrs;
-                        attrs.insert_or_assign("type", "git");
-                        attrs.insert_or_assign("url", resolved);
-                        if (submodule.branch != "") {
-                            // A special value of . is used to indicate that the name of the branch in the submodule
-                            // should be the same name as the current branch in the current repository.
-                            // https://git-scm.com/docs/gitmodules
-                            if (submodule.branch == ".") {
-                                /* Unset when the top-level revision is pinned; the
-                                   submodule's revision is always pinned, so it
-                                   needs no branch either. */
-                                if (ref)
-                                    attrs.insert_or_assign("ref", *ref);
-                            } else {
-                                attrs.insert_or_assign("ref", submodule.branch);
-                            }
-                        }
-                        attrs.insert_or_assign("rev", submoduleRev.gitRev());
-                        attrs.insert_or_assign("exportIgnore", Explicit<bool>{options2.exportIgnore});
-                        attrs.insert_or_assign("submodules", Explicit<bool>{true});
-                        attrs.insert_or_assign("lfs", Explicit<bool>{options2.smudgeLfs});
-                        if (useShallow)
-                            attrs.insert_or_assign("shallow", Explicit<bool>{true});
-                        else
-                            attrs.insert_or_assign("allRefs", Explicit<bool>{true});
-                        /* Export the submodule using the same semantics as the top-level repo,
-                           regardless of the `nix-219-compat` setting. */
-                        attrs.insert_or_assign("__legacyExport", Explicit<bool>{options2.legacy});
-                        auto submoduleInput = fetchers::Input::fromAttrs(settings, std::move(attrs));
-                        auto [submoduleAccessor, submoduleInput2] = submoduleInput.getAccessor(settings, store);
-                        submoduleAccessor->setPathDisplay("«" + submoduleInput.to_string(true) + "»");
-                        return submoduleAccessor;
-                    };
-
-                    auto submoduleAccessor = [&]() {
-                        if (shallow) {
-                            try {
-                                return fetchSubmodule(true);
-                            } catch (Error & e) {
-                                debug(
-                                    "shallow fetch of Git submodule '%s' from '%s' failed: %s; falling back to full fetch",
-                                    submodule.path,
-                                    resolved,
-                                    e.what());
-                            }
-                        }
-                        return fetchSubmodule(false);
-                    }();
-
-                    mounts.insert_or_assign(submodule.path, submoduleAccessor);
-                }
-
-                if (!mounts.empty()) {
-                    auto newFingerprint = accessor->getFingerprint(CanonPath::root).second->append(";s");
-                    mounts.insert_or_assign(CanonPath::root, accessor);
-                    auto mounted = makeMountedSourceAccessor(std::move(mounts));
-                    mounted->fingerprint = newFingerprint;
-                    return mounted;
+        if (settings.nix219Compat && !options.smudgeLfs) {
+            /* Use Nix 2.19 semantics to generate locks, but if a NAR hash is specified, support Nix >= 2.20 semantics
+             * as well. */
+            warn("Using Nix 2.19 semantics to export Git repository '%s'.", input.to_string());
+            auto accessorModern = accessor;
+            accessor = getLegacyGitAccessor(settings, store, repoInfo, repoDir, rev, options);
+            usedLegacyFallback = true;
+            if (expectedNarHash) {
+                auto narHashLegacy =
+                    fetchToStore2(settings, store, {accessor}, FetchMode::DryRun, input.getName()).second;
+                if (expectedNarHash != narHashLegacy) {
+                    auto narHashModern =
+                        fetchToStore2(settings, store, {accessorModern}, FetchMode::DryRun, input.getName()).second;
+                    if (expectedNarHash == narHashModern) {
+                        accessor = accessorModern;
+                        usedLegacyFallback = false;
+                    }
                 }
             }
-
-            return accessor;
-        };
-
-        /* Use Nix 2.19 semantics if requested. If we're a submodule, follow whatever the top-level
-           repo is being exported with instead of the setting. */
-        auto legacyExport = getLegacyExportAttr(input);
-        bool useLegacy = legacyExport.value_or(settings.nix219Compat) && !options.smudgeLfs;
-
-        if (useLegacy && !legacyExport)
-            warn("Using Nix 2.19 semantics to export Git repository '%s'.", input.to_string());
-
-        auto accessor = getTree(useLegacy);
-
-        /* Whether `accessor` is the legacy (`git archive`) export. Such a
-           tree must not be cached in `gitRevUrl` below: its store path has
-           exportIgnore/CRLF/export-subst applied, so it would not match the
-           cache key (which says exportIgnore=0) and would poison subsequent
-           modern fetches of the same rev. */
-        bool usedLegacy = useLegacy;
-
-        /* Backward compatibility hack: a lock may have been produced by a Nix version that used the
-           other export semantics. In particular, locks produced by Nix < 2.20 depend on Nix applying
-           Git filters, `export-ignore` or `export-subst`, while Nix >= 2.20 doesn't do those. So if
-           we get a NAR hash mismatch, try again using the other semantics. */
-        if (expectedNarHash) {
-            auto narHash = fetchToStore2(settings, store, {accessor}, FetchMode::DryRun, input.getName()).second;
-            if (*expectedNarHash != narHash) {
-                auto accessorOther = getTree(!useLegacy);
-                auto narHashOther =
-                    fetchToStore2(settings, store, {accessorOther}, FetchMode::DryRun, input.getName()).second;
-                if (*expectedNarHash == narHashOther) {
-                    if (!useLegacy)
+        } else {
+            /* Backward compatibility hack for locks produced by Nix < 2.20 that depend on Nix applying Git filters,
+             * `export-ignore` or `export-subst`. Nix >= 2.20 doesn't do those, so we may get a NAR hash mismatch. If
+             * that happens, try again using `git archive`. */
+            if (expectedNarHash) {
+                auto narHashNew = fetchToStore2(settings, store, {accessor}, FetchMode::DryRun, input.getName()).second;
+                if (expectedNarHash != narHashNew) {
+                    auto accessorLegacy = getLegacyGitAccessor(settings, store, repoInfo, repoDir, rev, options);
+                    auto narHashLegacy =
+                        fetchToStore2(settings, store, {accessorLegacy}, FetchMode::DryRun, input.getName()).second;
+                    if (expectedNarHash == narHashLegacy) {
                         warn(
                             "Git input '%s' specifies a NAR hash '%s' that was created by Nix < 2.20.\n"
                             "Nix >= 2.20 does not apply Git filters, `export-ignore` and `export-subst` by default, which changes the NAR hash.\n"
                             "Please update the NAR hash to '%s'.",
                             input.to_string(),
                             expectedNarHash->to_string(HashFormat::SRI, true),
-                            narHash.to_string(HashFormat::SRI, true));
-                    accessor = accessorOther;
-                    usedLegacy = !useLegacy;
+                            narHashNew.to_string(HashFormat::SRI, true));
+                        accessor = accessorLegacy;
+                        usedLegacyFallback = true;
+                    }
                 }
             }
         }
 
-        // Cache for future rev+url lookups (see `usedLegacy` above).
-        if (!usedLegacy) {
+        /* If the repo has submodules, fetch them and return a mounted
+           input accessor consisting of the accessor for the top-level
+           repo and the accessors for the submodules. */
+        if (options.submodules) {
+            std::map<CanonPath, nix::ref<SourceAccessor>> mounts;
+
+            for (auto & [submodule, submoduleRev] : repo->getSubmodules(rev, options.exportIgnore)) {
+                auto resolved = repo->resolveSubmoduleUrl(submodule.url);
+                debug(
+                    "Git submodule %s: %s %s %s -> %s",
+                    submodule.path,
+                    submodule.url,
+                    submodule.branch,
+                    submoduleRev.gitRev(),
+                    resolved);
+                auto fetchSubmodule = [&](bool useShallow) {
+                    fetchers::Attrs attrs;
+                    attrs.insert_or_assign("type", "git");
+                    attrs.insert_or_assign("url", resolved);
+                    if (submodule.branch != "") {
+                        // A special value of . is used to indicate that the name of the branch in the submodule
+                        // should be the same name as the current branch in the current repository.
+                        // https://git-scm.com/docs/gitmodules
+                        if (submodule.branch == ".") {
+                            /* Unset when the top-level revision is pinned; the
+                               submodule's revision is always pinned, so it
+                               needs no branch either. */
+                            if (ref)
+                                attrs.insert_or_assign("ref", *ref);
+                        } else {
+                            attrs.insert_or_assign("ref", submodule.branch);
+                        }
+                    }
+                    attrs.insert_or_assign("rev", submoduleRev.gitRev());
+                    attrs.insert_or_assign("exportIgnore", Explicit<bool>{options.exportIgnore});
+                    attrs.insert_or_assign("submodules", Explicit<bool>{true});
+                    attrs.insert_or_assign("lfs", Explicit<bool>{options.smudgeLfs});
+                    if (useShallow)
+                        attrs.insert_or_assign("shallow", Explicit<bool>{true});
+                    else
+                        attrs.insert_or_assign("allRefs", Explicit<bool>{true});
+
+                    auto submoduleInput = fetchers::Input::fromAttrs(settings, std::move(attrs));
+                    auto [submoduleAccessor, submoduleInput2] = submoduleInput.getAccessor(settings, store);
+                    submoduleAccessor->setPathDisplay("«" + submoduleInput.to_string(true) + "»");
+                    return submoduleAccessor;
+                };
+
+                auto submoduleAccessor = [&]() {
+                    if (shallow) {
+                        try {
+                            return fetchSubmodule(true);
+                        } catch (Error & e) {
+                            debug(
+                                "shallow fetch of Git submodule '%s' from '%s' failed: %s; falling back to full fetch",
+                                submodule.path,
+                                resolved,
+                                e.what());
+                        }
+                    }
+                    return fetchSubmodule(false);
+                }();
+
+                mounts.insert_or_assign(submodule.path, submoduleAccessor);
+            }
+
+            if (!mounts.empty()) {
+                auto newFingerprint = accessor->getFingerprint(CanonPath::root).second->append(";s");
+                mounts.insert_or_assign(CanonPath::root, accessor);
+                accessor = makeMountedSourceAccessor(std::move(mounts));
+                accessor->fingerprint = newFingerprint;
+            }
+        }
+
+        // Cache for future rev+url lookups.
+        // Skip caching when the legacy fallback was used, because the
+        // legacy store path has exportIgnore/CRLF/export-subst applied
+        // and would not match the cache key (which says exportIgnore=0).
+        if (!usedLegacyFallback) {
             auto url = getStrAttr(input.attrs, "url");
             auto [storePath, _narHash] = fetchToStore2(settings, store, {accessor}, FetchMode::DryRun, input.getName());
 
@@ -1359,9 +1300,10 @@ struct GitInputScheme : InputScheme
     {
         auto repoPath = repoInfo.getPath().value();
 
-        /* Create mountpoints for the submodules. */
-        for (auto & submodule : repoInfo.workdirInfo.submodules)
-            repoInfo.workdirInfo.files.insert(submodule.path);
+        if (getSubmodulesAttr(input))
+            /* Create mountpoints for the submodules. */
+            for (auto & submodule : repoInfo.workdirInfo.submodules)
+                repoInfo.workdirInfo.files.insert(submodule.path);
 
         auto repo = GitRepo::openRepo(repoPath, {});
 
@@ -1371,19 +1313,12 @@ struct GitInputScheme : InputScheme
             repo->getAccessor(repoInfo.workdirInfo, {.exportIgnore = exportIgnore}, makeNotAllowedError(repoPath));
 
         /* If the repo has submodules, return a mounted input accessor
-           consisting of the accessor for the top-level repo and, per
-           submodule, either its workdir accessor or an empty directory
-           where getAccessorFromCommit() would produce one (submodules
-           disabled, or a gitlink without a .gitmodules entry). */
-        if (!repoInfo.workdirInfo.submodules.empty()) {
+           consisting of the accessor for the top-level repo and the
+           accessors for the submodule workdirs. */
+        if (getSubmodulesAttr(input) && !repoInfo.workdirInfo.submodules.empty()) {
             std::map<CanonPath, nix::ref<SourceAccessor>> mounts;
 
             for (auto & submodule : repoInfo.workdirInfo.submodules) {
-                if (!getSubmodulesAttr(input) || submodule.url.empty()) {
-                    mounts.insert_or_assign(submodule.path, makeEmptySourceAccessor());
-                    continue;
-                }
-
                 auto submodulePath = repoPath / submodule.path.rel();
                 fetchers::Attrs attrs;
                 attrs.insert_or_assign("type", "git");
@@ -1420,11 +1355,8 @@ struct GitInputScheme : InputScheme
 
             input.attrs.insert_or_assign("rev", rev.gitRev());
             if (!getShallowAttr(input)) {
-                if (rev == nullRev) {
-                    input.attrs.insert_or_assign("revCount", uint64_t(0));
-                } else {
-                    input.attrs.insert_or_assign("revCount", lazyRevCount(settings, repoInfo, repoPath, rev));
-                }
+                input.attrs.insert_or_assign(
+                    "revCount", rev == nullRev ? 0 : getRevCount(settings, repoInfo, repoPath, rev));
             }
 
             verifyCommit(input, repo);
@@ -1502,7 +1434,7 @@ struct GitInputScheme : InputScheme
                 for (auto & file : repoInfo.workdirInfo.dirtyFiles) {
                     writeString("modified:", hashSink);
                     writeString(file.abs(), hashSink);
-                    dumpPath(*repoPath / file.rel(), hashSink);
+                    dumpPath((*repoPath / file.rel()).string(), hashSink);
                 }
                 for (auto & file : repoInfo.workdirInfo.deletedFiles) {
                     writeString("deleted:", hashSink);

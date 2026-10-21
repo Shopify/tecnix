@@ -18,7 +18,8 @@ struct nix_eval_state_builder
     nix::EvalSettings settings;
     nix::fetchers::Settings fetchSettings;
     nix::LookupPath lookupPath;
-    nix::ref<bool> readOnlyMode;
+    // TODO: make an EvalSettings setting own this instead?
+    bool readOnlyMode;
 };
 
 struct EvalState

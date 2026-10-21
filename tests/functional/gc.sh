@@ -4,6 +4,8 @@ source common.sh
 
 TODO_NixOS
 
+clearStore
+
 drvPath=$(nix-instantiate dependencies.nix)
 outPath=$(nix-store -rvv "$drvPath")
 

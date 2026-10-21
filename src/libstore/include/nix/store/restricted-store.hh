@@ -2,9 +2,6 @@
 ///@file
 
 #include "nix/store/store-api.hh"
-#include "nix/util/sync.hh"
-
-#include <future>
 
 namespace nix {
 
@@ -26,31 +23,20 @@ struct LocalStoreConfig;
  */
 struct RestrictionContext
 {
-private:
-    /* VTable anchor to avoid weak linkage of the vtable - it breaks
-       dynamic_cast across shared libraries on Darwin. */
-    virtual void anchor();
-
-public:
     /**
      * Paths that are already allowed to begin with
      */
     virtual const StorePathSet & originalPaths() = 0;
 
-    struct State
-    {
-        /**
-         * Paths that were added via recursive Nix calls.
-         */
-        std::map<StorePath, std::shared_future<void>> addedPaths;
+    /**
+     * Paths that were added via recursive Nix calls.
+     */
+    StorePathSet addedPaths;
 
-        /**
-         * Realisations that were added via recursive Nix calls.
-         */
-        std::set<DrvOutput> addedDrvOutputs;
-    };
-
-    Sync<State> state_;
+    /**
+     * Realisations that were added via recursive Nix calls.
+     */
+    std::set<DrvOutput> addedDrvOutputs;
 
     /**
      * Recursive Nix calls are only allowed to build or realize paths
@@ -70,33 +56,7 @@ public:
     {
         if (isAllowed(path))
             return;
-
-        std::promise<void> promise;
-
-        auto [future, shouldAdd] = [&]() -> std::pair<std::shared_future<void>, bool> {
-            auto state(state_.lock());
-            if (auto iter = state->addedPaths.find(path); iter != state->addedPaths.end()) {
-                return {iter->second, false};
-            }
-            auto [iter2, _] = state->addedPaths.emplace(path, promise.get_future().share());
-            return {iter2->second, true};
-        }();
-
-        /* Another daemon worker thread already started adding the dependency. Just wait for it
-           to complete. */
-        if (!shouldAdd) {
-            future.get();
-            return;
-        }
-
-        try {
-            addDependencyImpl(path);
-            promise.set_value();
-        } catch (...) {
-            /* Notify all other waiters that we are done. */
-            promise.set_exception(std::current_exception());
-            throw;
-        }
+        addDependencyImpl(path);
     }
 
     virtual ~RestrictionContext() = default;

@@ -2,8 +2,9 @@
 #include "nix/util/error.hh"
 #include <cmath>
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
 
 namespace nix {
 
@@ -30,3 +31,4 @@ std::chrono::microseconds getCpuUserTime()
 }
 
 } // namespace nix
+#endif // ifdef _WIN32

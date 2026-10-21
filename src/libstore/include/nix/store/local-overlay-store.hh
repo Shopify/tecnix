@@ -7,17 +7,13 @@ namespace nix {
  */
 struct LocalOverlayStoreConfig : virtual LocalStoreConfig
 {
-private:
-    void anchor() override;
-
-public:
     LocalOverlayStoreConfig(const StringMap & params)
         : LocalOverlayStoreConfig("", params)
     {
     }
 
     LocalOverlayStoreConfig(const std::filesystem::path & path, const Params & params)
-        : StoreConfig(params, FilePathType::Native)
+        : StoreConfig(params)
         , LocalFSStoreConfig(path, params)
         , LocalStoreConfig(path, params)
     {
@@ -37,7 +33,7 @@ public:
 
     const Setting<AbsolutePath> upperLayer{
         (StoreConfig *) this,
-        "/upper-layer-must-be-set",
+        "",
         "upper-layer",
         R"(
           Directory containing the OverlayFS upper layer for this store's store dir.
@@ -57,9 +53,9 @@ public:
           default, but can be disabled if needed.
         )"};
 
-    const Setting<std::optional<AbsolutePath>> remountHook{
+    const Setting<AbsolutePath> remountHook{
         (StoreConfig *) this,
-        std::nullopt,
+        "",
         "remount-hook",
         R"(
           Script or other executable to run when overlay filesystem needs remounting.
@@ -123,8 +119,6 @@ struct LocalOverlayStore : virtual LocalStore
     LocalOverlayStore(ref<const Config>);
 
 private:
-    void anchor() override;
-
     /**
      * The store beneath us.
      *
@@ -142,11 +136,6 @@ private:
 
     /**
      * Check lower store if upper DB does not have.
-     *
-     * In addition, copy up metadata for lower store objects (and their
-     * closure). (I.e. Optimistically cache in the upper DB.) The
-     * returned info is the upper store's own, so that its DB id is
-     * the upper DB's.
      */
     void queryPathInfoUncached(
         const StorePath & path, Callback<std::shared_ptr<const ValidPathInfo>> callback) noexcept override;
@@ -158,12 +147,6 @@ private:
      * closure). (I.e. Optimistically cache in the upper DB.)
      */
     bool isValidPathUncached(const StorePath & path) override;
-
-    /**
-     * Register a lower store object (and its closure) in the upper
-     * DB.
-     */
-    void registerLowerPath(const ValidPathInfo & info);
 
     /**
      * Check the lower store and upper DB.

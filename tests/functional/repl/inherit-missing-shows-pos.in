@@ -1,4 +1,0 @@
-# COM: inherit error shows position (without spurious semicolon from retry)
-a = { x = 1; }
-inherit (a) y
-y

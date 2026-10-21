@@ -1,11 +1,14 @@
 #include "nix/cmd/command.hh"
+#include "nix/main/common-args.hh"
 #include "nix/main/shared.hh"
 #include "nix/expr/eval.hh"
+#include "nix/flake/flake.hh"
 #include "nix/store/store-api.hh"
 #include "nix/fetchers/fetchers.hh"
 #include "nix/fetchers/registry.hh"
 
-namespace nix {
+using namespace nix;
+using namespace nix::flake;
 
 class RegistryCommand : virtual Args
 {
@@ -267,5 +270,3 @@ struct CmdRegistry : NixMultiCommand
 };
 
 static auto rCmdRegistry = registerCommand<CmdRegistry>("registry");
-
-} // namespace nix

@@ -1,11 +1,9 @@
 #pragma once
 
 #include "nix/util/source-path.hh"
+#include "nix/util/sync.hh"
 
-#include <set>
-#include <unordered_set>
-
-#include <boost/unordered/concurrent_flat_map_fwd.hpp>
+#include <boost/unordered/unordered_flat_set_fwd.hpp>
 
 namespace nix {
 
@@ -61,10 +59,7 @@ struct FilteringSourceAccessor : SourceAccessor
 
     std::shared_ptr<const Provenance> getProvenance(const CanonPath & path) override;
 
-    void invalidateCache() override
-    {
-        next->invalidateCache();
-    }
+    void invalidateCache(const CanonPath & path) override;
 
     /**
      * Call `makeNotAllowedError` to throw a `RestrictedPathError`
@@ -91,8 +86,8 @@ struct AllowListSourceAccessor : public FilteringSourceAccessor
 
     static ref<AllowListSourceAccessor> create(
         ref<SourceAccessor> next,
-        const std::set<CanonPath> & allowedPrefixes,
-        const std::unordered_set<CanonPath> & allowedPaths,
+        std::set<CanonPath> && allowedPrefixes,
+        boost::unordered_flat_set<CanonPath> && allowedPaths,
         MakeNotAllowedError && makeNotAllowedError);
 
     using FilteringSourceAccessor::FilteringSourceAccessor;
@@ -103,9 +98,9 @@ struct AllowListSourceAccessor : public FilteringSourceAccessor
  */
 struct CachingFilteringSourceAccessor : FilteringSourceAccessor
 {
-    const ref<boost::concurrent_flat_map<CanonPath, bool>> cache;
+    SharedSync<std::map<CanonPath, bool>> cache;
 
-    CachingFilteringSourceAccessor(const SourcePath & src, MakeNotAllowedError && makeNotAllowedError);
+    using FilteringSourceAccessor::FilteringSourceAccessor;
 
     bool isAllowed(const CanonPath & path) override;
 

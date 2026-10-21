@@ -3,7 +3,6 @@
 #include "nix/util/file-system.hh"
 #include "nix/util/current-process.hh"
 #include "nix/util/environment-variables.hh"
-#include "nix/util/logging.hh"
 
 namespace nix {
 
@@ -16,9 +15,6 @@ void showManPage(const std::string & name)
 {
     restoreProcessContext();
     setEnv("MANPATH", (getNixManDir().string() + ":").c_str());
-    /* We're about to exec, so end and export any telemetry. */
-    logger->stop();
-    logger->flush();
     execlp("man", "man", name.c_str(), nullptr);
     if (errno == ENOENT) {
         // Not SysError because we don't want to suffix the errno, aka No such file or directory.

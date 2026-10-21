@@ -3,6 +3,7 @@
 #include "nix/store/worker-protocol.hh"
 #include "nix/store/worker-protocol-connection.hh"
 #include "nix/store/worker-protocol-impl.hh"
+#include "nix/store/build-result.hh"
 #include "nix/store/store-api.hh"
 #include "nix/store/store-cast.hh"
 #include "nix/store/filetransfer.hh"
@@ -15,13 +16,12 @@
 #include "nix/util/archive.hh"
 #include "nix/store/derivations.hh"
 #include "nix/util/args.hh"
+#include "nix/util/git.hh"
 #include "nix/util/logging.hh"
 #include "nix/store/globals.hh"
 #include "nix/store/active-builds.hh"
 #include "nix/util/provenance.hh"
 #include "nix/util/async.hh"
-
-#include <variant>
 
 #ifndef _WIN32 // TODO need graceful async exit support on Windows?
 #  include "nix/util/monitor-fd.hh"
@@ -35,19 +35,16 @@ Sink & operator<<(Sink & sink, const Logger::Fields & fields)
 {
     sink << fields.size();
     for (auto & f : fields) {
-        if (auto p = std::get_if<uint64_t>(&f.raw)) {
-            sink << 0;
-            sink << *p;
-        } else if (auto p = std::get_if<std::string>(&f.raw)) {
-            sink << 1;
-            sink << *p;
-        } else
+        sink << f.type;
+        if (f.type == Logger::Field::tInt)
+            sink << f.i;
+        else if (f.type == Logger::Field::tString)
+            sink << f.s;
+        else
             unreachable();
     }
     return sink;
 }
-
-namespace {
 
 /* Logger that forwards log messages to the client, *if* we're in a
    state where the protocol allows it (i.e., when canSendStderr is
@@ -189,6 +186,22 @@ struct TunnelLogger : public Logger
     }
 };
 
+struct TunnelSink : Sink
+{
+    Sink & to;
+
+    TunnelSink(Sink & to)
+        : to(to)
+    {
+    }
+
+    void operator()(std::string_view data) override
+    {
+        to << STDERR_WRITE;
+        writeString(data, to);
+    }
+};
+
 struct TunnelSource : BufferedSource
 {
     Source & from;
@@ -210,8 +223,6 @@ struct TunnelSource : BufferedSource
         return n;
     }
 };
-
-} // namespace
 
 struct ClientSettings
 {
@@ -756,31 +767,13 @@ static void performOp(
     case WorkerProto::Op::CollectGarbage: {
         GCOptions options;
         options.action = WorkerProto::Serialise<GCOptions::GCAction>::read(*store, rconn);
-        if (rconn.version.features.contains(WorkerProto::featureDeleteDeadSpecificReferrers)) {
-            options.pathsToDelete = WorkerProto::Serialise<GCOptions::GCPaths>::read(*store, rconn);
-        } else {
-            auto paths = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
-            if (options.action != GCAction::gcDeleteSpecific && paths.empty())
-                options.pathsToDelete = GCOptions::WholeStore{};
-            else
-                options.pathsToDelete = GCOptions::SpecificPaths{
-                    .paths = paths,
-                    .deleteReferrers = false,
-                };
-        }
+        options.pathsToDelete = WorkerProto::Serialise<StorePathSet>::read(*store, rconn);
         conn.from >> options.ignoreLiveness >> options.maxFreed;
         options.censor = !trusted;
         // obsolete fields
         readInt(conn.from);
         readInt(conn.from);
         readInt(conn.from);
-
-        if (options.action == GCAction::gcDeleteDead
-            && std::holds_alternative<GCOptions::SpecificPaths>(options.pathsToDelete)
-            && !conn.protoVersion.features.contains(WorkerProto::featureDeleteDeadSpecificReferrers)) {
-            throw Error(
-                "Garbage collecting specific paths requested but it is not supported by the negotiated protocol");
-        }
 
         GCResults results;
 
@@ -1032,8 +1025,14 @@ static void performOp(
 
     case WorkerProto::Op::RegisterDrvOutput: {
         logger->startWork();
-        auto realisation = WorkerProto::Serialise<Realisation>::read(*store, rconn);
-        store->registerDrvOutput(realisation);
+        if (conn.protoVersion.number < WorkerProto::Version::Number{1, 31}) {
+            auto outputId = WorkerProto::Serialise<DrvOutput>::read(*store, rconn);
+            auto outputPath = StorePath(readString(conn.from));
+            store->registerDrvOutput(Realisation{{.outPath = outputPath}, outputId});
+        } else {
+            auto realisation = WorkerProto::Serialise<Realisation>::read(*store, rconn);
+            store->registerDrvOutput(realisation);
+        }
         logger->stopWork();
         break;
     }
@@ -1041,16 +1040,19 @@ static void performOp(
     case WorkerProto::Op::QueryRealisation: {
         logger->startWork();
         auto outputId = WorkerProto::Serialise<DrvOutput>::read(*store, rconn);
-        auto ptr = store->queryRealisation(outputId);
-        std::optional<UnkeyedRealisation> info;
-        if (ptr)
-            info = *ptr;
+        auto info = store->queryRealisation(outputId);
         logger->stopWork();
-        /* Only return the new format because if we got past
-           `DrvOutput` serialization, we know that is what we're using.
-           */
-        assert(conn.protoVersion.features.contains(WorkerProto::featureRealisationWithPath));
-        WorkerProto::write(*store, wconn, info);
+        if (conn.protoVersion.number < WorkerProto::Version::Number{1, 31}) {
+            std::set<StorePath> outPaths;
+            if (info)
+                outPaths.insert(info->outPath);
+            WorkerProto::write(*store, wconn, outPaths);
+        } else {
+            std::set<Realisation> realisations;
+            if (info)
+                realisations.insert({*info, outputId});
+            WorkerProto::write(*store, wconn, realisations);
+        }
         break;
     }
 
@@ -1085,24 +1087,9 @@ static void performOp(
     }
 }
 
-void processConnection(
-    ref<Store> store,
-    FdSource && from,
-    FdSink && to,
-    TrustedFlag trusted,
-    RecursiveFlag recursive,
-    std::function<void(std::string_view traceparent)> setupTelemetry)
+void processConnection(ref<Store> store, FdSource && from, FdSink && to, TrustedFlag trusted, RecursiveFlag recursive)
 {
 #ifndef _WIN32 // TODO need graceful async exit support on Windows?
-    /* The client hanging up triggers an interrupt (via `MonitorFdHup`
-       below), which is how we abort whatever we were doing for it.
-       Once the connection is over, that interrupt has served its
-       purpose, so clear it, e.g. so that we can still export our
-       telemetry. Note: this has to run *after* the monitor has been
-       destroyed, i.e. its thread joined, since it might otherwise
-       still trigger the interrupt after we've cleared it. */
-    Finally clearInterrupt([]() { setInterrupted(false); });
-
     auto monitor = !recursive ? std::make_unique<MonitorFdHup>(from.fd) : nullptr;
     (void) monitor; // suppress warning
     ReceiveInterrupts receiveInterrupts;
@@ -1119,21 +1106,14 @@ void processConnection(
 #endif
 
     /* Exchange the greeting. */
-    auto localVersion = WorkerProto::latest;
-    if (recursive)
-        localVersion.features.insert(std::string{WorkerProto::featureDisableSetOptions});
-    if (!experimentalFeatureSettings.isEnabled(Xp::Provenance))
-        localVersion.features.erase(std::string(WorkerProto::featureProvenance));
-
     WorkerProto::BasicServerConnection conn;
-    conn.protoVersion = WorkerProto::BasicServerConnection::handshake(to, from, localVersion);
+    auto version = WorkerProto::latest;
+    if (!experimentalFeatureSettings.isEnabled(Xp::Provenance))
+        version.features.erase(std::string(WorkerProto::featureProvenance));
+    conn.protoVersion = WorkerProto::BasicServerConnection::handshake(to, from, version);
 
     if (conn.protoVersion.number < WorkerProto::minimum.number)
         throw Error("the Nix client version is too old");
-
-    std::string traceparent;
-    if (conn.protoVersion.features.contains(WorkerProto::featureOpenTelemetry))
-        traceparent = readString(from);
 
     conn.to = std::move(to);
     conn.from = std::move(from);
@@ -1146,12 +1126,12 @@ void processConnection(
         applyJSONLogger();
     }
 
-    if (setupTelemetry)
-        setupTelemetry(traceparent);
-
     unsigned int opCount = 0;
 
-    Finally finally([&]() { printMsgUsing(prevLogger, lvlDebug, "%d operations", opCount); });
+    Finally finally([&]() {
+        setInterrupted(false);
+        printMsgUsing(prevLogger, lvlDebug, "%d operations", opCount);
+    });
 
     conn.postHandshake(
         *store,
@@ -1181,31 +1161,11 @@ void processConnection(
                 break;
             }
 
-            std::string traceparent;
-            if (conn.protoVersion.features.contains(WorkerProto::featureOpenTelemetry))
-                traceparent = readString(conn.from);
-
             printMsgUsing(prevLogger, lvlDebug, "received daemon op %d", op);
 
             opCount++;
 
             debug("performing daemon worker op: %d", op);
-
-            /* Parent our work under the client activity that
-               initiated this operation. */
-            std::optional<Activity> act;
-            std::optional<PushActivity> pact;
-            if (!traceparent.empty()) {
-                act.emplace(
-                    *logger,
-                    lvlDebug,
-                    "daemon operation",
-                    std::to_array<std::pair<std::string_view, Logger::Field>>({
-                        {"nix.daemon.op", (uint64_t) op},
-                        {"traceparent", traceparent},
-                    }));
-                pact.emplace(act->id);
-            }
 
             try {
                 performOp(tunnelLogger, store, trusted, recursive, conn, op);
@@ -1219,6 +1179,10 @@ void processConnection(
                 tunnelLogger->stopWork(&e);
                 if (!errorAllowed)
                     throw;
+            } catch (std::bad_alloc & e) {
+                auto ex = Error("Nix daemon out of memory");
+                tunnelLogger->stopWork(&ex);
+                throw;
             }
 
             conn.to.flush();

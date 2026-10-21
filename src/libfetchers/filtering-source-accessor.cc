@@ -1,9 +1,7 @@
 #include "nix/fetchers/filtering-source-accessor.hh"
 #include "nix/util/sync.hh"
-#include "nix/util/util.hh"
 
-#include <boost/unordered/concurrent_flat_map.hpp>
-#include <boost/unordered/concurrent_flat_set.hpp>
+#include <boost/unordered/unordered_flat_set.hpp>
 
 namespace nix {
 
@@ -82,6 +80,11 @@ std::shared_ptr<const Provenance> FilteringSourceAccessor::getProvenance(const C
     return next->getProvenance(prefix / path);
 }
 
+void FilteringSourceAccessor::invalidateCache(const CanonPath & path)
+{
+    next->invalidateCache(prefix / path);
+}
+
 void FilteringSourceAccessor::checkAccess(const CanonPath & path)
 {
     if (!isAllowed(path))
@@ -90,36 +93,32 @@ void FilteringSourceAccessor::checkAccess(const CanonPath & path)
 
 struct AllowListSourceAccessorImpl : AllowListSourceAccessor
 {
-private:
-    void anchor() override {};
-public:
     SharedSync<std::set<CanonPath>> allowedPrefixes;
-    boost::concurrent_flat_set<CanonPath> allowedPaths;
+    SharedSync<boost::unordered_flat_set<CanonPath>> allowedPaths;
 
-    boost::concurrent_flat_set<CanonPath> knownAllowed;
+    SharedSync<boost::unordered_flat_set<CanonPath>> knownAllowed;
 
     AllowListSourceAccessorImpl(
         ref<SourceAccessor> next,
-        const std::set<CanonPath> & allowedPrefixes,
-        const std::unordered_set<CanonPath> & allowedPaths,
+        std::set<CanonPath> && allowedPrefixes,
+        boost::unordered_flat_set<CanonPath> && allowedPaths,
         MakeNotAllowedError && makeNotAllowedError)
         : AllowListSourceAccessor(SourcePath(next), std::move(makeNotAllowedError))
-        , allowedPrefixes(allowedPrefixes.begin(), allowedPrefixes.end())
-        , allowedPaths(allowedPaths.begin(), allowedPaths.end())
+        , allowedPrefixes(std::move(allowedPrefixes))
+        , allowedPaths(std::move(allowedPaths))
     {
     }
 
     bool isAllowed(const CanonPath & path) override
     {
-        if (knownAllowed.contains(path))
+        if (knownAllowed.readLock()->contains(path))
             return true;
-        /* Read lock is held for the duration of the full expression if the || doesn't short-circuit. */
-        if (!(allowedPaths.contains(path) || path.isAllowed(*allowedPrefixes.readLock())))
+        if (!(allowedPaths.readLock()->contains(path) || path.isAllowed(*allowedPrefixes.readLock())))
             return false;
         // Only cache allows since allow may be widened later by `allowPrefix` but not narrowed
         // and `CanonPath::isAllowed` may do more expensive I/O for a hot path (and this struct
         // cannot be inherited/overriden externally)
-        knownAllowed.insert(path);
+        knownAllowed.lock()->insert(path);
         return true;
     }
 
@@ -131,26 +130,24 @@ public:
 
 ref<AllowListSourceAccessor> AllowListSourceAccessor::create(
     ref<SourceAccessor> next,
-    const std::set<CanonPath> & allowedPrefixes,
-    const std::unordered_set<CanonPath> & allowedPaths,
+    std::set<CanonPath> && allowedPrefixes,
+    boost::unordered_flat_set<CanonPath> && allowedPaths,
     MakeNotAllowedError && makeNotAllowedError)
 {
-    return make_ref<AllowListSourceAccessorImpl>(next, allowedPrefixes, allowedPaths, std::move(makeNotAllowedError));
-}
-
-CachingFilteringSourceAccessor::CachingFilteringSourceAccessor(
-    const SourcePath & src, MakeNotAllowedError && makeNotAllowedError)
-    : FilteringSourceAccessor(src, std::move(makeNotAllowedError))
-    , cache(make_ref<boost::concurrent_flat_map<CanonPath, bool>>())
-{
+    return make_ref<AllowListSourceAccessorImpl>(
+        next, std::move(allowedPrefixes), std::move(allowedPaths), std::move(makeNotAllowedError));
 }
 
 bool CachingFilteringSourceAccessor::isAllowed(const CanonPath & path)
 {
-    if (auto allowed = getConcurrent(*cache, path))
-        return *allowed;
+    {
+        auto c(cache.readLock());
+        auto i = c->find(path);
+        if (i != c->end())
+            return i->second;
+    }
     auto res = isAllowedUncached(path);
-    cache->emplace(path, res);
+    cache.lock()->emplace(path, res);
     return res;
 }
 

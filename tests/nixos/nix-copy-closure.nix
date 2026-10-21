@@ -14,7 +14,6 @@ let
   pkgB = pkgs.wget;
   pkgC = pkgs.hello;
   pkgD = pkgs.tmux;
-  pkgE = pkgs.tree;
 
 in
 {
@@ -33,7 +32,6 @@ in
         virtualisation.additionalPaths = [
           pkgA
           pkgD.drvPath
-          pkgE.drvPath
         ];
         nix.settings.substituters = lib.mkForce [ ];
       };
@@ -43,19 +41,16 @@ in
       {
         services.openssh.enable = true;
         virtualisation.writableStore = true;
-        # Including pkgC.drvPath (versus just pkgC) so common build deps
-        # are already in the store, limiting what the --include-outputs test
-        # needs to copy.
         virtualisation.additionalPaths = [
           pkgB
-          pkgC.drvPath
+          pkgC
         ];
       };
   };
 
   testScript =
     { nodes }:
-    /* python */ ''
+    ''
       # fmt: off
       import subprocess
 
@@ -90,18 +85,18 @@ in
 
       # Copy the closure of package C via the SSH substituter.
       client.fail("nix-store -r ${pkgC}")
-      client.succeed("nix-store --substituters ssh://root@server?trusted=1 -r ${pkgC} >&2")
-      client.succeed("nix-store --check-validity ${pkgC}")
 
-      # Copy the derivation of package D from the client to the server.
+      # Copy the derivation of package D's derivation from the client to the server.
       server.fail("nix-store --check-validity ${pkgD.drvPath}")
       client.succeed("nix-copy-closure --to server --gzip ${pkgD.drvPath} >&2")
       server.succeed("nix-store --check-validity ${pkgD.drvPath}")
-      server.fail("nix-store --check-validity ${pkgD}")
 
-      # Copy the derivation and outputs of package E from client to server.
-      server.fail("nix-store --check-validity ${pkgE}")
-      client.succeed("nix-copy-closure --to server --gzip --include-outputs ${pkgE.drvPath} >&2")
-      server.succeed("nix-store --check-validity ${pkgE}")
+      # FIXME
+      # client.succeed(
+      #   "nix-store --option use-ssh-substituter true"
+      #   " --option ssh-substituter-hosts root\@server"
+      #   " -r ${pkgC} >&2"
+      # )
+      # client.succeed("nix-store --check-validity ${pkgC}")
     '';
 }

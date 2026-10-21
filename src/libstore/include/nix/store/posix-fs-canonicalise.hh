@@ -69,4 +69,6 @@ void canonicalisePathMetaData(const std::filesystem::path & path, CanonicalizePa
 
 void canonicaliseTimestampAndPermissions(const std::filesystem::path & path);
 
+MakeError(PathInUse, Error);
+
 } // namespace nix

@@ -13,4 +13,4 @@ error:
              |                 ^
             3| }
 
-       error: '/pwd/lang/readDir/bar' is not a directory
+       error: cannot read directory "/pwd/lang/readDir/bar": Not a directory

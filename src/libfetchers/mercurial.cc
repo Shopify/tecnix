@@ -7,6 +7,8 @@
 #include "nix/util/environment-variables.hh"
 #include "nix/util/users.hh"
 #include "nix/fetchers/cache.hh"
+#include "nix/store/globals.hh"
+#include "nix/util/tarfile.hh"
 #include "nix/store/store-api.hh"
 #include "nix/util/url-parts.hh"
 #include "nix/fetchers/fetch-settings.hh"
@@ -28,9 +30,10 @@ static RunOptions hgOptions(OsStrings args)
 }
 
 // runProgram wrapper that uses hgOptions instead of stock RunOptions.
-static std::string runHg(OsStrings args)
+static std::string runHg(OsStrings args, const std::optional<std::string> & input = {})
 {
     RunOptions opts = hgOptions(std::move(args));
+    opts.input = input;
 
     auto res = runProgram(std::move(opts));
 
@@ -240,25 +243,26 @@ struct MercurialInputScheme : InputScheme
                     }),
                     "\0"s);
 
-                /* FIXME: Check that the access to this path is allowed. */
-                auto accessor = makeFSSourceAccessor(absPath(localPath));
+                auto actualPath = absPath(localPath);
 
                 PathFilter filter = [&](const std::string & p) -> bool {
-                    auto cp = CanonPath(p);
-                    auto st = accessor->lstat(cp);
+                    assert(hasPrefix(p, actualPath.string()));
+                    std::string file(p, actualPath.string().size() + 1);
 
-                    if (st.type == SourceAccessor::tDirectory) {
-                        auto prefix = cp.rel() + "/";
+                    auto st = lstat(p);
+
+                    if (S_ISDIR(st.st_mode)) {
+                        auto prefix = file + "/";
                         auto i = files.lower_bound(prefix);
                         return i != files.end() && hasPrefix(*i, prefix);
                     }
 
-                    return files.count(cp.rel());
+                    return files.count(file);
                 };
 
                 return store.addToStore(
                     input.getName(),
-                    {accessor, CanonPath::root},
+                    {getFSSourceAccessor(), CanonPath(actualPath.string())},
                     ContentAddressMethod::Raw::NixArchive,
                     HashAlgorithm::SHA256,
                     {},
@@ -378,7 +382,7 @@ struct MercurialInputScheme : InputScheme
 
         deletePath(tmpDir / ".hg_archival.txt");
 
-        auto storePath = store.addToStore(name, {makeFSSourceAccessor(tmpDir), CanonPath::root});
+        auto storePath = store.addToStore(name, {getFSSourceAccessor(), CanonPath(tmpDir.string())});
 
         Attrs infoAttrs({
             {"revCount", (uint64_t) revCount},

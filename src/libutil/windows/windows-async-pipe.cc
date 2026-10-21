@@ -1,4 +1,7 @@
-#include "nix/util/windows-async-pipe.hh"
+
+
+#ifdef _WIN32
+#  include "nix/util/windows-async-pipe.hh"
 
 namespace nix::windows {
 
@@ -46,3 +49,5 @@ void AsyncPipe::close()
 }
 
 } // namespace nix::windows
+
+#endif

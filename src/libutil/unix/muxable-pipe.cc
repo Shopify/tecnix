@@ -1,5 +1,6 @@
 #include <poll.h>
 
+#include "nix/util/logging.hh"
 #include "nix/util/util.hh"
 #include "nix/util/muxable-pipe.hh"
 

@@ -10,7 +10,7 @@
     "signatures": [],
     "storeDir": "/nix/store",
     "ultimate": true,
-    "version": 3
+    "version": 2
   },
   {
     "ca": null,
@@ -24,18 +24,12 @@
     ],
     "registrationTime": 23423,
     "signatures": [
-      {
-        "keyName": "fake-sig-1",
-        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-      },
-      {
-        "keyName": "fake-sig-2",
-        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-      }
+      "fake-sig-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "fake-sig-2:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
     ],
     "storeDir": "/nix/store",
     "ultimate": false,
-    "version": 3
+    "version": 2
   },
   {
     "ca": {
@@ -54,6 +48,6 @@
     "signatures": [],
     "storeDir": "/nix/store",
     "ultimate": false,
-    "version": 3
+    "version": 2
   }
 ]

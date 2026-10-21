@@ -11,7 +11,6 @@
   libsodium,
   nlohmann_json,
   openssl,
-  zstd,
 
   # Configuration Options
 
@@ -53,7 +52,6 @@ mkMesonLibrary (finalAttrs: {
     libblake3
     libsodium
     openssl
-    zstd
   ]
   ++ lib.optional stdenv.hostPlatform.isx86_64 libcpuid;
 

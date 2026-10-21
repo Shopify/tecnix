@@ -38,8 +38,6 @@ namespace nix {
 /** A stored row this version cannot read; the row is rebuilt from the current evaluation. */
 MakeError(MalformedTecnixCacheRow, Error);
 
-void MalformedTecnixCacheRow::anchor() {}
-
 static std::atomic<uint64_t> nextDependencyFingerprintCacheGeneration{1};
 
 DependencyFingerprintCache::DependencyFingerprintCache()

@@ -6,7 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
-namespace nix {
+using namespace nix;
+using namespace nix::flake;
 
 struct CmdFlakePrefetchInputs : FlakeCommand
 {
@@ -24,7 +25,6 @@ struct CmdFlakePrefetchInputs : FlakeCommand
 
     void run(nix::ref<nix::Store> store) override
     {
-        using namespace nix::flake;
         auto flake = lockFlake();
 
         ThreadPool pool{fileTransferSettings.httpConnections};
@@ -42,13 +42,9 @@ struct CmdFlakePrefetchInputs : FlakeCommand
             if (!state_.lock()->done.insert(&node).second)
                 return;
 
-            auto lockedNode = dynamic_cast<const LockedNode *>(&node);
-
-            if (lockedNode && lockedNode->buildTime)
-                return;
-
-            // Relative path inputs are part of their parent's source tree.
-            if (lockedNode && !lockedNode->lockedRef.input.isRelative()) {
+            if (auto lockedNode = dynamic_cast<const LockedNode *>(&node)) {
+                if (lockedNode->buildTime)
+                    return;
                 try {
                     Activity act(*logger, lvlInfo, actUnknown, fmt("fetching '%s'", lockedNode->lockedRef));
                     auto accessor = lockedNode->lockedRef.input.getAccessor(fetchSettings, *store).first;
@@ -63,11 +59,11 @@ struct CmdFlakePrefetchInputs : FlakeCommand
 
             for (auto & [inputName, input] : node.inputs) {
                 if (auto inputNode = std::get_if<0>(&input))
-                    pool.enqueue([&visit, inputNode(*inputNode)] { visit(*inputNode); });
+                    pool.enqueue(std::bind(visit, **inputNode));
             }
         };
 
-        pool.enqueue([&] { visit(*flake.lockFile.root); });
+        pool.enqueue(std::bind(visit, *flake.lockFile.root));
 
         pool.process();
 
@@ -76,5 +72,3 @@ struct CmdFlakePrefetchInputs : FlakeCommand
 };
 
 static auto rCmdFlakePrefetchInputs = registerCommand2<CmdFlakePrefetchInputs>({"flake", "prefetch-inputs"});
-
-} // namespace nix

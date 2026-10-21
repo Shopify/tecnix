@@ -1,10 +1,7 @@
 #include "nix/util/provenance.hh"
 #include "nix/util/json-utils.hh"
-#include "nix/util/override-provenance-source-accessor.hh"
 
 namespace nix {
-
-void Provenance::anchor() {}
 
 struct UnknownProvenance : Provenance
 {
@@ -19,11 +16,7 @@ struct UnknownProvenance : Provenance
     {
         return payload;
     }
-
-    void anchor() override;
 };
-
-void UnknownProvenance::anchor() {}
 
 Provenance::RegisteredTypes & Provenance::registeredTypes()
 {
@@ -77,7 +70,5 @@ Provenance::Register registerSubpathProvenance("subpath", [](nlohmann::json json
         next = Provenance::from_json(*p);
     return make_ref<SubpathProvenance>(next, CanonPath(getString(valueAt(obj, "subpath"))));
 });
-
-void OverrideProvenanceSourceAccessor::anchor() {}
 
 } // namespace nix

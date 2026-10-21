@@ -8,9 +8,7 @@ prefixed to other directories such as the Nix store directory. The
 store pseudo-URL `local` denotes a store that uses `/` as its root
 directory.
 
-## Local chroot store {#chroot}
-
-A local store that uses a *root* other than `/` is called a *local chroot
+A store that uses a *root* other than `/` is called a *chroot
 store*. With such stores, the store directory is "logically" still
 `/nix/store`, so programs stored in them can only be built and
 executed by `chroot`-ing into *root*. Chroot stores only support

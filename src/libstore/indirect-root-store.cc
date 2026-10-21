@@ -2,8 +2,6 @@
 
 namespace nix {
 
-void IndirectRootStore::anchor() {}
-
 void IndirectRootStore::makeSymlink(const std::filesystem::path & link, const std::filesystem::path & target)
 {
     /* Create directories up to `gcRoot'. */

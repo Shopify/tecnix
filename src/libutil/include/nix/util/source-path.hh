@@ -119,6 +119,11 @@ struct SourcePath
         return accessor->getProvenance(path);
     }
 
+    void invalidateCache() const
+    {
+        accessor->invalidateCache(path);
+    }
+
     friend class std::hash<nix::SourcePath>;
 };
 

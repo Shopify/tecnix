@@ -17,6 +17,8 @@ requireGit
 
 TODO_NixOS
 
+clearStore
+
 # Submodules can't be fetched locally by default.
 # See fetchGitSubmodules.sh
 export GIT_CONFIG_COUNT=1

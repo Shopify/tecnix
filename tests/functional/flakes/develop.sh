@@ -4,6 +4,9 @@ source ../common.sh
 
 TODO_NixOS
 
+clearStore
+rm -rf "$TEST_HOME/.cache" "$TEST_HOME/.config" "$TEST_HOME/.local"
+
 # Create flake under test.
 cp ../shell-hello.nix "$config_nix" "$TEST_HOME/"
 cat <<EOF >"$TEST_HOME/flake.nix"
@@ -63,7 +66,7 @@ echo "\$ENVVAR"
 EOF
 )" ]]
 
-# Test whether `--keep-env-var` keeps the environment variable.
+# Test wether `--keep-env-var` keeps the environment variable.
 (
   expect='BAR'
   got="$(FOO='BAR' nix develop --ignore-env --keep-env-var FOO --no-write-lock-file .#hello <<EOF
@@ -73,7 +76,7 @@ EOF
   [[ "$got" == "$expect" ]]
 )
 
-# Test whether duplicate `--keep-env-var` keeps the environment variable.
+# Test wether duplicate `--keep-env-var` keeps the environment variable.
 (
   expect='BAR'
   got="$(FOO='BAR' nix develop --ignore-env --keep-env-var FOO --keep-env-var FOO --no-write-lock-file .#hello <<EOF
@@ -83,7 +86,7 @@ EOF
   [[ "$got" == "$expect" ]]
 )
 
-# Test whether `--set-env-var` sets the environment variable.
+# Test wether `--set-env-var` sets the environment variable.
 (
   expect='BAR'
   got="$(nix develop --ignore-env --set-env-var FOO 'BAR' --no-write-lock-file .#hello <<EOF
@@ -122,11 +125,11 @@ expectStderr 1 nix develop --keep-env-var FOO .#hello |
 expectStderr 1 nix develop --ignore-env --unset-env-var FOO .#hello |
   grepQuiet "error: --unset-env-var does not make sense with --ignore-env"
 
-# Test whether multiple occurrences of `--set-env-var` throws.
+# Test wether multiple occurances of `--set-env-var` throws.
 expectStderr 1 nix develop --set-env-var FOO 'BAR' --set-env-var FOO 'BLA' --no-write-lock-file .#hello |
   grepQuiet "error: Duplicate definition of environment variable 'FOO' with '--set-env-var' is ambiguous"
 
-# Test whether similar `--unset-env-var` and `--set-env-var` throws.
+# Test wether similar `--unset-env-var` and `--set-env-var` throws.
 expectStderr 1 nix develop --set-env-var FOO 'BAR' --unset-env-var FOO --no-write-lock-file .#hello |
   grepQuiet "error: Cannot unset environment variable 'FOO' that is set with '--set-env-var'"
 

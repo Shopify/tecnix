@@ -3,13 +3,10 @@
 #include <rapidcheck.h>
 
 namespace rc {
+using namespace nix;
 
-Gen<nix::OutputsSpec> Arbitrary<nix::OutputsSpec>::arbitrary()
+Gen<OutputsSpec> Arbitrary<OutputsSpec>::arbitrary()
 {
-    using nix::OutputsSpec;
-    using nix::StorePathName;
-    using nix::StringSet;
-
     return gen::mapcat(
         gen::inRange<uint8_t>(0, std::variant_size_v<OutputsSpec::Raw>), [](uint8_t n) -> Gen<OutputsSpec> {
             switch (n) {

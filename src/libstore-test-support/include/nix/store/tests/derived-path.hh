@@ -9,35 +9,36 @@
 #include "nix/store/tests/outputs-spec.hh"
 
 namespace rc {
+using namespace nix;
 
 template<>
-struct Arbitrary<nix::SingleDerivedPath::Opaque>
+struct Arbitrary<SingleDerivedPath::Opaque>
 {
-    static Gen<nix::SingleDerivedPath::Opaque> arbitrary();
+    static Gen<SingleDerivedPath::Opaque> arbitrary();
 };
 
 template<>
-struct Arbitrary<nix::SingleDerivedPath::Built>
+struct Arbitrary<SingleDerivedPath::Built>
 {
-    static Gen<nix::SingleDerivedPath::Built> arbitrary();
+    static Gen<SingleDerivedPath::Built> arbitrary();
 };
 
 template<>
-struct Arbitrary<nix::SingleDerivedPath>
+struct Arbitrary<SingleDerivedPath>
 {
-    static Gen<nix::SingleDerivedPath> arbitrary();
+    static Gen<SingleDerivedPath> arbitrary();
 };
 
 template<>
-struct Arbitrary<nix::DerivedPath::Built>
+struct Arbitrary<DerivedPath::Built>
 {
-    static Gen<nix::DerivedPath::Built> arbitrary();
+    static Gen<DerivedPath::Built> arbitrary();
 };
 
 template<>
-struct Arbitrary<nix::DerivedPath>
+struct Arbitrary<DerivedPath>
 {
-    static Gen<nix::DerivedPath> arbitrary();
+    static Gen<DerivedPath> arbitrary();
 };
 
 } // namespace rc

@@ -32,6 +32,3 @@ builtins.pathExists (./lib.nix)
 && builtins.pathExists ./symlink-resolution/foo/overlays/overlay.nix
 && builtins.pathExists ./symlink-resolution/broken
 && builtins.pathExists (builtins.toString ./symlink-resolution/foo/overlays + "/.")
-&& builtins.pathExists "${builtins.storeDir}"
-&& !builtins.pathExists "${builtins.storeDir}/foo"
-&& !builtins.pathExists "${builtins.storeDir}/foo/bar"

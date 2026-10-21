@@ -5,6 +5,9 @@ shift
 
 TODO_NixOS
 
+clearStore
+clearCache
+
 mkdir -p "$TEST_ROOT"/stores
 
 # Create path to copy back and forth

@@ -4,6 +4,8 @@ source common.sh
 
 TODO_NixOS
 
+clearStore
+
 # Test fetching a flat file.
 hash=$(nix-hash --flat --type sha256 ./fetchurl.sh)
 

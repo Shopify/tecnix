@@ -4,6 +4,9 @@ source common.sh
 
 TODO_NixOS
 
+clearStoreIfPossible
+clearCacheCache
+
 # Fails without remote builders
 (! nix-build --store "file://$cacheDir" dependencies.nix)
 

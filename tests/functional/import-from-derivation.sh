@@ -4,6 +4,8 @@ source common.sh
 
 TODO_NixOS
 
+clearStoreIfPossible
+
 export NIX_PATH=config="${config_nix}"
 
 if nix-instantiate --readonly-mode ./import-from-derivation.nix -A result; then

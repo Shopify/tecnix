@@ -1,7 +1,7 @@
 #include "nix/util/config-global.hh"
 #include "nix/expr/primops.hh"
 
-namespace nix {
+using namespace nix;
 
 struct MySettings : Config
 {
@@ -25,5 +25,3 @@ static RegisterPrimOp rp({
     .arity = 0,
     .impl = prim_anotherNull,
 });
-
-} // namespace nix

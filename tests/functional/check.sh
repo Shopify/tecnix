@@ -17,6 +17,8 @@ checkBuildId=$(date +%s%N)
 
 TODO_NixOS
 
+clearStore
+
 nix-build dependencies.nix --no-out-link
 nix-build dependencies.nix --no-out-link --check
 

@@ -18,7 +18,7 @@ private:
     ParsedURL::Authority authority;
     std::string hostnameAndUser;
     bool fakeSSH;
-    const std::optional<std::filesystem::path> keyFile;
+    const std::filesystem::path keyFile;
     /**
      * Raw bytes, not Base64 encoding.
      */
@@ -50,7 +50,7 @@ public:
 
     SSHMaster(
         const ParsedURL::Authority & authority,
-        std::optional<std::filesystem::path> keyFile,
+        std::filesystem::path keyFile,
         std::string_view sshPublicHostKey,
         bool useMaster,
         bool compress,

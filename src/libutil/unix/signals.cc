@@ -9,9 +9,7 @@
 
 namespace nix {
 
-void Interrupted::anchor() {}
-
-void Cancelled::anchor() {}
+using namespace unix;
 
 std::atomic<bool> unix::_isInterrupted = false;
 
@@ -29,11 +27,11 @@ void unix::_interrupted()
 
 //////////////////////////////////////////////////////////////////////
 
-/* We keep track of signal callbacks using integer tokens, so we can iterate
+/* We keep track of interrupt callbacks using integer tokens, so we can iterate
    safely without having to lock the data structure while executing arbitrary
    functions.
  */
-struct SignalCallbacks
+struct InterruptCallbacks
 {
     typedef int64_t Token;
 
@@ -41,52 +39,16 @@ struct SignalCallbacks
        handler because of an erroneous double delete. */
     Token nextToken = 0;
 
-    /* Each per-signal map is used as a list, see SignalCallbacks comment. */
-    std::map<SignalType, std::map<Token, fun<void()>>> callbacks;
+    /* Used as a list, see InterruptCallbacks comment. */
+    std::map<Token, fun<void()>> callbacks;
 };
 
-InterruptCallback::~InterruptCallback() {}
-
-/* Required to avoid static initialization order fiasco. This allows global
-   objects to safely register callbacks. */
-static Sync<SignalCallbacks> & getSignalCallbacks()
-{
-    /* Intentionally leak, according to the Construct On First Use Idiom.
-       An alternative is to use the Nifty Counter Idiom, but
-       SignalCallbacks' destructor is not very important. */
-    static Sync<SignalCallbacks> * _signalCallbacks = new Sync<SignalCallbacks>();
-    return *_signalCallbacks;
-}
-
-static void triggerSignalCallbacks(SignalType type)
-{
-    SignalCallbacks::Token i = 0;
-    while (true) {
-        std::function<void()> callback;
-        {
-            auto signalCallbacks(getSignalCallbacks().lock());
-            auto it = signalCallbacks->callbacks.find(type);
-            if (it == signalCallbacks->callbacks.end())
-                break;
-            auto lb = it->second.lower_bound(i);
-            if (lb == it->second.end())
-                break;
-
-            callback = lb->second;
-            i = lb->first + 1;
-        }
-
-        try {
-            callback();
-        } catch (...) {
-            ignoreExceptionInDestructor();
-        }
-    }
-}
+// Note: this object intentionally leaks to ensure that it's not deleted while the detached signal handler thread is
+// running.
+static auto _interruptCallbacks = new Sync<InterruptCallbacks>;
 
 static void signalHandlerThread(sigset_t set)
 {
-    using namespace nix::unix;
     while (true) {
         int signal = 0;
         sigwait(&set, &signal);
@@ -96,29 +58,7 @@ static void signalHandlerThread(sigset_t set)
 
         else if (signal == SIGWINCH) {
             updateWindowSize();
-            triggerSignalCallbacks(SignalType::Winch);
         }
-
-        else if (signal == SIGCONT) {
-            /* The terminal may have been resized while we were
-               stopped, and we won't have received SIGWINCH for it,
-               since the kernel only sends it to the foreground process
-               group. */
-            updateWindowSize();
-            triggerSignalCallbacks(SignalType::Cont);
-        }
-
-#ifndef __FreeBSD__
-        else if (signal == SIGTSTP) {
-            triggerSignalCallbacks(SignalType::Stop);
-            /* Since we consumed SIGTSTP via sigwait(), its default
-               action (stopping the process) no longer happens, so stop
-               ourselves explicitly. SIGSTOP cannot be blocked. On
-               resumption, SIGCONT is delivered via sigwait() as
-               usual. */
-            kill(getpid(), SIGSTOP);
-        }
-#endif
     }
 }
 
@@ -126,7 +66,27 @@ void unix::triggerInterrupt()
 {
     _isInterrupted = true;
 
-    triggerSignalCallbacks(SignalType::Int);
+    {
+        InterruptCallbacks::Token i = 0;
+        while (true) {
+            std::function<void()> callback;
+            {
+                auto interruptCallbacks(_interruptCallbacks->lock());
+                auto lb = interruptCallbacks->callbacks.lower_bound(i);
+                if (lb == interruptCallbacks->callbacks.end())
+                    break;
+
+                callback = lb->second;
+                i = lb->first + 1;
+            }
+
+            try {
+                callback();
+            } catch (...) {
+                ignoreExceptionInDestructor();
+            }
+        }
+    }
 }
 
 static sigset_t savedSignalMask;
@@ -153,12 +113,6 @@ void unix::startSignalHandlerThread()
     sigaddset(&set, SIGHUP);
     sigaddset(&set, SIGPIPE);
     sigaddset(&set, SIGWINCH);
-    sigaddset(&set, SIGCONT);
-#ifndef __FreeBSD__
-    /* Not on FreeBSD, where SIGTSTP doubles as NIX_SIG_MULTI_INT and is
-       delivered to specific threads using pthread_kill(). */
-    sigaddset(&set, SIGTSTP);
-#endif
     if (pthread_sigmask(SIG_BLOCK, &set, nullptr))
         throw SysError("blocking signals");
 
@@ -185,17 +139,13 @@ void unix::restoreSignals()
         throw SysError("restoring signals");
 }
 
-namespace {
-
 /* RAII helper to automatically deregister a callback. */
 struct InterruptCallbackImpl : InterruptCallback
 {
-    SignalType type;
-    SignalCallbacks::Token token;
+    InterruptCallbacks::Token token;
 
-    InterruptCallbackImpl(SignalType type, SignalCallbacks::Token token)
-        : type(type)
-        , token(token)
+    InterruptCallbackImpl(InterruptCallbacks::Token token)
+        : token(token)
     {
     }
 
@@ -206,24 +156,17 @@ struct InterruptCallbackImpl : InterruptCallback
 
     ~InterruptCallbackImpl() override
     {
-        auto signalCallbacks(getSignalCallbacks().lock());
-        signalCallbacks->callbacks[type].erase(token);
+        auto interruptCallbacks(_interruptCallbacks->lock());
+        interruptCallbacks->callbacks.erase(token);
     }
 };
 
-} // namespace
-
-std::unique_ptr<InterruptCallback> createSignalCallback(SignalType type, fun<void()> callback)
-{
-    auto signalCallbacks(getSignalCallbacks().lock());
-    auto token = signalCallbacks->nextToken++;
-    signalCallbacks->callbacks[type].emplace(token, callback);
-    return std::make_unique<InterruptCallbackImpl>(type, token);
-}
-
 std::unique_ptr<InterruptCallback> createInterruptCallback(fun<void()> callback)
 {
-    return createSignalCallback(SignalType::Int, std::move(callback));
+    auto interruptCallbacks(_interruptCallbacks->lock());
+    auto token = interruptCallbacks->nextToken++;
+    interruptCallbacks->callbacks.emplace(token, callback);
+    return std::make_unique<InterruptCallbackImpl>(token);
 }
 
 } // namespace nix

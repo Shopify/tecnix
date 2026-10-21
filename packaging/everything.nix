@@ -41,6 +41,8 @@
   nix-internal-api-docs,
   nix-external-api-docs,
 
+  nix-perl-bindings,
+
   testers,
 
   patchedSrc ? null,
@@ -67,7 +69,16 @@ let
       nix-main-c
       nix-cmd
       ;
-  };
+  }
+  //
+    lib.optionalAttrs
+      (!stdenv.hostPlatform.isStatic && stdenv.buildPlatform.canExecute stdenv.hostPlatform)
+      {
+        # Currently fails in static build
+        inherit
+          nix-perl-bindings
+          ;
+      };
 
   devdoc = buildEnv {
     name = "determinate-nix-${nix-cli.version}-devdoc";
@@ -110,7 +121,7 @@ stdenv.mkDerivation (finalAttrs: {
   dontBuild = true;
 
   /**
-    `doCheck` controls whether tests are added as build gate for the combined package.
+    `doCheck` controles whether tests are added as build gate for the combined package.
     This includes both the unit tests and the functional tests, but not the
     integration tests that run in CI (the flake's `hydraJobs` and some of the `checks`).
   */
@@ -135,9 +146,11 @@ stdenv.mkDerivation (finalAttrs: {
     nix-functional-tests
   ]
   ++
-    lib.optionals (stdenv.hostPlatform.isLinux && stdenv.buildPlatform.canExecute stdenv.hostPlatform)
+    lib.optionals (!stdenv.hostPlatform.isStatic && stdenv.buildPlatform.canExecute stdenv.hostPlatform)
       [
-        nix-util-tests.tests.run-without-new-syscalls
+        # Perl currently fails in static build
+        # TODO: Split out tests into a separate derivation?
+        nix-perl-bindings
       ];
 
   nativeBuildInputs = [
@@ -181,7 +194,7 @@ stdenv.mkDerivation (finalAttrs: {
       ln -sT ${nix-manual} $doc
       ln -sT ${nix-manual.man} $man
     ''
-    + lib.optionalString stdenv.hostPlatform.isLinux ''
+    + lib.optionalString stdenv.isLinux ''
       lndir ${nix-nswrapper} $out
     '';
 

@@ -7,7 +7,6 @@
 #include "nix/util/types.hh"
 #include "nix/util/ref.hh"
 #include "nix/util/file-system.hh"
-#include "nix/util/nar-accessor.hh"
 
 #include "nix/util/tests/characterization.hh"
 
@@ -73,7 +72,7 @@ void checkpointJson(CharacterizationTest & test, std::string_view testStem, cons
     json gotJson = static_cast<json>(got);
 
     if (testAccept()) {
-        createDirs(file.parent_path());
+        std::filesystem::create_directories(file.parent_path());
         writeFile(file, gotJson.dump(2) + "\n");
         ADD_FAILURE() << "Updating golden master " << file;
     } else {
@@ -98,7 +97,7 @@ void checkpointJson(CharacterizationTest & test, std::string_view testStem, cons
     json gotJson = static_cast<json>(*got);
 
     if (testAccept()) {
-        createDirs(file.parent_path());
+        std::filesystem::create_directories(file.parent_path());
         writeFile(file, gotJson.dump(2) + "\n");
         ADD_FAILURE() << "Updating golden master " << file;
     } else {

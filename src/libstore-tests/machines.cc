@@ -2,18 +2,18 @@
 #include "nix/util/file-system.hh"
 #include "nix/util/util.hh"
 
-#include "nix/util/tests/test-data.hh"
+#include "nix/util/tests/characterization.hh"
 
 #include <gtest/gtest.h>
 #include <gmock/gmock-matchers.h>
 
-using ::testing::Contains;
-using ::testing::ElementsAre;
-using ::testing::Eq;
-using ::testing::Field;
-using ::testing::SizeIs;
+using testing::Contains;
+using testing::ElementsAre;
+using testing::Eq;
+using testing::Field;
+using testing::SizeIs;
 
-namespace nix {
+using namespace nix;
 
 TEST(machines, getMachinesWithEmptyBuilders)
 {
@@ -27,7 +27,7 @@ TEST(machines, getMachinesUriOnly)
     ASSERT_THAT(actual, SizeIs(1));
     EXPECT_THAT(actual[0], Field(&Machine::storeUri, Eq(StoreReference::parse("ssh://nix@scratchy.labs.cs.uu.nl"))));
     EXPECT_THAT(actual[0], Field(&Machine::systemTypes, ElementsAre("TEST_ARCH-TEST_OS")));
-    EXPECT_THAT(actual[0], Field(&Machine::sshKey, Eq(std::nullopt)));
+    EXPECT_THAT(actual[0], Field(&Machine::sshKey, Eq(std::filesystem::path{})));
     EXPECT_THAT(actual[0], Field(&Machine::maxJobs, Eq(1)));
     EXPECT_THAT(actual[0], Field(&Machine::speedFactor, Eq(1)));
     EXPECT_THAT(actual[0], Field(&Machine::supportedFeatures, SizeIs(0)));
@@ -49,7 +49,7 @@ TEST(machines, getMachinesDefaults)
     ASSERT_THAT(actual, SizeIs(1));
     EXPECT_THAT(actual[0], Field(&Machine::storeUri, Eq(StoreReference::parse("ssh://nix@scratchy.labs.cs.uu.nl"))));
     EXPECT_THAT(actual[0], Field(&Machine::systemTypes, ElementsAre("TEST_ARCH-TEST_OS")));
-    EXPECT_THAT(actual[0], Field(&Machine::sshKey, Eq(std::nullopt)));
+    EXPECT_THAT(actual[0], Field(&Machine::sshKey, Eq(std::filesystem::path{})));
     EXPECT_THAT(actual[0], Field(&Machine::maxJobs, Eq(1)));
     EXPECT_THAT(actual[0], Field(&Machine::speedFactor, Eq(1)));
     EXPECT_THAT(actual[0], Field(&Machine::supportedFeatures, SizeIs(0)));
@@ -185,10 +185,7 @@ TEST(machines, getMachinesWithCorrectFileReference)
 
 TEST(machines, getMachinesWithCorrectFileReferenceToEmptyFile)
 {
-    auto tmpDir = nix::createTempDir();
-    AutoDelete delTmpDir(tmpDir);
-    auto path = tmpDir / "empty-machines";
-    nix::writeFile(path, "");
+    std::filesystem::path path = "/dev/null";
     ASSERT_TRUE(std::filesystem::exists(path));
 
     auto actual = Machine::parseConfig({}, "@" + path.string());
@@ -210,5 +207,3 @@ TEST(machines, getMachinesWithCorrectFileReferenceToIncorrectFile)
             {}, "@" + std::filesystem::weakly_canonical(getUnitTestData() / "machines" / "bad_format").string()),
         FormatError);
 }
-
-} // namespace nix

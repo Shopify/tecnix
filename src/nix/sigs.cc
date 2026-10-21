@@ -7,7 +7,7 @@
 
 #include <atomic>
 
-namespace nix {
+using namespace nix;
 
 struct CmdCopySigs : StorePathsCommand
 {
@@ -276,5 +276,3 @@ struct CmdKey : NixMultiCommand
 };
 
 static auto rCmdKey = registerCommand<CmdKey>("key");
-
-} // namespace nix

@@ -1,3 +1,9 @@
+configure_file(
+  input : 'config.nix.in',
+  output : 'config.nix',
+  configuration : test_confdata,
+)
+
 suites += {
   'name' : 'dyn-drv',
   'deps' : [],

@@ -1,4 +1,0 @@
-# COM: Test inherit statement support (issue #15053)
-a = { b = 1; c = 2; }
-inherit (a) b
-b

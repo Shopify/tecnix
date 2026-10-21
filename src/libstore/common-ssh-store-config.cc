@@ -4,12 +4,10 @@
 namespace nix {
 
 CommonSSHStoreConfig::CommonSSHStoreConfig(const ParsedURL::Authority & authority, const Params & params)
-    : StoreConfig(params, FilePathType::Unix)
+    : StoreConfig(params)
     , authority(authority)
 {
 }
-
-void CommonSSHStoreConfig::anchor() {}
 
 SSHMaster CommonSSHStoreConfig::createSSHMaster(bool useMaster, Descriptor logFD) const
 {

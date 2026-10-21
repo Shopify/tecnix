@@ -4,26 +4,38 @@
 #include <rapidcheck/gen/Arbitrary.h>
 
 #include "nix/expr/value/context.hh"
-#include "nix/store/tests/derived-path.hh" // IWYU pragma: keep
 
 namespace rc {
+using namespace nix;
 
 template<>
-struct Arbitrary<nix::NixStringContextElem::DrvDeep>
+struct Arbitrary<NixStringContextElem::Opaque>
 {
-    static Gen<nix::NixStringContextElem::DrvDeep> arbitrary();
+    static Gen<NixStringContextElem::Opaque> arbitrary();
 };
 
 template<>
-struct Arbitrary<nix::NixStringContextElem::Path>
+struct Arbitrary<NixStringContextElem::Built>
 {
-    static Gen<nix::NixStringContextElem::Path> arbitrary();
+    static Gen<NixStringContextElem::Built> arbitrary();
 };
 
 template<>
-struct Arbitrary<nix::NixStringContextElem>
+struct Arbitrary<NixStringContextElem::DrvDeep>
 {
-    static Gen<nix::NixStringContextElem> arbitrary();
+    static Gen<NixStringContextElem::DrvDeep> arbitrary();
+};
+
+template<>
+struct Arbitrary<NixStringContextElem::Path>
+{
+    static Gen<NixStringContextElem::Path> arbitrary();
+};
+
+template<>
+struct Arbitrary<NixStringContextElem>
+{
+    static Gen<NixStringContextElem> arbitrary();
 };
 
 } // namespace rc

@@ -46,12 +46,10 @@ let
 
         ## Settings
 
-        ${replaceStrings [ "@store-slug@" ] [ "store-${slug}" ] (
-          showSettings {
-            prefix = "store-${slug}";
-            inherit inlineHTML;
-          } settings
-        )}
+        ${showSettings {
+          prefix = "store-${slug}";
+          inherit inlineHTML;
+        } settings}
       '';
 
       experimentalFeatureNote = optionalString (experimentalFeature != null) ''

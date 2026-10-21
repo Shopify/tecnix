@@ -20,7 +20,6 @@ headers = [ config_pub_h ] + files(
   'eval-profiler.hh',
   'eval-settings.hh',
   'eval.hh',
-  'fetch-tree.hh',
   'function-trace.hh',
   'gc-small-vector.hh',
   'get-drvs.hh',

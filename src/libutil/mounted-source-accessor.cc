@@ -4,14 +4,8 @@
 
 namespace nix {
 
-namespace {
-
 struct MountedSourceAccessorImpl : MountedSourceAccessor
 {
-private:
-    void anchor() override {};
-
-public:
     boost::concurrent_flat_map<CanonPath, ref<SourceAccessor>> mounts;
 
     MountedSourceAccessorImpl(std::map<CanonPath, ref<SourceAccessor>> _mounts)
@@ -79,11 +73,6 @@ public:
         }
     }
 
-    void invalidateCache() override
-    {
-        mounts.visit_all([](auto & kv) { kv.second->invalidateCache(); });
-    }
-
     std::optional<std::filesystem::path> getPhysicalPath(const CanonPath & path) override
     {
         auto [accessor, subpath] = resolve(path);
@@ -128,11 +117,13 @@ public:
         auto [accessor, subpath] = resolve(path);
         return accessor->getProvenance(subpath);
     }
+
+    void invalidateCache(const CanonPath & path) override
+    {
+        auto [accessor, subpath] = resolve(path);
+        accessor->invalidateCache(subpath);
+    }
 };
-
-} // namespace
-
-MountedSourceAccessor::~MountedSourceAccessor() {}
 
 ref<MountedSourceAccessor> makeMountedSourceAccessor(std::map<CanonPath, ref<SourceAccessor>> mounts)
 {

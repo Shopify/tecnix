@@ -1,10 +1,8 @@
 # shellcheck shell=bash
 source ../common.sh
 
-# Need daemon to support the `realisation-with-path-not-hash` protocol
-# feature (build trace rework). Without it, queryRealisation returns
-# nullptr and CA/dynamic derivation output lookup fails.
-requireDaemonNewerThan "2.35.0pre20260303"
+# Need backend to support text-hashing too
+requireDaemonNewerThan "2.16.0pre20230419"
 
 enableFeatures "ca-derivations dynamic-derivations"
 

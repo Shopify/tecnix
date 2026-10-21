@@ -223,10 +223,7 @@ std::pair<StorePath, Hash> fetchToStore2(
     Activity act(
         *logger,
         lvlChatty,
-        mode == FetchMode::DryRun ? "HashSourcePath" : "CopySourcePath",
-        std::to_array<std::pair<std::string_view, Logger::Field>>({
-            {"nix.source.path", path.to_string()},
-        }),
+        actUnknown,
         fmt(mode == FetchMode::DryRun ? "hashing '%s'" : "copying '%s' to the store", path));
 
     PathFilter filter2 = filter ? *filter : defaultPathFilter;
@@ -247,7 +244,6 @@ std::pair<StorePath, Hash> fetchToStore2(
     auto [storePath, hash] =
         mode == FetchMode::DryRun
             ? [&]() {
-                  // FIXME: we may have already computed this above.
                   auto [storePath, hash] =
                       store.computeStorePath(name, path, method, HashAlgorithm::SHA256, {}, filter2);
                   debug(
