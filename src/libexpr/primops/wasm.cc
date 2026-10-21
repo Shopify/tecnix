@@ -793,85 +793,90 @@ static void prim_wasm(EvalState & state, const PosIdx pos, Value ** args, Value 
     // Second argument is the value to pass to the function
     auto argValue = args[1];
 
-    /* wasmtime keeps a per-thread stack of active Wasm calls, so the
-       host functions below (which may have to wait for values being
-       evaluated by other threads) must not suspend this fiber: another
-       fiber's Wasm call could then be interleaved on this thread, or
-       we could be resumed on another thread. */
-    FiberNoSuspend noSuspend;
+    /* wasmtime keeps a per-thread stack of active Wasm calls that must
+       be strictly nested, so a fiber must not be suspended in the
+       middle of a Wasm call (another fiber's Wasm call could then be
+       interleaved on its thread). But the host functions below may
+       have to wait for values that other fibers are evaluating,
+       including suspended fibers that only this worker thread can
+       resume. So on a fiber, the call runs on a helper thread (where
+       waiting simply blocks) while this fiber is suspended. */
+    state.executor->runOffFiber([&]() {
+        try {
+            auto instance = pathAttr ? instantiateWasm(state, state.realisePath(pos, *pathAttr->value))
+                                     : NixWasmInstance{
+                                           state,
+                                           make_ref<NixWasmInstancePre>(state.forceStringNoCtx(
+                                               *watAttr->value, pos, "while evaluating the 'wat' attribute"))};
 
-    try {
-        auto instance = pathAttr ? instantiateWasm(state, state.realisePath(pos, *pathAttr->value))
-                                 : NixWasmInstance{
-                                       state,
-                                       make_ref<NixWasmInstancePre>(state.forceStringNoCtx(
-                                           *watAttr->value, pos, "while evaluating the 'wat' attribute"))};
-
-        // Extract 'function' attribute (optional for wasi, required for non-wasi)
-        std::string functionName;
-        auto functionAttr = args[0]->attrs()->get(state.symbols.create("function"));
-        if (instance.pre->useWasi) {
-            functionName = "_start";
-            if (functionAttr)
-                throw Error("'function' attribute is not allowed for WASI modules");
-        } else {
-            if (!functionAttr)
-                throw Error(
-                    "missing required 'function' attribute in first argument to `builtins.wasm` for non-WASI modules");
-            functionName = std::string(
-                state.forceStringNoCtx(*functionAttr->value, pos, "while evaluating the 'function' attribute"));
-        }
-
-        debug("calling wasm module");
-
-        auto argId = instance.addValue(argValue);
-
-        if (instance.pre->useWasi) {
-            WasiLogger logger{instance};
-
-            auto loggerTrampoline = [](void * data, const unsigned char * buf, size_t len) -> ptrdiff_t {
-                auto logger = static_cast<WasiLogger *>(data);
-                (*logger)(std::string_view((const char *) buf, len));
-                return len;
-            };
-
-            WasiConfig wasiConfig;
-            wasi_config_set_stdout_custom(wasiConfig.capi(), loggerTrampoline, &logger, nullptr);
-            wasi_config_set_stderr_custom(wasiConfig.capi(), loggerTrampoline, &logger, nullptr);
-            wasiConfig.argv({"wasi", std::to_string(argId)});
-            unwrap(instance.wasmStore.context().set_wasi(std::move(wasiConfig)));
-
-            auto res = instance.getExport<Func>(functionName).call(instance.wasmCtx, {});
-            if (!instance.resultId) {
-                unwrap(std::move(res));
-                throw Error(
-                    "Wasm function '%s' from '%s' finished without returning a value",
-                    functionName,
-                    instance.pre->name);
+            // Extract 'function' attribute (optional for wasi, required for non-wasi)
+            std::string functionName;
+            auto functionAttr = args[0]->attrs()->get(state.symbols.create("function"));
+            if (instance.pre->useWasi) {
+                functionName = "_start";
+                if (functionAttr)
+                    throw Error("'function' attribute is not allowed for WASI modules");
+            } else {
+                if (!functionAttr)
+                    throw Error(
+                        "missing required 'function' attribute in first argument to `builtins.wasm` for non-WASI modules");
+                functionName = std::string(
+                    state.forceStringNoCtx(*functionAttr->value, pos, "while evaluating the 'function' attribute"));
             }
 
-            auto & vRes = instance.getValue(instance.resultId);
-            state.forceValue(vRes, pos);
-            v = vRes;
-        } else {
-            // FIXME: use the "start" function if present.
-            instance.runFunction("nix_wasm_init_v1", {});
+            debug("calling wasm module");
 
-            auto res = instance.runFunction(functionName, {(int32_t) argId});
-            if (res.size() != 1)
-                throw Error(
-                    "Wasm function '%s' from '%s' did not return exactly one value", functionName, instance.pre->name);
-            if (res[0].kind() != ValKind::I32)
-                throw Error(
-                    "Wasm function '%s' from '%s' did not return an i32 value", functionName, instance.pre->name);
-            auto & vRes = instance.getValue(res[0].i32());
-            state.forceValue(vRes, pos);
-            v = vRes;
+            auto argId = instance.addValue(argValue);
+
+            if (instance.pre->useWasi) {
+                WasiLogger logger{instance};
+
+                auto loggerTrampoline = [](void * data, const unsigned char * buf, size_t len) -> ptrdiff_t {
+                    auto logger = static_cast<WasiLogger *>(data);
+                    (*logger)(std::string_view((const char *) buf, len));
+                    return len;
+                };
+
+                WasiConfig wasiConfig;
+                wasi_config_set_stdout_custom(wasiConfig.capi(), loggerTrampoline, &logger, nullptr);
+                wasi_config_set_stderr_custom(wasiConfig.capi(), loggerTrampoline, &logger, nullptr);
+                wasiConfig.argv({"wasi", std::to_string(argId)});
+                unwrap(instance.wasmStore.context().set_wasi(std::move(wasiConfig)));
+
+                auto res = instance.getExport<Func>(functionName).call(instance.wasmCtx, {});
+                if (!instance.resultId) {
+                    unwrap(std::move(res));
+                    throw Error(
+                        "Wasm function '%s' from '%s' finished without returning a value",
+                        functionName,
+                        instance.pre->name);
+                }
+
+                auto & vRes = instance.getValue(instance.resultId);
+                state.forceValue(vRes, pos);
+                v = vRes;
+            } else {
+                // FIXME: use the "start" function if present.
+                instance.runFunction("nix_wasm_init_v1", {});
+
+                auto res = instance.runFunction(functionName, {(int32_t) argId});
+                if (res.size() != 1)
+                    throw Error(
+                        "Wasm function '%s' from '%s' did not return exactly one value",
+                        functionName,
+                        instance.pre->name);
+                if (res[0].kind() != ValKind::I32)
+                    throw Error(
+                        "Wasm function '%s' from '%s' did not return an i32 value", functionName, instance.pre->name);
+                auto & vRes = instance.getValue(res[0].i32());
+                state.forceValue(vRes, pos);
+                v = vRes;
+            }
+        } catch (Error & e) {
+            e.addTrace(state.positions[pos], "while executing a Wasm module");
+            throw;
         }
-    } catch (Error & e) {
-        e.addTrace(state.positions[pos], "while executing a Wasm module");
-        throw;
-    }
+    });
 }
 
 static RegisterPrimOp primop_wasm(

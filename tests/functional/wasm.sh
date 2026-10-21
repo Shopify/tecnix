@@ -43,3 +43,11 @@ expectStderr 1 nix eval --impure \
     --extra-experimental-features wasm-builtin \
     --expr "builtins.wasm { wat = builtins.readFile ./bad-alloc.wat; function = \"id\"; } 0" \
     | grepQuiet "does not have type '(size: i32, align: i32) -> i32'"
+
+# A Wasm call on an evaluator fiber must not block the worker thread while
+# it waits for a value, since a suspended fiber of the same worker may be
+# evaluating it (see `wasm-fiber-wait.nix`). This used to hang.
+[[ $(timeout 120 nix eval --json \
+    --extra-experimental-features 'wasm-builtin parallel-eval' \
+    --option eval-cores 2 --option eval-max-fibers 8 \
+    --file ./wasm-fiber-wait.nix) = 178 ]]

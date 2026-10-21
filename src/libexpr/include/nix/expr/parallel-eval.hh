@@ -8,6 +8,7 @@
 #include <random>
 #include <thread>
 
+#include "nix/util/fun.hh"
 #include "nix/util/move-only-function.hh"
 #include "nix/util/sync.hh"
 #include "nix/util/logging.hh"
@@ -44,6 +45,15 @@ struct Executor
     struct StackPool;
 
     const std::unique_ptr<StackPool> stackPool;
+
+    /**
+     * The helper threads that run `runOffFiber()` calls, and a single
+     * one of them. Defined in `parallel-eval.cc`.
+     */
+    struct OffFiberHelpers;
+    struct OffFiberHelper;
+
+    const std::unique_ptr<OffFiberHelpers> offFiberHelpers;
 
     struct State
     {
@@ -141,6 +151,8 @@ struct Executor
     std::atomic<uint64_t> maxSuspendedFibers{0};
     std::atomic<uint64_t> maxLiveFibers{0};
     std::atomic<uint64_t> nrFiberStacksAllocated{0};
+    std::atomic<uint64_t> nrOffFiberCalls{0};
+    std::atomic<uint64_t> nrOffFiberHelpers{0};
 
     static unsigned int getEvalCores(const EvalSettings & evalSettings);
 
@@ -216,27 +228,44 @@ struct Executor
 
     std::vector<std::future<void>> spawn(WorkItems && items);
 
+    /**
+     * Call `fn` on behalf of the current fiber, but not on a fiber:
+     * on a helper thread, while the calling fiber is suspended until
+     * `fn` has returned (or thrown, in which case the exception is
+     * rethrown here). If the current thread isn't running a fiber,
+     * `fn` is simply called.
+     *
+     * This is for code that must not be suspended in the middle,
+     * because it keeps per-thread state that must not be interleaved
+     * with other fibers on the same thread (such as wasmtime's stack
+     * of active Wasm calls), but that may have to wait for values
+     * being evaluated by other fibers. A fiber must never wait for a
+     * value by blocking its worker thread instead of suspending:
+     * suspended fibers are pinned to the worker that created them, so
+     * if the value is being evaluated by a suspended fiber of the
+     * same worker, nothing could ever resume it. A helper thread is
+     * not a worker, so it can simply block, like the main thread.
+     *
+     * The helper takes on the fiber's thread-local evaluation state
+     * (`EvalThreadState`) for the duration of the call: its eval
+     * thread id (so a wait on a value that the fiber itself is
+     * evaluating is still reported as infinite recursion), call depth,
+     * evaluation context and Tecnix dependency-tracking state.
+     */
+    void runOffFiber(fun<void()> fn);
+
+    /**
+     * The main loop of a helper thread for `runOffFiber()`.
+     */
+    void offFiberHelper(OffFiberHelper & self);
+
+    /**
+     * Whether this thread evaluates on behalf of work items: it's a
+     * worker (running fibers), or a helper running a call for one (see
+     * `runOffFiber()`). Such code doesn't start parallel work that it
+     * then waits for.
+     */
     [[gnu::tls_model("initial-exec")]] static thread_local bool amWorkerThread;
-};
-
-/**
- * RAII guard that prevents the current fiber (if any) from being
- * suspended while the guard is alive: if it has to wait for a value
- * that is being evaluated by another thread, it blocks its worker
- * thread instead of yielding it to other fibers. This is needed around
- * code that keeps per-thread state which must not be interleaved with
- * or migrated to other threads, such as wasmtime's stack of active
- * Wasm calls. Nesting is allowed.
- */
-struct FiberNoSuspend
-{
-    FiberNoSuspend();
-    ~FiberNoSuspend();
-    FiberNoSuspend(const FiberNoSuspend &) = delete;
-    FiberNoSuspend & operator=(const FiberNoSuspend &) = delete;
-
-private:
-    Executor::Fiber * fiber;
 };
 
 struct FutureVector

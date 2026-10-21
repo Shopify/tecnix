@@ -3270,6 +3270,8 @@ void EvalState::printStatistics()
     topObj["maxSuspendedFibers"] = executor->maxSuspendedFibers.load();
     topObj["maxLiveFibers"] = executor->maxLiveFibers.load();
     topObj["nrFiberStacksAllocated"] = executor->nrFiberStacksAllocated.load();
+    topObj["nrOffFiberCalls"] = executor->nrOffFiberCalls.load();
+    topObj["nrOffFiberHelpers"] = executor->nrOffFiberHelpers.load();
     topObj["nrAvoided"] = nrAvoided.load();
     topObj["nrLookups"] = nrLookups.load();
     topObj["nrPrimOpCalls"] = nrPrimOpCalls.load();
