@@ -752,6 +752,11 @@ std::vector<std::future<void>> Executor::spawn(WorkItems && items)
     return futures;
 }
 
+bool Executor::onFiber()
+{
+    return currentFiber != nullptr;
+}
+
 FutureVector::~FutureVector()
 {
     try {
@@ -771,6 +776,9 @@ void FutureVector::spawn(Executor::WorkItems && work)
 
 void FutureVector::finishAll()
 {
+    /* Blocking on futures could deadlock a fiber's worker. */
+    assert(!Executor::onFiber());
+
     std::exception_ptr ex;
     while (true) {
         std::vector<std::future<void>> futures;

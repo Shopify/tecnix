@@ -255,6 +255,15 @@ struct Executor
     void runOffFiber(fun<void()> fn);
 
     /**
+     * Whether the current thread is running a fiber. A fiber must never
+     * block its thread (e.g. on a future) instead of suspending: its
+     * worker couldn't resume its other fibers meanwhile, and what it
+     * waits for may depend on one of them. Code that has to block can
+     * use `runOffFiber()`.
+     */
+    static bool onFiber();
+
+    /**
      * The main loop of a helper thread for `runOffFiber()`.
      */
     void offFiberHelper(OffFiberHelper & self);

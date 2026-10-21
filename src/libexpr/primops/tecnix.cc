@@ -791,6 +791,10 @@ static Value * targetRefToValue(EvalState & state, const std::string & target)
 // ============================================================================
 static void finishTecnixFutures(std::vector<std::future<void>> && futures)
 {
+    /* Blocking on futures could deadlock a fiber's worker (callers only
+       spawn work off-worker). */
+    assert(!Executor::onFiber());
+
     std::exception_ptr ex;
     std::exception_ptr interrupted;
     size_t secondaryErrors = 0;
