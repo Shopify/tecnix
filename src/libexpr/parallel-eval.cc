@@ -36,6 +36,54 @@ static std::atomic<uint32_t> nextEvalThreadId{1};
  */
 [[gnu::tls_model("initial-exec")]] static thread_local Executor::Worker * currentWorker{nullptr};
 
+/**
+ * The thread-local state of the evaluation running on a thread. Several
+ * fibers are interleaved on each worker thread, so each fiber has its
+ * own: `Executor::runFiber()` swaps it with the thread's on every switch
+ * in and out, and while the fiber runs, its record holds the thread's.
+ */
+struct EvalThreadState
+{
+    /**
+     * `myEvalThreadId`. Each fiber needs its own id (rather than a
+     * per-thread id) since the self-wait check in `waitOnThunk()` would
+     * otherwise produce false "infinite recursion" errors when two
+     * fibers running on the same thread touch the same thunk.
+     */
+    uint32_t evalThreadId = 0;
+
+    /**
+     * `CallDepth::callDepth`, since each fiber has its own Nix call
+     * stack.
+     */
+    size_t callDepth = 0;
+
+    /**
+     * `EvalState::evalContext`. Swapping it is a mere pointer exchange,
+     * i.e. doesn't touch the reference count of the `provenance`
+     * shared_ptr.
+     */
+    EvalState::EvalContext evalContext;
+
+    /**
+     * Tecnix: `currentTecnixThreadState`. The tracking context and the
+     * source-deps frames are pointers into the evaluation's own stack,
+     * so they must not be visible to other fibers on the same thread.
+     */
+    TecnixThreadState tecnixThreadState;
+
+    /**
+     * Exchange this state with the current thread's.
+     */
+    void swapWithCurrent()
+    {
+        std::swap(evalThreadId, myEvalThreadId);
+        std::swap(callDepth, CallDepth::callDepth);
+        std::swap(evalContext, EvalState::evalContext);
+        std::swap(tecnixThreadState, currentTecnixThreadState);
+    }
+};
+
 struct Executor::Fiber
 {
     Executor & executor;
@@ -47,40 +95,9 @@ struct Executor::Fiber
     Worker & owner;
 
     /**
-     * The value of `myEvalThreadId` while this fiber is running. Each
-     * fiber needs its own id (rather than a per-thread id) since the
-     * self-wait check in `waitOnThunk()` would otherwise produce false
-     * "infinite recursion" errors when two fibers running on the same
-     * thread touch the same thunk.
+     * This fiber's thread-local evaluation state while it's not running.
      */
-    const uint32_t evalThreadId;
-
-    /**
-     * This fiber's Nix call stack depth while it's not running.
-     * `runFiber()` swaps it with the thread-local counter (see
-     * `CallDepth`) on every switch-in/out, since several fibers, each
-     * with their own call chain, are interleaved on the same thread.
-     */
-    size_t callDepth = 0;
-
-    /**
-     * This fiber's evaluation context while it's not running.
-     * `runFiber()` swaps it with the thread-local
-     * `EvalState::evalContext` on every switch-in/out (a mere pointer
-     * exchange), while this slot holds the thread's own context in the
-     * meantime.
-     */
-    EvalState::EvalContext evalContext;
-
-    /**
-     * Tecnix: this fiber's dependency-tracking state while it's not
-     * running. Like `evalContext`, `runFiber()` swaps it with the
-     * thread-local `currentTecnixThreadState` on every switch-in/out:
-     * the tracking context and source-deps frames are pointers into
-     * the fiber's own stack, so they must not be visible to the other
-     * fibers interleaved on the same thread.
-     */
-    TecnixThreadState tecnixThreadState;
+    EvalThreadState evalThreadState;
 
     std::promise<void> promise;
 
@@ -124,7 +141,7 @@ struct Executor::Fiber
     Fiber(Executor & executor, Worker & owner, Item && item)
         : executor(executor)
         , owner(owner)
-        , evalThreadId(nextEvalThreadId++)
+        , evalThreadState{.evalThreadId = nextEvalThreadId++}
         , promise(std::move(item.promise))
         , work(std::move(item.work))
     {
@@ -451,13 +468,8 @@ bool Executor::runFiber(FiberPtr fiber)
        `Executor::Worker`. */
     assert(currentWorker == &fib->owner);
 
-    auto savedThreadId = myEvalThreadId;
-    auto savedCallDepth = CallDepth::callDepth;
     currentFiber = fib;
-    myEvalThreadId = fib->evalThreadId;
-    CallDepth::callDepth = fib->callDepth;
-    std::swap(EvalState::evalContext, fib->evalContext);
-    std::swap(currentTecnixThreadState, fib->tecnixThreadState);
+    fib->evalThreadState.swapWithCurrent();
 
 #if NIX_USE_BOEHMGC
     /* Make this thread's stack scannable by the GC while the fiber
@@ -479,11 +491,7 @@ bool Executor::runFiber(FiberPtr fiber)
 #endif
 
     currentFiber = nullptr;
-    myEvalThreadId = savedThreadId;
-    fib->callDepth = CallDepth::callDepth;
-    CallDepth::callDepth = savedCallDepth;
-    std::swap(EvalState::evalContext, fib->evalContext);
-    std::swap(currentTecnixThreadState, fib->tecnixThreadState);
+    fib->evalThreadState.swapWithCurrent();
 
     if (fib->ctx) {
         /* The fiber suspended itself in `waitOnThunk()`. We are still
