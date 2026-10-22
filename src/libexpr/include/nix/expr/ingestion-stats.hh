@@ -26,8 +26,27 @@ namespace nix {
  */
 
 /**
- * Charge ingestion on this thread to `target` while the scope is alive.
- * Scopes nest; the innermost wins. `target` must outlive the scope.
+ * Ingestion work: paths hashed or copied into the store, their NAR size,
+ * and the wall time it took.
+ */
+struct IngestionCounts
+{
+    uint64_t ingestions = 0;
+    uint64_t bytes = 0;
+    uint64_t nanos = 0;
+
+    void add(const IngestionCounts & other)
+    {
+        ingestions += other.ingestions;
+        bytes += other.bytes;
+        nanos += other.nanos;
+    }
+};
+
+/**
+ * Charge the ingestion done by the current evaluation (the running fiber,
+ * or the thread) to `target` while the scope is alive. Scopes nest; the
+ * innermost wins. `target` must outlive the scope.
  */
 struct IngestionTargetScope
 {
@@ -41,8 +60,8 @@ private:
 };
 
 /**
- * Charge the ingestion this thread performs while the scope is alive to `pos`
- * (and to the current target). Nested scopes are charged only for their own
+ * Charge the ingestion the current evaluation performs while the scope is
+ * alive to `pos` (and to the current target). Nested scopes are charged only for their own
  * work: an enclosing scope excludes what inner scopes already recorded.
  */
 struct IngestionSiteScope

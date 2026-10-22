@@ -2,6 +2,7 @@
 #include "nix/expr/parallel-eval.hh"
 #include "nix/store/globals.hh"
 #include "nix/expr/primops.hh"
+#include "nix/fetchers/fetch-to-store.hh"
 
 #include <boost/context/fiber.hpp>
 #include <boost/context/protected_fixedsize_stack.hpp>
@@ -75,6 +76,12 @@ struct EvalThreadState
     TecnixThreadState tecnixThreadState;
 
     /**
+     * Tecnix: `currentFetchToStoreThreadState`, i.e. the statistics
+     * that ingestion is charged with.
+     */
+    FetchToStoreThreadState fetchToStore;
+
+    /**
      * A copy of the current thread's state.
      */
     static EvalThreadState current()
@@ -84,6 +91,7 @@ struct EvalThreadState
             .callDepth = CallDepth::callDepth,
             .evalContext = EvalState::evalContext,
             .tecnixThreadState = currentTecnixThreadState,
+            .fetchToStore = currentFetchToStoreThreadState,
         };
     }
 
@@ -96,6 +104,7 @@ struct EvalThreadState
         std::swap(callDepth, CallDepth::callDepth);
         std::swap(evalContext, EvalState::evalContext);
         std::swap(tecnixThreadState, currentTecnixThreadState);
+        std::swap(fetchToStore, currentFetchToStoreThreadState);
     }
 };
 
