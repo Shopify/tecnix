@@ -43,3 +43,19 @@ expectStderr 1 nix eval --impure \
     --extra-experimental-features wasm-builtin \
     --expr "builtins.wasm { wat = builtins.readFile ./bad-alloc.wat; function = \"id\"; } 0" \
     | grepQuiet "does not have type '(size: i32, align: i32) -> i32'"
+
+# A Wasm call on an evaluator fiber must not block the worker thread while
+# it waits for a value, since a suspended fiber of the same worker may be
+# evaluating it (see `wasm-fiber.nix`). This used to hang.
+[[ $(nix eval --json \
+    --extra-experimental-features 'wasm-builtin parallel-eval' \
+    --option eval-cores 2 --option eval-max-fibers 8 \
+    --file ./wasm-fiber.nix wait) = 178 ]]
+
+# Infinite recursion through a Wasm call on a fiber must still be detected,
+# rather than hang.
+expectStderr 1 nix eval \
+    --extra-experimental-features 'wasm-builtin parallel-eval' \
+    --option eval-cores 2 \
+    --file ./wasm-fiber.nix infiniteRecursion \
+    | grepQuiet "infinite recursion encountered"
