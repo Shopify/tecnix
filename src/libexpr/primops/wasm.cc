@@ -771,7 +771,7 @@ struct WasiLogger
     }
 };
 
-static void prim_wasm(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+static void callWasm(EvalState & state, const PosIdx pos, Value ** args, Value & v)
 {
     state.forceAttrs(*args[0], pos, "while evaluating the first argument to `builtins.wasm`");
 
@@ -792,13 +792,6 @@ static void prim_wasm(EvalState & state, const PosIdx pos, Value ** args, Value 
 
     // Second argument is the value to pass to the function
     auto argValue = args[1];
-
-    /* wasmtime keeps a per-thread stack of active Wasm calls, so the
-       host functions below (which may have to wait for values being
-       evaluated by other threads) must not suspend this fiber: another
-       fiber's Wasm call could then be interleaved on this thread, or
-       we could be resumed on another thread. */
-    FiberNoSuspend noSuspend;
 
     try {
         auto instance = pathAttr ? instantiateWasm(state, state.realisePath(pos, *pathAttr->value))
@@ -872,6 +865,16 @@ static void prim_wasm(EvalState & state, const PosIdx pos, Value ** args, Value 
         e.addTrace(state.positions[pos], "while executing a Wasm module");
         throw;
     }
+}
+
+static void prim_wasm(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    /* wasmtime keeps a per-thread stack of active Wasm calls, so a
+       fiber must not be suspended in the middle of one (another
+       fiber's call could then be interleaved on its thread). But the
+       host functions may have to wait for values that other fibers
+       are evaluating, so run the call off-fiber. */
+    state.executor->runOffFiber([&]() { callWasm(state, pos, args, v); });
 }
 
 static RegisterPrimOp primop_wasm(

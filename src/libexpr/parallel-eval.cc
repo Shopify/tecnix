@@ -2,6 +2,7 @@
 #include "nix/expr/parallel-eval.hh"
 #include "nix/store/globals.hh"
 #include "nix/expr/primops.hh"
+#include "nix/fetchers/fetch-to-store.hh"
 
 #include <boost/context/fiber.hpp>
 #include <boost/context/protected_fixedsize_stack.hpp>
@@ -36,6 +37,77 @@ static std::atomic<uint32_t> nextEvalThreadId{1};
  */
 [[gnu::tls_model("initial-exec")]] static thread_local Executor::Worker * currentWorker{nullptr};
 
+/**
+ * The thread-local state of the evaluation running on a thread. Several
+ * fibers are interleaved on each worker thread, so each fiber has its
+ * own: `Executor::runFiber()` swaps it with the thread's on every switch
+ * in and out, and while the fiber runs, its record holds the thread's.
+ * A helper thread running a call on behalf of a fiber takes it on for
+ * the duration of the call (see `Executor::runOffFiber()`).
+ */
+struct EvalThreadState
+{
+    /**
+     * `myEvalThreadId`. Each fiber needs its own id (rather than a
+     * per-thread id) since the self-wait check in `waitOnThunk()` would
+     * otherwise produce false "infinite recursion" errors when two
+     * fibers running on the same thread touch the same thunk.
+     */
+    uint32_t evalThreadId = 0;
+
+    /**
+     * `CallDepth::callDepth`, since each fiber has its own Nix call
+     * stack.
+     */
+    size_t callDepth = 0;
+
+    /**
+     * `EvalState::evalContext`. Swapping it is a mere pointer exchange,
+     * i.e. doesn't touch the reference count of the `provenance`
+     * shared_ptr.
+     */
+    EvalState::EvalContext evalContext;
+
+    /**
+     * Tecnix: `currentTecnixThreadState`. The tracking context and the
+     * source-deps frames are pointers into the evaluation's own stack,
+     * so they must not be visible to other fibers on the same thread.
+     */
+    TecnixThreadState tecnixThreadState;
+
+    /**
+     * Tecnix: `currentFetchToStoreThreadState`, i.e. the statistics
+     * that ingestion is charged with.
+     */
+    FetchToStoreThreadState fetchToStore;
+
+    /**
+     * A copy of the current thread's state.
+     */
+    static EvalThreadState current()
+    {
+        return {
+            .evalThreadId = myEvalThreadId,
+            .callDepth = CallDepth::callDepth,
+            .evalContext = EvalState::evalContext,
+            .tecnixThreadState = currentTecnixThreadState,
+            .fetchToStore = currentFetchToStoreThreadState,
+        };
+    }
+
+    /**
+     * Exchange this state with the current thread's.
+     */
+    void swapWithCurrent()
+    {
+        std::swap(evalThreadId, myEvalThreadId);
+        std::swap(callDepth, CallDepth::callDepth);
+        std::swap(evalContext, EvalState::evalContext);
+        std::swap(tecnixThreadState, currentTecnixThreadState);
+        std::swap(fetchToStore, currentFetchToStoreThreadState);
+    }
+};
+
 struct Executor::Fiber
 {
     Executor & executor;
@@ -47,51 +119,13 @@ struct Executor::Fiber
     Worker & owner;
 
     /**
-     * The value of `myEvalThreadId` while this fiber is running. Each
-     * fiber needs its own id (rather than a per-thread id) since the
-     * self-wait check in `waitOnThunk()` would otherwise produce false
-     * "infinite recursion" errors when two fibers running on the same
-     * thread touch the same thunk.
+     * This fiber's thread-local evaluation state while it's not running.
      */
-    const uint32_t evalThreadId;
-
-    /**
-     * This fiber's Nix call stack depth while it's not running.
-     * `runFiber()` swaps it with the thread-local counter (see
-     * `CallDepth`) on every switch-in/out, since several fibers, each
-     * with their own call chain, are interleaved on the same thread.
-     */
-    size_t callDepth = 0;
-
-    /**
-     * This fiber's evaluation context while it's not running.
-     * `runFiber()` swaps it with the thread-local
-     * `EvalState::evalContext` on every switch-in/out (a mere pointer
-     * exchange), while this slot holds the thread's own context in the
-     * meantime.
-     */
-    EvalState::EvalContext evalContext;
-
-    /**
-     * Tecnix: this fiber's dependency-tracking state while it's not
-     * running. Like `evalContext`, `runFiber()` swaps it with the
-     * thread-local `currentTecnixThreadState` on every switch-in/out:
-     * the tracking context and source-deps frames are pointers into
-     * the fiber's own stack, so they must not be visible to the other
-     * fibers interleaved on the same thread.
-     */
-    TecnixThreadState tecnixThreadState;
+    EvalThreadState evalThreadState;
 
     std::promise<void> promise;
 
     work_t work;
-
-    /**
-     * The number of active `FiberNoSuspend` guards on this fiber.
-     * While non-zero, `waitOnThunk()` blocks the thread instead of
-     * suspending the fiber.
-     */
-    unsigned int noSuspendDepth = 0;
 
     /**
      * The fiber's continuation. Valid while the fiber is queued or
@@ -109,7 +143,7 @@ struct Executor::Fiber
      * `suspendFiber()` immediately before switching back to the
      * scheduler, and consumed by `runFiber()`.
      */
-    detail::ValueBase * waitingOn = nullptr;
+    const void * waitingOn = nullptr;
     WaiterDomain * suspendDomain = nullptr;
 
 #if NIX_USE_BOEHMGC
@@ -124,7 +158,7 @@ struct Executor::Fiber
     Fiber(Executor & executor, Worker & owner, Item && item)
         : executor(executor)
         , owner(owner)
-        , evalThreadId(nextEvalThreadId++)
+        , evalThreadState{.evalThreadId = nextEvalThreadId++}
         , promise(std::move(item.promise))
         , work(std::move(item.work))
     {
@@ -239,11 +273,55 @@ struct alignas(64) WaiterDomain
     std::condition_variable cv;
 
     /**
-     * Fibers suspended waiting for a specific value to be finished.
-     * Unlike the condition variable, this is keyed on the exact value,
-     * so fiber wakeups are never spurious.
+     * Fibers suspended waiting for a specific value to be finished, or
+     * for a `runOffFiber()` call to return, keyed on the value or the
+     * `OffFiberCall`. Unlike the condition variable, this is keyed on
+     * the exact object, so fiber wakeups are never spurious (except on
+     * shutdown or interrupt).
      */
-    std::unordered_map<detail::ValueBase *, std::vector<Executor::FiberPtr>> waiters;
+    std::unordered_map<const void *, std::vector<Executor::FiberPtr>> waiters;
+};
+
+struct OffFiberCall;
+
+/**
+ * A helper thread of `Executor::runOffFiber()`.
+ */
+struct OffFiberHelper
+{
+    std::thread thread;
+
+    /**
+     * Signalled when `call` is set, or on shutdown.
+     */
+    std::condition_variable wakeup;
+
+    /**
+     * The call to run next, if any.
+     */
+    OffFiberCall * call = nullptr;
+};
+
+struct Executor::OffFiberHelpers
+{
+    struct State
+    {
+        /**
+         * Every helper started so far. Helpers are only stopped by
+         * `~Executor()`, so there are as many as the highest number of
+         * concurrent `runOffFiber()` calls.
+         */
+        std::vector<std::unique_ptr<OffFiberHelper>> helpers;
+
+        /**
+         * The helpers that are waiting for a call.
+         */
+        std::vector<OffFiberHelper *> idle;
+
+        bool quit = false;
+    };
+
+    Sync<State> state_;
 };
 
 static std::array<WaiterDomain, 128> waiterDomains;
@@ -294,6 +372,7 @@ unsigned int Executor::getMaxFibersPerWorker(const EvalSettings & evalSettings, 
 
 Executor::Executor(const EvalSettings & evalSettings)
     : stackPool(std::make_unique<StackPool>())
+    , offFiberHelpers(std::make_unique<OffFiberHelpers>())
     , evalCores(getEvalCores(evalSettings))
     , maxFibersPerWorker(getMaxFibersPerWorker(evalSettings, evalCores))
     , enabled(evalCores > 1)
@@ -345,6 +424,20 @@ Executor::~Executor()
 
     /* Fail any work items that were queued after the workers exited. */
     failQueuedItems();
+
+    /* Every fiber has finished, and therefore so has every
+       `runOffFiber()` call (its fiber waits for it). So the helpers are
+       all idle; stop them. */
+    std::vector<std::unique_ptr<OffFiberHelper>> helpers;
+    {
+        auto state(offFiberHelpers->state_.lock());
+        state->quit = true;
+        for (auto & helper : state->helpers)
+            helper->wakeup.notify_one();
+        helpers = std::move(state->helpers);
+    }
+    for (auto & helper : helpers)
+        helper->thread.join();
 }
 
 /**
@@ -451,13 +544,8 @@ bool Executor::runFiber(FiberPtr fiber)
        `Executor::Worker`. */
     assert(currentWorker == &fib->owner);
 
-    auto savedThreadId = myEvalThreadId;
-    auto savedCallDepth = CallDepth::callDepth;
     currentFiber = fib;
-    myEvalThreadId = fib->evalThreadId;
-    CallDepth::callDepth = fib->callDepth;
-    std::swap(EvalState::evalContext, fib->evalContext);
-    std::swap(currentTecnixThreadState, fib->tecnixThreadState);
+    fib->evalThreadState.swapWithCurrent();
 
 #if NIX_USE_BOEHMGC
     /* Make this thread's stack scannable by the GC while the fiber
@@ -479,11 +567,7 @@ bool Executor::runFiber(FiberPtr fiber)
 #endif
 
     currentFiber = nullptr;
-    myEvalThreadId = savedThreadId;
-    fib->callDepth = CallDepth::callDepth;
-    CallDepth::callDepth = savedCallDepth;
-    std::swap(EvalState::evalContext, fib->evalContext);
-    std::swap(currentTecnixThreadState, fib->tecnixThreadState);
+    fib->evalThreadState.swapWithCurrent();
 
     if (fib->ctx) {
         /* The fiber suspended itself in `waitOnThunk()`. We are still
@@ -669,23 +753,6 @@ std::vector<std::future<void>> Executor::spawn(WorkItems && items)
     return futures;
 }
 
-FiberNoSuspend::FiberNoSuspend()
-    : fiber(currentFiber)
-{
-    if (fiber)
-        fiber->noSuspendDepth++;
-}
-
-FiberNoSuspend::~FiberNoSuspend()
-{
-    /* Note: `fiber` is still the current fiber, since it cannot have
-       been suspended (and thus migrated) while this guard was alive. */
-    if (fiber) {
-        assert(fiber == currentFiber);
-        fiber->noSuspendDepth--;
-    }
-}
-
 FutureVector::~FutureVector()
 {
     try {
@@ -730,20 +797,20 @@ void FutureVector::finishAll()
         std::rethrow_exception(ex);
 }
 
-static WaiterDomain & getWaiterDomain(detail::ValueBase & v)
+static WaiterDomain & getWaiterDomain(const void * key)
 {
-    auto domain = (((size_t) &v) >> 5) % waiterDomains.size();
+    auto domain = (((size_t) key) >> 5) % waiterDomains.size();
     return waiterDomains[domain];
 }
 
 /**
- * Suspend the current fiber until `v` is finished. Must be called with
- * `lk` holding the domain's mutex and `v` in the "awaited" state. On
- * return, the fiber has been resumed (by its owner thread, after other
- * fibers may have run on it) and the lock has been released.
+ * Suspend the current fiber until it's woken up through the wait list
+ * of `key` (a value or an `OffFiberCall`). Must be called with `lk`
+ * holding the domain's mutex. On return, the fiber has been resumed (by
+ * its owner thread, after other fibers may have run on it) and the lock
+ * has been released.
  */
-[[gnu::noinline]] static void
-suspendFiber(WaiterDomain & domain, std::unique_lock<std::mutex> & lk, detail::ValueBase & v)
+[[gnu::noinline]] static void suspendFiber(WaiterDomain & domain, std::unique_lock<std::mutex> & lk, const void * key)
 {
     auto fib = currentFiber;
     assert(fib);
@@ -752,7 +819,7 @@ suspendFiber(WaiterDomain & domain, std::unique_lock<std::mutex> & lk, detail::V
        so it would get mixed up with that of the other fibers that run
        on this thread in the meantime. */
     assert(!std::current_exception() && !std::uncaught_exceptions());
-    fib->waitingOn = &v;
+    fib->waitingOn = key;
     fib->suspendDomain = &domain;
     /* Hand ownership of the domain mutex over to the scheduler, which
        will unlock it (via `domain.mutex`) after registering us in the
@@ -801,7 +868,7 @@ ValueStorage<sizeof(void *)>::waitOnThunk(EvalState & state, PackedPointer expec
 {
     state.nrThunksAwaited++;
 
-    auto & domain = getWaiterDomain(*this);
+    auto & domain = getWaiterDomain(this);
     std::unique_lock lk(domain.mutex);
 
     auto threadId = expectedP0 >> discriminatorBits;
@@ -850,9 +917,10 @@ ValueStorage<sizeof(void *)>::waitOnThunk(EvalState & state, PackedPointer expec
 
     auto now1 = std::chrono::steady_clock::now();
 
-    /* Note: a fiber inside a `FiberNoSuspend` region uses the blocking
-       wait below, like a non-fiber thread. */
-    if (auto fib = currentFiber; fib && fib->noSuspendDepth == 0) {
+    /* Note: a fiber must never block its worker here, since the value
+       may be held by a suspended fiber of the same worker. Code that
+       can't be suspended must use `Executor::runOffFiber()`. */
+    if (auto fib = currentFiber) {
         /* Shutdown guard: `quit`/`_isInterrupted` are always set
            *before* the wait lists are flushed, and flushing takes the
            domain lock that we're currently holding. So either we see
@@ -866,7 +934,7 @@ ValueStorage<sizeof(void *)>::waitOnThunk(EvalState & state, PackedPointer expec
         /* We're running on a fiber, so suspend it and let this thread
            run other work. `notifyWaiters()` will re-enqueue the fiber
            when the value is finished. */
-        suspendFiber(domain, lk, *this);
+        suspendFiber(domain, lk, this);
 
         /* Note: `currentFiber` has been restored to `fib` by
            `runFiber()`, but the captured `fib` is cheaper. */
@@ -906,7 +974,7 @@ ValueStorage<sizeof(void *)>::waitOnThunk(EvalState & state, PackedPointer expec
 template<>
 void ValueStorage<sizeof(void *)>::notifyWaiters()
 {
-    auto & domain = getWaiterDomain(*this);
+    auto & domain = getWaiterDomain(this);
 
     /* Extract the fibers waiting on this value, then re-enqueue them
        after releasing the domain lock (to keep a trivial lock order
@@ -924,6 +992,204 @@ void ValueStorage<sizeof(void *)>::notifyWaiters()
         auto & executor = fiber->executor;
         executor.enqueueFiber(std::move(fiber));
     }
+}
+
+/**
+ * A call that a fiber has handed to a helper thread (see
+ * `Executor::runOffFiber()`). It lives on the stack of the calling
+ * fiber, which stays suspended until `done` is set.
+ */
+struct OffFiberCall
+{
+    const fun<void()> & fn;
+
+    /**
+     * The calling fiber's evaluation state, which the helper takes on
+     * for the duration of the call.
+     */
+    EvalThreadState evalThreadState;
+
+    std::exception_ptr ex;
+
+    /**
+     * Whether the call has returned. Protected by the mutex of the
+     * waiter domain of this object.
+     */
+    bool done = false;
+};
+
+/**
+ * Call `fn` on a stack from the executor's pool, i.e. on the same kind
+ * of stack that fibers run on, since a helper thread's own stack is
+ * too small for evaluation. Must not be called on a fiber.
+ */
+static void callOnPooledStack(Executor & executor, const fun<void()> & fn)
+{
+    assert(!currentFiber);
+
+    std::exception_ptr ex;
+
+    boost::context::fiber ctx(
+        std::allocator_arg,
+        PooledStackAllocator{executor},
+        [&](boost::context::fiber && caller) -> boost::context::fiber {
+            try {
+                fn();
+            } catch (...) {
+                ex = std::current_exception();
+            }
+            return std::move(caller);
+        });
+
+#if NIX_USE_BOEHMGC
+    /* As in `Executor::runFiber()`: while `fn` runs, the pooled stack
+       is the one that the GC scans as this thread's active stack. */
+    auto stack = lastFiberGCStack;
+    assert(stack);
+    auto prevStack = GC_current_stack;
+    if (prevStack)
+        gcSaveStackPointer(prevStack);
+    GC_current_stack = stack;
+#endif
+
+    ctx = std::move(ctx).resume();
+
+#if NIX_USE_BOEHMGC
+    GC_current_stack = prevStack;
+    if (prevStack)
+        prevStack->saved_sp = nullptr;
+#endif
+
+    /* Nothing suspends on this stack (we're not a fiber, so waits
+       block), so `fn` has returned and the stack has been released. */
+    assert(!ctx);
+
+    if (ex)
+        std::rethrow_exception(ex);
+}
+
+/**
+ * The main loop of a helper thread of `Executor::runOffFiber()`.
+ */
+static void runOffFiberHelper(Executor & executor, OffFiberHelper & self)
+{
+#if NIX_USE_BOEHMGC
+    /* The calls allocate and hold GC roots (on the pooled stacks that
+       they run on). */
+    GC_stack_base sb;
+    GC_get_stack_base(&sb);
+    GC_register_my_thread(&sb);
+#endif
+
+    {
+        ReceiveInterrupts receiveInterrupts;
+
+        unix::interruptCheck = [&]() { return (bool) executor.quit; };
+
+        /* As on a fiber, don't start parallel work and then block on
+           its futures (see the users of `amWorkerThread`). */
+        Executor::amWorkerThread = true;
+
+        while (true) {
+            OffFiberCall * call;
+            {
+                auto state(executor.offFiberHelpers->state_.lock());
+                while (!self.call && !state->quit)
+                    state.wait(self.wakeup);
+                if (!self.call)
+                    break;
+                call = self.call;
+            }
+
+            call->evalThreadState.swapWithCurrent();
+            try {
+                callOnPooledStack(executor, call->fn);
+            } catch (...) {
+                call->ex = std::current_exception();
+            }
+            call->evalThreadState.swapWithCurrent();
+
+            /* Become idle before waking up the fiber, so that its next
+               call can reuse this helper. */
+            {
+                auto state(executor.offFiberHelpers->state_.lock());
+                self.call = nullptr;
+                state->idle.push_back(&self);
+            }
+
+            /* Wake up the fiber. Note: `call` lives on its stack, so we
+               must not touch it after releasing the domain lock. */
+            std::vector<Executor::FiberPtr> woken;
+            {
+                auto & domain = getWaiterDomain(call);
+                std::unique_lock lk(domain.mutex);
+                call->done = true;
+                if (auto nh = domain.waiters.extract(call))
+                    woken = std::move(nh.mapped());
+            }
+            for (auto & fiber : woken)
+                executor.enqueueFiber(std::move(fiber));
+        }
+    }
+
+#if NIX_USE_BOEHMGC
+    GC_unregister_my_thread();
+#endif
+}
+
+void Executor::runOffFiber(fun<void()> fn)
+{
+    auto fib = currentFiber;
+    if (!fib) {
+        fn();
+        return;
+    }
+    assert(&fib->executor == this);
+
+    nrOffFiberCalls++;
+
+    OffFiberCall call{.fn = fn, .evalThreadState = EvalThreadState::current()};
+
+    /* Hand the call to an idle helper, or start a new one. Never wait
+       for a helper to become idle: the busy ones may be waiting for
+       values that only this fiber's worker can finish. */
+    {
+        auto state(offFiberHelpers->state_.lock());
+        assert(!state->quit);
+        if (!state->idle.empty()) {
+            auto helper = state->idle.back();
+            state->idle.pop_back();
+            helper->call = &call;
+            helper->wakeup.notify_one();
+        } else {
+            auto helper = std::make_unique<OffFiberHelper>();
+            helper->call = &call;
+            helper->thread = std::thread([this, h(helper.get())]() { runOffFiberHelper(*this, *h); });
+            state->helpers.push_back(std::move(helper));
+            nrOffFiberHelpers++;
+        }
+    }
+
+    /* Suspend until the helper has finished the call. Unlike
+       `waitOnThunk()`, don't give up when woken up on shutdown or
+       interrupt: `call`, and whatever `fn` refers to, live on this
+       fiber's stack, so it must not be unwound while the helper may
+       still use them. The helper observes the shutdown or interrupt
+       itself. */
+    auto & domain = getWaiterDomain(&call);
+    std::unique_lock lk(domain.mutex);
+    while (!call.done) {
+        suspendFiber(domain, lk, &call);
+        lk = std::unique_lock(domain.mutex);
+    }
+    lk.unlock();
+
+    /* Take back our state as the call left it, since the helper ran it
+       on our behalf. */
+    call.evalThreadState.swapWithCurrent();
+
+    if (call.ex)
+        std::rethrow_exception(call.ex);
 }
 
 static void prim_parallel(EvalState & state, const PosIdx pos, Value ** args, Value & v)

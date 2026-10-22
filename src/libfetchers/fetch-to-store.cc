@@ -70,11 +70,9 @@ uint64_t nanosSince(std::chrono::steady_clock::time_point start)
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
 }
 
-thread_local FetchToStoreCaller currentFetchToStoreCaller = FetchToStoreCaller::Other;
-
-thread_local FetchToStoreThreadTotals fetchToStoreThreadTotals;
-
 } // namespace
+
+[[gnu::tls_model("initial-exec")]] thread_local FetchToStoreThreadState currentFetchToStoreThreadState;
 
 bool fetchToStoreStatsEnabled()
 {
@@ -102,14 +100,14 @@ std::string_view fetchToStoreCallerName(FetchToStoreCaller caller)
 }
 
 FetchToStoreCallerScope::FetchToStoreCallerScope(FetchToStoreCaller caller)
-    : previous(currentFetchToStoreCaller)
+    : previous(currentFetchToStoreThreadState.caller)
 {
-    currentFetchToStoreCaller = caller;
+    currentFetchToStoreThreadState.caller = caller;
 }
 
 FetchToStoreCallerScope::~FetchToStoreCallerScope()
 {
-    currentFetchToStoreCaller = previous;
+    currentFetchToStoreThreadState.caller = previous;
 }
 
 std::vector<FetchToStoreStats> getFetchToStoreStats()
@@ -134,7 +132,7 @@ std::vector<FetchToStoreStats> getFetchToStoreStats()
 
 FetchToStoreThreadTotals getFetchToStoreThreadTotals()
 {
-    return fetchToStoreThreadTotals;
+    return currentFetchToStoreThreadState.totals;
 }
 
 StorePath fetchToStore(
@@ -165,7 +163,7 @@ std::pair<StorePath, Hash> fetchToStore2(
     // record the access: a cache hit absorbs the physical read, and skipping
     // recording here would silently drop the path from the dependency
     // closure of any tracked evaluation after the first.
-    auto & stats = fetchToStoreStats[static_cast<size_t>(currentFetchToStoreCaller)];
+    auto & stats = fetchToStoreStats[static_cast<size_t>(currentFetchToStoreThreadState.caller)];
     if (statsEnabled)
         bump(stats.calls);
 
@@ -264,7 +262,7 @@ std::pair<StorePath, Hash> fetchToStore2(
                   auto info = store.queryPathInfo(storePath);
                   if (statsEnabled) {
                       bump(stats.bytesIngested, info->narSize);
-                      fetchToStoreThreadTotals.bytesIngested += info->narSize;
+                      currentFetchToStoreThreadState.totals.bytesIngested += info->narSize;
                   }
                   assert(info->references.empty());
                   auto hash = method == ContentAddressMethod::Raw::NixArchive ? info->narHash : ({
@@ -291,8 +289,8 @@ std::pair<StorePath, Hash> fetchToStore2(
         auto nanos = nanosSince(ingestStart) - filterNanos;
         bump(stats.nanosIngesting, nanos);
         bump(stats.nanosFiltering, filterNanos);
-        fetchToStoreThreadTotals.ingestions++;
-        fetchToStoreThreadTotals.nanosIngesting += nanos;
+        currentFetchToStoreThreadState.totals.ingestions++;
+        currentFetchToStoreThreadState.totals.nanosIngesting += nanos;
     }
 
     if (cacheKey)

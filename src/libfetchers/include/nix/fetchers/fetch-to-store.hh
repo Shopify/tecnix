@@ -34,8 +34,9 @@ enum struct FetchToStoreCaller : unsigned int {
 std::string_view fetchToStoreCallerName(FetchToStoreCaller caller);
 
 /**
- * Attribute the `fetchToStore` calls this thread makes while the scope is
- * alive to `caller`. Scopes nest; the innermost one wins.
+ * Attribute the `fetchToStore` calls this thread (in the evaluator: this
+ * fiber, see `FetchToStoreThreadState`) makes while the scope is alive to
+ * `caller`. Scopes nest; the innermost one wins.
  */
 struct FetchToStoreCallerScope
 {
@@ -92,6 +93,21 @@ struct FetchToStoreThreadTotals
 };
 
 FetchToStoreThreadTotals getFetchToStoreThreadTotals();
+
+/**
+ * The calling thread's statistics state: the caller that its
+ * `fetchToStore` calls are counted under (see `FetchToStoreCallerScope`)
+ * and its running totals (see `getFetchToStoreThreadTotals()`). The
+ * evaluator swaps this with each of its fibers, so that it belongs to the
+ * evaluation that runs rather than to the thread.
+ */
+struct FetchToStoreThreadState
+{
+    FetchToStoreCaller caller = FetchToStoreCaller::Other;
+    FetchToStoreThreadTotals totals;
+};
+
+[[gnu::tls_model("initial-exec")]] extern thread_local FetchToStoreThreadState currentFetchToStoreThreadState;
 
 /**
  * Whether `NIX_SHOW_STATS` is set. Until it is, none of the counters above are

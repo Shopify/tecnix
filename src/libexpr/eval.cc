@@ -2646,20 +2646,6 @@ BackedStringView EvalState::coerceToString(
 
 namespace {
 
-struct IngestionCounts
-{
-    uint64_t ingestions = 0;
-    uint64_t bytes = 0;
-    uint64_t nanos = 0;
-
-    void add(const IngestionCounts & other)
-    {
-        ingestions += other.ingestions;
-        bytes += other.bytes;
-        nanos += other.nanos;
-    }
-};
-
 struct IngestionAttribution
 {
     std::mutex mutex;
@@ -2669,52 +2655,49 @@ struct IngestionAttribution
 
 IngestionAttribution ingestionAttribution;
 
-thread_local const std::string * currentIngestionTarget = nullptr;
-
-/** Work already charged by site scopes on this thread, so enclosing scopes can exclude it. */
-thread_local IngestionCounts ingestionChargedByScopes;
-
 } // namespace
 
 IngestionTargetScope::IngestionTargetScope(const std::string & target)
-    : previous(currentIngestionTarget)
+    : previous(currentTecnixThreadState.ingestionTarget)
 {
-    currentIngestionTarget = &target;
+    currentTecnixThreadState.ingestionTarget = &target;
 }
 
 IngestionTargetScope::~IngestionTargetScope()
 {
-    currentIngestionTarget = previous;
+    currentTecnixThreadState.ingestionTarget = previous;
 }
 
 IngestionSiteScope::IngestionSiteScope(PosIdx pos)
     : pos(pos)
 {
     auto totals = getFetchToStoreThreadTotals();
+    auto & charged = currentTecnixThreadState.ingestionChargedByScopes;
     ingestions = totals.ingestions;
     bytes = totals.bytesIngested;
     nanos = totals.nanosIngesting;
-    innerIngestions = ingestionChargedByScopes.ingestions;
-    innerBytes = ingestionChargedByScopes.bytes;
-    innerNanos = ingestionChargedByScopes.nanos;
+    innerIngestions = charged.ingestions;
+    innerBytes = charged.bytes;
+    innerNanos = charged.nanos;
 }
 
 IngestionSiteScope::~IngestionSiteScope()
 {
     auto totals = getFetchToStoreThreadTotals();
+    auto & charged = currentTecnixThreadState.ingestionChargedByScopes;
     IngestionCounts own{
-        .ingestions = (totals.ingestions - ingestions) - (ingestionChargedByScopes.ingestions - innerIngestions),
-        .bytes = (totals.bytesIngested - bytes) - (ingestionChargedByScopes.bytes - innerBytes),
-        .nanos = (totals.nanosIngesting - nanos) - (ingestionChargedByScopes.nanos - innerNanos),
+        .ingestions = (totals.ingestions - ingestions) - (charged.ingestions - innerIngestions),
+        .bytes = (totals.bytesIngested - bytes) - (charged.bytes - innerBytes),
+        .nanos = (totals.nanosIngesting - nanos) - (charged.nanos - innerNanos),
     };
     if (own.ingestions == 0)
         return;
-    ingestionChargedByScopes.add(own);
+    charged.add(own);
+    auto * target = currentTecnixThreadState.ingestionTarget;
     try {
         std::lock_guard lock(ingestionAttribution.mutex);
         ingestionAttribution.bySite[pos].add(own);
-        ingestionAttribution.byTarget[currentIngestionTarget ? *currentIngestionTarget : std::string("(no target)")]
-            .add(own);
+        ingestionAttribution.byTarget[target ? *target : std::string("(no target)")].add(own);
     } catch (...) {
         // Statistics only: never let bookkeeping escape a destructor.
     }
@@ -3270,6 +3253,8 @@ void EvalState::printStatistics()
     topObj["maxSuspendedFibers"] = executor->maxSuspendedFibers.load();
     topObj["maxLiveFibers"] = executor->maxLiveFibers.load();
     topObj["nrFiberStacksAllocated"] = executor->nrFiberStacksAllocated.load();
+    topObj["nrOffFiberCalls"] = executor->nrOffFiberCalls.load();
+    topObj["nrOffFiberHelpers"] = executor->nrOffFiberHelpers.load();
     topObj["nrAvoided"] = nrAvoided.load();
     topObj["nrLookups"] = nrLookups.load();
     topObj["nrPrimOpCalls"] = nrPrimOpCalls.load();
