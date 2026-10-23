@@ -1453,6 +1453,13 @@ void FileTransferRequest::setupForGcs()
     // Update the request URI to use HTTPS
     uri = parsedGcs.toHttpsUrl();
 
+    // An endpoint (an emulator) never gets Google credentials: any gs:// URL
+    // can name one, and the token would go to whatever host it names.
+    if (!parsedGcs.sendsCredentials()) {
+        debug("GCS request to endpoint '%s' without credentials", *parsedGcs.endpoint);
+        return;
+    }
+
     // Get OAuth2 bearer token from Application Default Credentials
     // Use read-only scope by default, read-write if ?write=true is specified
     if (auto token = getGcsCredentialsProvider()->maybeGetAccessToken(parsedGcs.writable)) {
