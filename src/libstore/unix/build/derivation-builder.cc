@@ -48,6 +48,7 @@
 #include <iostream>
 #include <list>
 #include <atomic>
+#include <future>
 
 #include "nix/util/strings.hh"
 #include "nix/util/signals.hh"
@@ -1173,6 +1174,24 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 
     std::map<std::string, std::variant<AlreadyRegistered, PerhapsNeedToRegister>> outputReferencesIfUnregistered;
     std::map<std::string, PosixStat> outputStats;
+    /* The NAR hash of each output as the reference scan read it. It is the
+       output's NAR hash as long as nothing rewrites the output afterwards. */
+    std::map<std::string, HashResult> scannedNarHashes;
+
+    struct OutputToScan
+    {
+        std::string outputName;
+        std::filesystem::path path;
+        bool discardReferences;
+        /* Whether registering the output can reuse the scan's NAR hash: an
+           input-addressed output built at its final path, which nothing
+           rewrites. A content-addressed or fixed-output one is hashed after
+           it moves, and a rewritten one after the rewrite, so hashing it in
+           the scan would be wasted. */
+        bool hashInScan;
+    };
+
+    std::vector<OutputToScan> toScan;
     for (auto & [outputName, _] : drv.outputs) {
         auto scratchOutput = get(scratchOutputs, outputName);
         assert(scratchOutput);
@@ -1234,29 +1253,62 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
             discardReferences = *udr;
         }
 
-        StorePathSet references;
-        if (discardReferences)
-            debug("discarding references of output '%s'", outputName);
-        else {
-            debug("scanning for references for output '%s' in temp location %s", outputName, PathFmt(actualPath));
+        auto * inputAddressed = std::get_if<DerivationOutput::InputAddressed>(&drv.outputs.at(outputName).raw);
+        bool hashInScan = inputAddressed && inputAddressed->path == *scratchOutput;
 
-            /* Pass blank Sink as we are not ready to hash data at this stage. */
-            NullSink blank;
-            references = scanForReferences(blank, actualPath, referenceablePaths);
-        }
+        outputStats.insert_or_assign(outputName, std::move(st));
+        toScan.push_back(
+            {.outputName = outputName,
+             .path = actualPath,
+             .discardReferences = discardReferences,
+             .hashInScan = hashInScan});
+    }
+
+    /* Scan the outputs for references, and hash each one's NAR in the same
+       read (an output that nothing rewrites later is then read once, not
+       twice). The outputs are independent here, so they're read concurrently:
+       a build's time in this step is its largest output's, not the sum. */
+    struct Scanned
+    {
+        StorePathSet references;
+        std::optional<HashResult> narHash;
+    };
+
+    std::vector<std::future<Scanned>> scans;
+    for (auto & output : toScan)
+        scans.push_back(std::async(std::launch::async, [&, output]() -> Scanned {
+            if (output.discardReferences) {
+                debug("discarding references of output '%s'", output.outputName);
+                return {};
+            }
+            debug(
+                "scanning for references for output '%s' in temp location %s", output.outputName, PathFmt(output.path));
+            if (!output.hashInScan) {
+                NullSink sink;
+                return {.references = scanForReferences(sink, output.path, referenceablePaths)};
+            }
+            HashSink narSink{HashAlgorithm::SHA256};
+            auto references = scanForReferences(narSink, output.path, referenceablePaths);
+            return {.references = std::move(references), .narHash = narSink.finish()};
+        }));
+
+    for (size_t i = 0; i < toScan.size(); ++i) {
+        auto scanned = scans[i].get();
+        auto & outputName = toScan[i].outputName;
+        if (scanned.narHash)
+            scannedNarHashes.insert_or_assign(outputName, *scanned.narHash);
 
         StringSet referencedOutputs;
-        for (auto & r : references)
+        for (auto & r : scanned.references)
             if (auto * o = get(scratchOutputsInverse, r))
                 referencedOutputs.insert(*o);
 
         outputReferencesIfUnregistered.insert_or_assign(
             outputName,
             PerhapsNeedToRegister{
-                .refs = references,
-                .otherOutputs = referencedOutputs,
+                .refs = std::move(scanned.references),
+                .otherOutputs = std::move(referencedOutputs),
             });
-        outputStats.insert_or_assign(outputName, std::move(st));
     }
 
     StringSet emptySet;
@@ -1491,10 +1543,15 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
                         outputRewrites.insert_or_assign(
                             std::string{scratchPath->hashPart()}, std::string{requiredFinalPath.hashPart()});
                     rewriteOutput(outputRewrites);
-                    HashResult narHashAndSize = hashPath(
-                        {makeFSSourceAccessor(actualPath), CanonPath::root},
-                        FileSerialisationMethod::NixArchive,
-                        HashAlgorithm::SHA256);
+                    /* Nothing rewrote the output since the scan hashed it. */
+                    auto * scanned = outputRewrites.empty() ? get(scannedNarHashes, outputName) : nullptr;
+                    if (scanned)
+                        debug("output '%s': using the NAR hash from the reference scan", outputName);
+                    HashResult narHashAndSize = scanned ? *scanned
+                                                        : hashPath(
+                                                              {makeFSSourceAccessor(actualPath), CanonPath::root},
+                                                              FileSerialisationMethod::NixArchive,
+                                                              HashAlgorithm::SHA256);
                     ValidPathInfo newInfo0{requiredFinalPath, {store, narHashAndSize.hash}};
                     newInfo0.narSize = narHashAndSize.numBytesDigested;
                     auto refs = rewriteRefs();
