@@ -1312,27 +1312,36 @@ struct curlFileTransfer : public FileTransfer
     inline ref<TransferItem>
     makeTransferItem(const FileTransferRequest & request, Callback<FileTransferResult> callback)
     {
-        /* Handle s3:// URIs by converting to HTTPS and optionally adding auth */
-        if (request.uri.scheme() == "s3") {
-            auto modifiedRequest = request;
-            modifiedRequest.setupForS3();
-            return make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback));
+        /* s3:// and gs:// URIs are converted to HTTPS and get their
+           authentication added here. That can fail (malformed URI, credential
+           problems), and enqueueFileTransfer() is `noexcept`, so rather than
+           letting the exception escape, create the item anyway and fail it, so
+           that the error reaches the callback like any other transfer error. */
+        auto modifiedRequest = request;
+        std::exception_ptr setupError;
+        try {
+            if (request.uri.scheme() == "s3")
+                modifiedRequest.setupForS3();
+            else if (request.uri.scheme() == "gs")
+                modifiedRequest.setupForGcs();
+        } catch (...) {
+            setupError = std::current_exception();
         }
 
-        /* Handle gs:// URIs by converting to HTTPS and adding OAuth2 bearer token */
-        if (request.uri.scheme() == "gs") {
-            auto modifiedRequest = request;
-            modifiedRequest.setupForGcs();
-            return make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback));
-        }
-
-        return make_ref<TransferItem>(*this, request, std::move(callback));
+        auto item = make_ref<TransferItem>(*this, std::move(modifiedRequest), std::move(callback));
+        if (setupError)
+            item->failEx(setupError);
+        return item;
     }
 
     ItemHandle
     enqueueFileTransfer(const FileTransferRequest & request, Callback<FileTransferResult> callback) noexcept override
     {
         const auto item = makeTransferItem(request, std::move(callback));
+
+        /* Setting up the request failed; the callback has already been invoked. */
+        if (item->done)
+            return ItemHandle(item.get_ptr());
 
         try {
             return enqueueItem(item);
@@ -1455,7 +1464,7 @@ void FileTransferRequest::setupForGcs()
 
     // Get OAuth2 bearer token from Application Default Credentials
     // Use read-only scope by default, read-write if ?write=true is specified
-    if (auto token = getGcsCredentialsProvider()->maybeGetAccessToken(parsedGcs.writable)) {
+    if (auto token = getGcsCredentialsProvider(uri.parsed())->maybeGetAccessToken(parsedGcs.writable)) {
         bearerToken = std::move(*token);
         debug("Using GCS OAuth2 bearer token for request (writable=%s)", parsedGcs.writable ? "true" : "false");
     } else {
@@ -1609,22 +1618,5 @@ void FileTransfer::download(
 }
 
 void FileTransferError::anchor() {}
-
-template<typename... Args>
-FileTransferError::FileTransferError(
-    FileTransfer::Error error, std::optional<std::string> response, const Args &... args)
-    : CloneableError(args...)
-    , error(error)
-    , response(response)
-{
-    const auto hf = HintFmt(args...);
-    // FIXME: Due to https://github.com/NixOS/nix/issues/3841 we don't know how
-    // to print different messages for different verbosity levels. For now
-    // we add some heuristics for detecting when we want to show the response.
-    if (response && (response->size() < 1024 || response->find("<html>") != std::string::npos))
-        err.msg = HintFmt("%1%\n\nresponse body:\n\n%2%", Uncolored(hf.str()), chomp(*response));
-    else
-        err.msg = hf;
-}
 
 } // namespace nix

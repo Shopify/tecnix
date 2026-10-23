@@ -175,9 +175,7 @@ bool HttpBinaryCacheStore::fileExists(const std::string & path)
         fileTransfer->download(request);
         return true;
     } catch (FileTransferError & e) {
-        /* S3 buckets return 403 if a file doesn't exist and the
-           bucket is unlistable, so treat 403 as 404. */
-        if (e.error == FileTransfer::NotFound || e.error == FileTransfer::Forbidden)
+        if (isMissing(e))
             return false;
         maybeDisable();
         throw;
@@ -239,10 +237,10 @@ FileTransferRequest HttpBinaryCacheStore::makeRequest(std::string_view path)
        (note the query param) and that gets passed here. */
     auto result = parseURLRelative(path, cacheUriWithTrailingSlash);
 
-    /* For S3 URLs, preserve query parameters from the base URL when the
-       relative path doesn't have its own query parameters. This is needed
-       to preserve S3-specific parameters like endpoint and region. */
-    if (config->cacheUri.scheme == "s3" && result.query.empty()) {
+    /* For S3 and GCS URLs, preserve query parameters from the base URL when
+       the relative path doesn't have its own query parameters. This is needed
+       to preserve scheme-specific parameters like endpoint and region. */
+    if ((config->cacheUri.scheme == "s3" || config->cacheUri.scheme == "gs") && result.query.empty()) {
         result.query = config->cacheUri.query;
     }
 
@@ -284,7 +282,7 @@ void HttpBinaryCacheStore::getFile(const std::string & path, Sink & sink)
     try {
         fileTransfer->download(std::move(request), sink);
     } catch (FileTransferError & e) {
-        if (e.error == FileTransfer::NotFound || e.error == FileTransfer::Forbidden)
+        if (isMissing(e))
             throw NoSuchBinaryCacheFile(
                 "file '%s' does not exist in binary cache '%s'", path, config->getHumanReadableURI());
         maybeDisable();
@@ -305,8 +303,7 @@ void HttpBinaryCacheStore::getFile(const std::string & path, Callback<std::optio
                                               try {
                                                   (*callbackPtr)(std::move(result.get().data));
                                               } catch (FileTransferError & e) {
-                                                  if (e.error == FileTransfer::NotFound
-                                                      || e.error == FileTransfer::Forbidden)
+                                                  if (isMissing(e))
                                                       return (*callbackPtr)({});
                                                   maybeDisable();
                                                   callbackPtr->rethrow();
