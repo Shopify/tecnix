@@ -3,11 +3,11 @@
     "bdwgc": {
       "flake": false,
       "locked": {
-        "lastModified": 1790015987,
-        "narHash": "sha256-bPVosUgucJR0hGSap3tJW84AR6eGYegVROV+O8VYX5A=",
+        "lastModified": 1792763802,
+        "narHash": "sha256-iN5Bxl4724coC4pqas7gD1bcl5w9e/hpIojgV3WtGZI=",
         "owner": "DeterminateSystems",
         "repo": "bdwgc",
-        "rev": "373957929b9ca3b2ae69a3e16b830c44c15b42ca",
+        "rev": "ab6e72c44dff0027be7ce1cf027c0efd151376bb",
         "type": "github"
       },
       "original": {
