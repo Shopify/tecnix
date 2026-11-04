@@ -1308,7 +1308,7 @@ grepQuietInverse "drv-world-resolver-evaluated" "$TEST_ROOT/deps-first-warm.err"
 # A supported outer blob is not enough: unknown payload versions and names
 # that select an import helper instead of a derivation output must miss.
 echo "Testing unsupported cached result payloads..."
-sqlite3 "$EVAL_CACHE_DB" "UPDATE DependencyShards SET dependencies = CAST(replace(CAST(dependencies AS TEXT), 'TXTV1', 'TXTV0') AS BLOB)"
+sqlite3 "$EVAL_CACHE_DB" "UPDATE DependencyShards SET dependencies = CAST(replace(CAST(dependencies AS TEXT), 'TXTV2', 'TXTV0') AS BLOB)"
 unknown_payload_values=$(tecnix_eval_json_cache "$drv_selected_expr" 2> "$TEST_ROOT/drv-payload-version.err")
 assert_json_equal "$unknown_payload_values" "$cold_selected_values" "unknown result payload versions should re-evaluate correctly"
 grepQuiet "drv-world-resolver-evaluated" "$TEST_ROOT/drv-payload-version.err"

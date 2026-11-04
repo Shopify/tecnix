@@ -75,7 +75,7 @@ ref<RemoteStore::Connection> RemoteStore::openConnectionWrapper()
     }
 }
 
-void RemoteStore::initConnection(Connection & conn)
+void RemoteStore::initConnection(Connection & conn, const std::map<std::string, std::string> & settings)
 {
     /* Send the magic greeting, check for the reply. */
     try {
@@ -114,10 +114,18 @@ void RemoteStore::initConnection(Connection & conn)
             "cannot open connection to remote store '%s': %s", config.getHumanReadableURI(), Uncolored(e.message()));
     }
 
-    setOptions(conn);
+    if (settings.empty())
+        setOptions(conn);
+    else
+        sendOptions(conn, settings);
 }
 
 void RemoteStore::setOptions(Connection & conn)
+{
+    sendOptions(conn, {});
+}
+
+void RemoteStore::sendOptions(Connection & conn, const std::map<std::string, std::string> & settingsOverrides)
 {
     conn.to << WorkerProto::Op::SetOptions << settings.keepFailed << settings.getWorkerSettings().keepGoing
             << settings.getWorkerSettings().tryFallback << verbosity << settings.getWorkerSettings().maxBuildJobs
@@ -139,6 +147,8 @@ void RemoteStore::setOptions(Connection & conn)
     overrides.erase(loggerSettings.showTrace.name);
     overrides.erase(experimentalFeatureSettings.experimentalFeatures.name);
     overrides.erase("plugin-files");
+    for (auto & [name, value] : settingsOverrides)
+        overrides[name].value = value;
     conn.to << overrides.size();
     for (auto & i : overrides)
         conn.to << i.first << i.second.value;
@@ -209,23 +219,46 @@ void RemoteStore::querySubstitutablePathInfos(const StorePathCAMap & pathsMap, S
         return;
 
     auto conn(getConnection());
+    querySubstitutablePathInfosOn(*conn, conn.daemonException, pathsMap, infos);
+}
 
-    conn->to << WorkerProto::Op::QuerySubstitutablePathInfos;
-    if (conn->protoVersion.number < WorkerProto::Version::Number{1, 22}) {
+void RemoteStore::querySubstitutablePathInfosFrom(
+    const std::vector<StoreReference> & substituters, const StorePathCAMap & pathsMap, SubstitutablePathInfos & infos)
+{
+    // The daemon would ask nothing either: the connection sends `substitute`.
+    if (pathsMap.empty() || !settings.getWorkerSettings().useSubstitutes)
+        return;
+
+    Strings uris;
+    for (auto & ref : substituters)
+        uris.push_back(ref.render());
+
+    // Not pooled: it is closed, and its worker exits, once this returns.
+    auto conn = openConnectionWrapper();
+    initConnection(*conn, {{settings.getWorkerSettings().substituters.name, concatStringsSep(" ", uris)}});
+    bool daemonException = false;
+    querySubstitutablePathInfosOn(*conn, daemonException, pathsMap, infos);
+}
+
+void RemoteStore::querySubstitutablePathInfosOn(
+    Connection & conn, bool & daemonException, const StorePathCAMap & pathsMap, SubstitutablePathInfos & infos)
+{
+    conn.to << WorkerProto::Op::QuerySubstitutablePathInfos;
+    if (conn.protoVersion.number < WorkerProto::Version::Number{1, 22}) {
         StorePathSet paths;
         for (auto & path : pathsMap)
             paths.insert(path.first);
-        WorkerProto::write(*this, *conn, paths);
+        WorkerProto::write(*this, conn, paths);
     } else
-        WorkerProto::write(*this, *conn, pathsMap);
-    conn.processStderr();
-    size_t count = readNum<size_t>(conn->from);
+        WorkerProto::write(*this, conn, pathsMap);
+    conn.processStderr(&daemonException);
+    size_t count = readNum<size_t>(conn.from);
     for (size_t n = 0; n < count; n++) {
-        SubstitutablePathInfo & info(infos[WorkerProto::Serialise<StorePath>::read(*this, *conn)]);
-        info.deriver = WorkerProto::Serialise<std::optional<StorePath>>::read(*this, *conn);
-        info.references = WorkerProto::Serialise<StorePathSet>::read(*this, *conn);
-        info.downloadSize = readLongLong(conn->from);
-        info.narSize = readLongLong(conn->from);
+        SubstitutablePathInfo & info(infos[WorkerProto::Serialise<StorePath>::read(*this, conn)]);
+        info.deriver = WorkerProto::Serialise<std::optional<StorePath>>::read(*this, conn);
+        info.references = WorkerProto::Serialise<StorePathSet>::read(*this, conn);
+        info.downloadSize = readLongLong(conn.from);
+        info.narSize = readLongLong(conn.from);
     }
 }
 

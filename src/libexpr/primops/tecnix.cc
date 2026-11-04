@@ -15,6 +15,7 @@
 #include "nix/expr/tecnix/access-set-graph.hh"
 #include "nix/expr/tecnix/eval-cache.hh"
 #include "nix/expr/tecnix/source-accessors.hh"
+#include "nix/store/derivations.hh"
 #include "nix/store/store-api.hh"
 #include "nix/util/finally.hh"
 #include "nix/util/strings.hh"
@@ -326,6 +327,10 @@ struct TecnixArgs
     /** Record a target's evaluation error in its result record instead of failing the whole
         call (`keepGoing`, with `includeDependencies`). */
     bool keepGoing = false;
+    /** Binary caches that may hold the drv of a cache hit whose drv is not in
+        the local store (`evalCacheDrvlessSubstituters`). Such a hit is served
+        without its drv. */
+    std::vector<StoreReference> evalCacheDrvlessSubstituters;
 };
 
 /** The persistent-cache row family these arguments address. */
@@ -476,6 +481,43 @@ static bool getTecnixBoolAttr(
     if (auto attr = attrs.get(name))
         return state.forceBool(*attr->value, pos, context);
     return defaultValue;
+}
+
+static std::vector<StoreReference> parseTecnixDrvlessSubstituters(EvalState & state, const PosIdx pos, Value ** args)
+{
+    auto & attrs = forceTecnixBuiltinAttrs(state, pos, args);
+    auto attr = attrs.get(state.symbols.create("evalCacheDrvlessSubstituters"));
+    if (!attr)
+        return {};
+    static constexpr std::string_view errorCtx =
+        "while evaluating the 'evalCacheDrvlessSubstituters' argument to builtins.tecnixTargets";
+    state.forceList(*attr->value, pos, errorCtx);
+    std::vector<StoreReference> substituters;
+    for (auto elem : attr->value->listView()) {
+        auto uri = state.forceStringNoCtx(*elem, pos, errorCtx);
+        std::optional<StoreReference> ref;
+        try {
+            ref = StoreReference::parse(std::string(uri));
+        } catch (Error & e) {
+            e.addTrace(state.positions[pos], errorCtx);
+            throw;
+        }
+        // The expression names these stores, and opening some runs a program
+        // (ssh-ng's `remote-program`), so only binary caches are allowed.
+        auto * specified = std::get_if<StoreReference::Specified>(&ref->variant);
+        if (!specified
+            || !(
+                specified->scheme == "http" || specified->scheme == "https" || specified->scheme == "s3"
+                || specified->scheme == "file"))
+            state
+                .error<EvalError>(
+                    "builtins.tecnixTargets: 'evalCacheDrvlessSubstituters' takes only binary caches (http, https, s3 or file URIs), not '%s'",
+                    uri)
+                .atPos(pos)
+                .debugThrow();
+        substituters.push_back(std::move(*ref));
+    }
+    return substituters;
 }
 
 static void requireTecnixTargets(EvalState & state, const PosIdx pos, const TecnixArgs & args)
@@ -856,9 +898,33 @@ static std::string_view forceTargetDrvPath(EvalState & state, Value & targetValu
         *drvPathAttr->value, context, pos, "while evaluating the 'drvPath' attribute of a tecnix target");
 }
 
-// Versioned target payload: magic, drvPath, NUL, outputName. The two fields
-// are read directly from the candidate's bytes on a hit.
-static constexpr std::string_view targetValuePayloadPrefix{"TXTV1\0", 6};
+/**
+ * The target value's `outPath` attribute (read as an attribute, never by
+ * coercing the value, where a `__toString` would win), or "" when it is not a
+ * store path a V2 payload can hold, such as a content-addressed derivation's
+ * placeholder. Forced under the same tracking as `drvPath`.
+ */
+static std::string_view forceTargetOutPath(EvalState & state, Value & targetValue, const PosIdx pos)
+{
+    auto outPathAttr = targetValue.attrs()->get(state.s.outPath);
+    if (!outPathAttr)
+        return "";
+    state.forceValue(*outPathAttr->value, pos);
+    if (outPathAttr->value->type() != nString)
+        return "";
+    NixStringContext context;
+    auto outPath = state.forceString(
+        *outPathAttr->value, context, pos, "while evaluating the 'outPath' attribute of a tecnix target");
+    if (outPath.find('\0') != std::string_view::npos || !state.store->maybeParseStorePath(outPath))
+        return "";
+    return outPath;
+}
+
+// Versioned target payloads, read directly from the candidate's bytes on a
+// hit. V1: magic, drvPath, NUL, outputName; a hit imports the drv. V2 adds
+// NUL, outPath, so a hit needs no drv in the local store.
+static constexpr std::string_view targetValuePayloadV1Prefix{"TXTV1\0", 6};
+static constexpr std::string_view targetValuePayloadV2Prefix{"TXTV2\0", 6};
 
 static void prim_tecnixTargetsWithDependencies(
     EvalState & state, const PosIdx pos, Value ** args, Value & v, TecnixArgs && tArgs, bool includeTargets);
@@ -888,6 +954,7 @@ static void prim_tecnixTargets(EvalState & state, const PosIdx pos, Value ** arg
         state.error<EvalError>("builtins.tecnixTargets: 'keepGoing' requires 'includeDependencies = true'")
             .atPos(pos)
             .debugThrow();
+    tArgs.evalCacheDrvlessSubstituters = parseTecnixDrvlessSubstituters(state, pos, args);
 
     if (includeDependencies) {
         auto includeTargets = getTecnixBoolAttr(
@@ -973,6 +1040,18 @@ static RegisterPrimOp primop_tecnixTargets({
       without evaluation. Such values preserve the selected output and its
       Nix string context using the imported derivation shape; other resolver
       attributes are not preserved on a value-cache hit.
+
+      `evalCacheDrvlessSubstituters` (default `[ ]`) lists binary caches to
+      ask, through the daemon and in one call, for the recipes of cache hits
+      that are not in the local store. With it, a hit is answered as `{ type
+      = "derivation"; name; drvPath; outPath; outputName; }` plus the
+      selected output as an attribute of its own, with the string contexts
+      of the derivation, whether its recipe is local or one of them has it.
+      Such a recipe stays out of the local store, so a derivation that
+      depends on such a value fails to instantiate. The daemon asks only
+      these caches, and drops any it does not trust (see
+      `trusted-substituters`). Pass it only where the results are read as
+      strings.
     )",
     .impl = prim_tecnixTargets,
 });
@@ -983,6 +1062,8 @@ struct CachedTargetPayload
 {
     StorePath drvPath;
     std::string outputName;
+    /** V2 only: the selected output's path, so the hit needs no drv. */
+    std::optional<StorePath> outPath;
 };
 
 struct TargetDependencyResult
@@ -1085,11 +1166,18 @@ static TargetDependencyResult evalTargetDependencies(
                         "while evaluating the selected output of a tecnix target");
                     if (context.empty() && !outputName.empty() && drvPath.find('\0') == std::string_view::npos
                         && outputName.find('\0') == std::string_view::npos) {
-                        targetPayload.reserve(targetValuePayloadPrefix.size() + drvPath.size() + 1 + outputName.size());
-                        targetPayload.append(targetValuePayloadPrefix);
+                        auto outPath = forceTargetOutPath(state, *resolveResult, pos);
+                        targetPayload.reserve(
+                            targetValuePayloadV2Prefix.size() + drvPath.size() + 1 + outputName.size() + 1
+                            + outPath.size());
+                        targetPayload.append(outPath.empty() ? targetValuePayloadV1Prefix : targetValuePayloadV2Prefix);
                         targetPayload.append(drvPath);
                         targetPayload.push_back('\0');
                         targetPayload.append(outputName);
+                        if (!outPath.empty()) {
+                            targetPayload.push_back('\0');
+                            targetPayload.append(outPath);
+                        }
                     }
                 }
             }
@@ -1143,34 +1231,118 @@ static void printTecnixAccessSetStats(EvalState & state, std::string_view opName
 }
 
 /**
- * Parse a candidate's versioned target payload, copying both fields out of the
+ * Parse a candidate's versioned target payload, copying its fields out of the
  * cache row. An unsupported payload is nullopt (an ordinary miss).
  */
 static std::optional<CachedTargetPayload>
 parseCachedTargetPayload(EvalState & state, std::optional<std::string_view> payload)
 {
-    if (!payload || !payload->starts_with(targetValuePayloadPrefix))
+    if (!payload)
         return std::nullopt;
-    auto fields = payload->substr(targetValuePayloadPrefix.size());
+    bool v2 = payload->starts_with(targetValuePayloadV2Prefix);
+    if (!v2 && !payload->starts_with(targetValuePayloadV1Prefix))
+        return std::nullopt;
+    auto fields = payload->substr(targetValuePayloadV1Prefix.size());
     auto separator = fields.find('\0');
     if (separator == std::string_view::npos)
         return std::nullopt;
+    auto drvPath = state.store->maybeParseStorePath(fields.substr(0, separator));
+    if (!drvPath || !drvPath->isDerivation())
+        return std::nullopt;
     auto outputName = fields.substr(separator + 1);
+    std::optional<StorePath> outPath;
+    if (v2) {
+        auto outSeparator = outputName.find('\0');
+        if (outSeparator == std::string_view::npos)
+            return std::nullopt;
+        outPath = state.store->maybeParseStorePath(outputName.substr(outSeparator + 1));
+        outputName = outputName.substr(0, outSeparator);
+        // The drv is not read, so check what it would have told: the output
+        // path is named after the drv and the output. A payload that fails
+        // the check is served as V1, by importing its drv, as before V2.
+        if (outPath && outPath->name() != outputPathName(Derivation::nameFromPath(*drvPath), outputName))
+            outPath.reset();
+    }
     if (outputName.empty() || outputName.find('\0') != std::string_view::npos)
         return std::nullopt;
-    auto storePath = state.store->maybeParseStorePath(fields.substr(0, separator));
-    if (!storePath || !storePath->isDerivation())
-        return std::nullopt;
-    return CachedTargetPayload{.drvPath = std::move(*storePath), .outputName = std::string(outputName)};
+    return CachedTargetPayload{
+        .drvPath = std::move(*drvPath), .outputName = std::string(outputName), .outPath = std::move(outPath)};
+}
+
+/**
+ * The value of a V2 hit, built from its payload without reading the drv:
+ * `{ type = "derivation"; name; drvPath; outPath; outputName; }` with the
+ * string contexts an imported drv would give, and the selected output as an
+ * attribute of its own, as on any derivation output.
+ */
+static Value * drvlessTargetValue(EvalState & state, const CachedTargetPayload & target)
+{
+    auto * value = state.allocValue();
+    auto outputSymbol = state.symbols.create(target.outputName);
+    bool outputAttr = outputSymbol != state.s.type && outputSymbol != state.s.name && outputSymbol != state.s.drvPath
+                      && outputSymbol != state.s.outPath && outputSymbol != state.s.outputName;
+    auto attrs = state.buildBindings(outputAttr ? 6 : 5);
+    attrs.alloc(state.s.type).mkString("derivation", state.mem);
+    attrs.alloc(state.s.name).mkString(Derivation::nameFromPath(target.drvPath), state.mem);
+    attrs.alloc(state.s.drvPath)
+        .mkString(
+            state.store->printStorePath(target.drvPath),
+            {NixStringContextElem::DrvDeep{.drvPath = target.drvPath}},
+            state.mem);
+    state.mkOutputString(
+        attrs.alloc(state.s.outPath),
+        SingleDerivedPath::Built{
+            .drvPath = makeConstantStorePathRef(target.drvPath),
+            .output = target.outputName,
+        },
+        target.outPath);
+    attrs.alloc(state.s.outputName).mkString(target.outputName, state.mem);
+    if (outputAttr)
+        attrs.insert(outputSymbol, value);
+    value->mkAttrs(attrs);
+    return value;
+}
+
+/**
+ * The drvs of `drvs` that one of `substituters` has, asked in one call through
+ * the store (the daemon, for a daemon client). A failed lookup is a warning,
+ * and every drv a miss.
+ */
+static StorePathSet queryDrvlessSubstitutable(
+    EvalState & state, const std::vector<StoreReference> & substituters, const StorePathSet & drvs)
+{
+    StorePathCAMap query;
+    for (auto & drv : drvs)
+        query.emplace(drv, std::nullopt);
+    SubstitutablePathInfos infos;
+    try {
+        state.store->querySubstitutablePathInfosFrom(substituters, query, infos);
+    } catch (Error & e) {
+        warn(
+            "tecnixTargets: could not ask the drvless substituters for %d drv(s), evaluating them: %s",
+            drvs.size(),
+            e.message());
+        return {};
+    }
+    StorePathSet found;
+    for (auto & [path, _] : infos)
+        found.insert(path);
+    return found;
 }
 
 /**
  * Materialize target values for hits whose parsed payload names a recipe still
- * present in the store (one store query for all of them) and exposing the
- * selected output. An absent recipe or missing selected output leaves the hit
- * without a value (an ordinary miss).
+ * present in the store (one store query for all of them), or, for V2 payloads,
+ * in one of the drvless substituters (one more query, for those not local). With
+ * drvless substituters, a V2 hit is built from its payload; any other hit is
+ * built by importing its drv. An absent recipe or missing selected output
+ * leaves the hit without a value (an ordinary miss).
  */
-static void materializeCachedTargetValues(EvalState & state, const PosIdx pos, TargetDependencyResults & results)
+static void materializeCachedTargetValues(
+    EvalState & state,
+    const PosIdx pos,
+    const std::vector<StoreReference> & drvlessSubstituters,
+    TargetDependencyResults & results)
 {
     StorePathSet candidates;
     for (auto & result : results)
@@ -1180,11 +1352,36 @@ static void materializeCachedTargetValues(EvalState & state, const PosIdx pos, T
         return;
 
     auto valid = state.store->queryValidPaths(candidates);
+
+    StorePathSet substitutable;
+    if (!drvlessSubstituters.empty()) {
+        StorePathSet drvless;
+        for (auto & result : results)
+            if (result && result->cachedTarget && result->cachedTarget->outPath
+                && !valid.count(result->cachedTarget->drvPath))
+                drvless.insert(result->cachedTarget->drvPath);
+        if (!drvless.empty())
+            substitutable = queryDrvlessSubstitutable(state, drvlessSubstituters, drvless);
+    }
+
     size_t valueHits = 0;
+    size_t drvlessHits = 0;
     for (auto & maybeResult : results) {
         if (!maybeResult || !maybeResult->cachedTarget)
             continue;
         auto & target = *maybeResult->cachedTarget;
+        // Without drvless substituters, every hit imports its drv, as
+        // before V2 payloads, so the option changes nothing unless given.
+        if (target.outPath && !drvlessSubstituters.empty()) {
+            bool local = valid.count(target.drvPath);
+            if (!local && !substitutable.count(target.drvPath))
+                continue;
+            if (!local)
+                drvlessHits++;
+            maybeResult->targetValue = drvlessTargetValue(state, target);
+            valueHits++;
+            continue;
+        }
         if (!valid.count(target.drvPath))
             continue;
         auto * imported = state.allocValue();
@@ -1205,6 +1402,10 @@ static void materializeCachedTargetValues(EvalState & state, const PosIdx pos, T
     }
     if (valueHits)
         printTalkative("tecnixTargets: %d target value(s) served from the cache", valueHits);
+    if (drvlessHits)
+        printTalkative(
+            "tecnixTargets: %d target value(s) served from the cache without their drv, which a drvless substituter has",
+            drvlessHits);
 }
 
 static TargetDependencyResults evaluateTecnixTargetDependencies(
@@ -1247,11 +1448,12 @@ static TargetDependencyResults evaluateTecnixTargetDependencies(
                     results[i]->cachedTarget = parseCachedTargetPayload(state, hit.payload());
             });
 
-        // Target values need a supported payload and a locally available
-        // recipe exposing the selected output. Anything else is an ordinary
-        // miss and is re-evaluated (which re-learns the payload).
+        // Target values need a supported payload and a recipe exposing the
+        // selected output, in the local store or (V2) a drvless substituter.
+        // Anything else is an ordinary miss and is re-evaluated (which
+        // re-learns the payload).
         if (keepTargetValues)
-            materializeCachedTargetValues(state, pos, results);
+            materializeCachedTargetValues(state, pos, args.evalCacheDrvlessSubstituters, results);
         for (size_t i = 0; i < results.size(); i++) {
             if (!results[i]) {
                 printTalkative("tecnixTargets dependencies: dependency cache miss, evaluating '%s'", args.targets[i]);

@@ -81,6 +81,16 @@ struct RemoteStore : public virtual Store,
     void querySubstitutablePathInfos(const StorePathCAMap & paths, SubstitutablePathInfos & infos) override;
 
     /**
+     * Sets `substituters` on a connection of its own, so the daemon asks only
+     * them, and no other request sees them: the daemon serves each connection
+     * in a worker of its own.
+     */
+    void querySubstitutablePathInfosFrom(
+        const std::vector<StoreReference> & substituters,
+        const StorePathCAMap & paths,
+        SubstitutablePathInfos & infos) override;
+
+    /**
      * Add a content-addressable store path. `dump` will be drained.
      */
     ref<const ValidPathInfo> addCAToStore(
@@ -181,11 +191,20 @@ protected:
 
     virtual ref<Connection> openConnection() = 0;
 
-    void initConnection(Connection & conn);
+    /**
+     * Handshake, then `setOptions`, or with `settings`, `sendOptions`.
+     */
+    void initConnection(Connection & conn, const std::map<std::string, std::string> & settings = {});
 
     ref<Pool<Connection>> connections;
 
     virtual void setOptions(Connection & conn);
+
+    /**
+     * Send the process's settings, with `settings` in place of their own
+     * values.
+     */
+    void sendOptions(Connection & conn, const std::map<std::string, std::string> & settings);
 
     void setOptions() override;
 
@@ -208,6 +227,9 @@ private:
      * Same as the default implemenation of `RemoteStore::getFSAccessor`, but with a more preceise return type.
      */
     ref<RemoteFSAccessor> getRemoteFSAccessor(bool requireValidPath = true);
+
+    void querySubstitutablePathInfosOn(
+        Connection & conn, bool & daemonException, const StorePathCAMap & paths, SubstitutablePathInfos & infos);
 
     std::atomic_bool failed{false};
 
