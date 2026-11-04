@@ -128,15 +128,18 @@ const ContentAddress * getDerivationCA(const BasicDerivation & drv)
     return nullptr;
 }
 
-static asio::awaitable<void>
-querySubstitutablePathInfosAsync(Store & store, const StorePathCAMap & paths, SubstitutablePathInfos & infos)
+static asio::awaitable<void> querySubstitutablePathInfosAsync(
+    Store & store,
+    const std::list<ref<Store>> & substituters,
+    const StorePathCAMap & paths,
+    SubstitutablePathInfos & infos)
 {
     if (!settings.getWorkerSettings().useSubstitutes)
         co_return;
 
-    co_await forEachAsync(paths, [&store, &infos](auto path) -> asio::awaitable<void> {
+    co_await forEachAsync(paths, [&store, &substituters, &infos](auto path) -> asio::awaitable<void> {
         std::optional<Error> lastStoresException = std::nullopt;
-        for (auto & sub : getDefaultSubstituters()) {
+        for (auto & sub : substituters) {
             if (lastStoresException.has_value()) {
                 logError(lastStoresException->info());
                 lastStoresException.reset();
@@ -198,14 +201,58 @@ querySubstitutablePathInfosAsync(Store & store, const StorePathCAMap & paths, Su
     });
 }
 
-void Store::querySubstitutablePathInfos(const StorePathCAMap & paths, SubstitutablePathInfos & infos)
+static asio::awaitable<void>
+querySubstitutablePathInfosAsync(Store & store, const StorePathCAMap & paths, SubstitutablePathInfos & infos)
+{
+    if (!settings.getWorkerSettings().useSubstitutes)
+        co_return;
+    co_await querySubstitutablePathInfosAsync(store, getDefaultSubstituters(), paths, infos);
+}
+
+static void querySubstitutablePathInfosSync(
+    Store & store,
+    const std::list<ref<Store>> & substituters,
+    const StorePathCAMap & paths,
+    SubstitutablePathInfos & infos)
 {
     asio::io_context ctx;
     std::exception_ptr ex;
-    asio::co_spawn(ctx, querySubstitutablePathInfosAsync(*this, paths, infos), [&](std::exception_ptr e) { ex = e; });
+    asio::co_spawn(ctx, querySubstitutablePathInfosAsync(store, substituters, paths, infos), [&](std::exception_ptr e) {
+        ex = e;
+    });
     ctx.run();
     if (ex)
         std::rethrow_exception(ex);
+}
+
+void Store::querySubstitutablePathInfos(const StorePathCAMap & paths, SubstitutablePathInfos & infos)
+{
+    if (!settings.getWorkerSettings().useSubstitutes)
+        return;
+    querySubstitutablePathInfosSync(*this, getDefaultSubstituters(), paths, infos);
+}
+
+void Store::querySubstitutablePathInfosFrom(
+    const std::vector<StoreReference> & substituters, const StorePathCAMap & paths, SubstitutablePathInfos & infos)
+{
+    if (paths.empty() || !settings.getWorkerSettings().useSubstitutes)
+        return;
+
+    // Opened as `getDefaultSubstituters` opens the configured ones.
+    std::list<ref<Store>> stores;
+    std::set<StoreReference> done;
+    for (auto & ref : substituters) {
+        if (!done.insert(ref).second)
+            continue;
+        try {
+            stores.push_back(openStore(StoreReference{ref}));
+        } catch (Error & e) {
+            logWarning(e.info());
+        }
+    }
+    stores.sort([](ref<Store> & a, ref<Store> & b) { return a->config.priority < b->config.priority; });
+
+    querySubstitutablePathInfosSync(*this, stores, paths, infos);
 }
 
 static void collectDerivedPaths(

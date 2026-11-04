@@ -568,6 +568,15 @@ public:
     virtual void querySubstitutablePathInfos(const StorePathCAMap & paths, SubstitutablePathInfos & infos);
 
     /**
+     * Like `querySubstitutablePathInfos`, but ask only `substituters`, in
+     * their priority order, instead of the configured `substituters`. A
+     * daemon client asks the daemon on a connection of its own, and the
+     * daemon drops any of them it does not trust.
+     */
+    virtual void querySubstitutablePathInfosFrom(
+        const std::vector<StoreReference> & substituters, const StorePathCAMap & paths, SubstitutablePathInfos & infos);
+
+    /**
      * Import a path into the store. Note that the entire NAR may not be read from `narSource`, e.g. if the path is
      * already valid.
      */
