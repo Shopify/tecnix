@@ -135,6 +135,13 @@ clear_narinfo_caches() {
     rm -f "$CACHE_HOME"/nix/binary-cache*
 }
 
+# Whether the store asks the caches a client names: a local store does, and so
+# does a daemon that trusts the user. One that does not, as on NixOS for a normal
+# user, drops each cache it does not list itself, so every drv is a miss.
+store_trusts_us() {
+    [[ $(nix store info --json | jq '.trusted != false') == true ]]
+}
+
 # A hit whose drv one of the substituters has is served without the drv, which
 # stays out of the store.
 expect_drvless_hits() {
@@ -163,17 +170,25 @@ expect_misses() {
 }
 
 run_lookups() {
-    echo "Testing drvless hits ($1)..."
-    expect_drvless_hits "[ \"$BINARY_CACHE\" ]" "$TEST_ROOT/drvless-hit-$1.err"
-    # Caches are asked in priority order, and a cache without the drv is no error.
-    expect_drvless_hits "[ \"$EMPTY_CACHE\" \"$BINARY_CACHE\" ]" "$TEST_ROOT/drvless-hit-second-$1.err"
+    if store_trusts_us; then
+        echo "Testing drvless hits ($1)..."
+        expect_drvless_hits "[ \"$BINARY_CACHE\" ]" "$TEST_ROOT/drvless-hit-$1.err"
+        # Caches are asked in priority order, and a cache without the drv is no error.
+        expect_drvless_hits "[ \"$EMPTY_CACHE\" \"$BINARY_CACHE\" ]" "$TEST_ROOT/drvless-hit-second-$1.err"
+    else
+        echo "Testing that an untrusting daemon drops the drvless substituters ($1)..."
+        expect_misses "[ \"$BINARY_CACHE\" ]" "$TEST_ROOT/drvless-untrusted-$1.err"
+        grepQuiet "ignoring untrusted substituter" "$TEST_ROOT/drvless-untrusted-$1.err"
+    fi
 
     echo "Testing drvless misses ($1)..."
     expect_misses '[ ]' "$TEST_ROOT/drvless-none-$1.err"
     expect_misses "[ \"$EMPTY_CACHE\" ]" "$TEST_ROOT/drvless-empty-$1.err"
     # A cache that fails fails the lookup, and every drv is a miss.
     expect_misses "[ \"$CORRUPT_CACHE\" ]" "$TEST_ROOT/drvless-broken-$1.err"
-    grepQuiet "could not ask the drvless substituters" "$TEST_ROOT/drvless-broken-$1.err"
+    if store_trusts_us; then
+        grepQuiet "could not ask the drvless substituters" "$TEST_ROOT/drvless-broken-$1.err"
+    fi
 
     # Without `substitute`, no cache is opened or asked.
     SUBSTITUTE=false expect_misses '[ "http://127.0.0.1:1" ]' "$TEST_ROOT/drvless-no-substitute-$1.err"
@@ -190,11 +205,13 @@ for uri in "ssh-ng://localhost?remote-program=touch%20$TEST_ROOT/drvless-ran" "s
 done
 [[ ! -e "$TEST_ROOT/drvless-ran" ]] || fail "a rejected store must not be opened"
 
-echo "Testing that a value depending on a drvless hit fails loudly..."
-clear_narinfo_caches
-delete_drvs
-dependent="derivation { name = \"dependent\"; system = \"test-system\"; builder = \"/bin/sh\"; args = [ t.outPath ]; }"
-expectStderr 1 eval_cached "[ \"$BINARY_CACHE\" ]" "($dependent).drvPath" | grepQuiet "drvless-alpha.drv"
+if store_trusts_us; then
+    echo "Testing that a value depending on a drvless hit fails loudly..."
+    clear_narinfo_caches
+    delete_drvs
+    dependent="derivation { name = \"dependent\"; system = \"test-system\"; builder = \"/bin/sh\"; args = [ t.outPath ]; }"
+    expectStderr 1 eval_cached "[ \"$BINARY_CACHE\" ]" "($dependent).drvPath" | grepQuiet "drvless-alpha.drv"
+fi
 
 echo "Testing that a TXTV1 payload is served only with its drv local..."
 # A value whose outPath is no store path gets the payload without it.
