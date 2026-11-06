@@ -734,7 +734,26 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
             // from running. Note that we already have a repository-wide `PathLock` (see git.cc), so this is safe.
             std::filesystem::remove(dir / "shallow.lock");
 
-            OsStrings gitArgs{"-C", dir.native(), "--git-dir", ".", "fetch", "--progress", "--force"};
+            // Keep `git fetch` from starting Git's automatic maintenance in this cache repository. That maintenance
+            // (`git maintenance run --auto`, or `git gc --auto` before Git 2.29) rewrites the repository behind the
+            // fetcher's back: it runs detached, after the `PathLock` is released, and its repack rewrites `shallow`
+            // while the next fetch into this repository runs, which then fails with "shallow file has changed since
+            // we read it"; and its `pack-refs` removes the loose ref whose mtime `getAccessorFromCommit` uses for
+            // `tarball-ttl`. This repository is a cache that only this fetcher writes, and the libgit2 fetch below
+            // never runs maintenance either. `maintenance.auto` is read by Git >= 2.29 and `gc.auto` by older Git;
+            // Git ignores the key it does not know.
+            OsStrings gitArgs{
+                "-C",
+                dir.native(),
+                "--git-dir",
+                ".",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
+                "fetch",
+                "--progress",
+                "--force"};
             if (shallow) {
                 gitArgs.push_back(OS_STR("--depth"));
                 gitArgs.push_back(OS_STR("1"));
