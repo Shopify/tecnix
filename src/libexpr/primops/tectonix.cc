@@ -413,6 +413,66 @@ static RegisterPrimOp primop_unsafeTectonixInternalZonePath({
 });
 
 // ============================================================================
+// builtins.unsafeTectonixInternalRepoPath zonePath
+// The zone as a path value in the Tecnix repo accessor, the root tecnixTargets
+// imports the resolver from.
+// ============================================================================
+static void prim_unsafeTectonixInternalRepoPath(EvalState & state, const PosIdx pos, Value ** args, Value & v)
+{
+    auto zonePath = state.forceStringNoCtx(
+        *args[0], pos, "while evaluating the 'zonePath' argument to builtins.unsafeTectonixInternalRepoPath");
+
+    // Its result depends on checkout state and on the manifest, neither of
+    // which it records; tracked code reads the repo-rooted path instead.
+    if (currentTecnixThreadState.trackingContext)
+        state
+            .error<EvalError>(
+                "builtins.unsafeTectonixInternalRepoPath exposes checkout-local state and cannot be used during Tecnix dependency tracking")
+            .atPos(pos)
+            .debugThrow();
+
+    // Without a checkout the accessor has no dirty overlay: it would serve the
+    // commit and silently drop the checkout's changes. Checked before
+    // validation so a tree with no Tectonix settings (a `git archive`) is
+    // unaffected.
+    if (!isTectonixSourceAvailable(state)) {
+        v.mkNull();
+        return;
+    }
+
+    validateZonePath(state, pos, zonePath);
+
+    // Reads through the accessor record their own accesses, so the zone root
+    // itself is not recorded.
+    auto path = getTecnixRepoPath(state, normalizeTrackedRepoPath(zonePath));
+    v.mkPath(SourcePath(state.rootFS, CanonPath(path)), state.mem);
+}
+
+static RegisterPrimOp primop_unsafeTectonixInternalRepoPath({
+    .name = "__unsafeTectonixInternalRepoPath",
+    .args = {"zonePath"},
+    .doc = R"(
+      Get a zone as a path value in the Tecnix repo accessor, the view
+      `builtins.tecnixTargets` evaluates: the tree at `--tectonix-git-sha`
+      plus every path `git status --untracked-files=all` reports in the
+      checkout. It holds what `git add --all` would commit: files Git ignores
+      are absent. Unchanged tracked files are served as committed (Git LFS
+      files as pointer files); the contents of dirty paths follow the
+      configured repo accessor.
+
+      It cannot be used during Tecnix dependency tracking.
+
+      Returns `null` before zone validation when `--tectonix-checkout-path`
+      is not set: the accessor would then serve the commit alone and drop
+      the checkout's changes. With a checkout, `--tectonix-git-sha` is
+      required.
+
+      Example: `builtins.unsafeTectonixInternalRepoPath "//areas/tools/tec"`
+    )",
+    .impl = prim_unsafeTectonixInternalRepoPath,
+});
+
+// ============================================================================
 // builtins.unsafeTectonixInternalSparseCheckoutRoots
 // Returns list of zone IDs in sparse checkout
 // ============================================================================
