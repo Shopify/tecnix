@@ -408,6 +408,14 @@ void LocalStore::collectGarbage(const GCOptions & options, GCResults & results)
     auto fdGCLock = openGCLock();
     FdLock gcLock(fdGCLock.get(), ltWrite, true, "waiting for the big garbage collector lock...");
 
+    auto maxFreed = options.maxFreed;
+    if (options.maxFreedOnceLocked) {
+        auto n = options.maxFreedOnceLocked();
+        if (!n)
+            return;
+        maxFreed = *n;
+    }
+
     /* Synchronisation point to test ENOENT handling in
        addTempRoot(), see tests/gc-non-blocking.sh. */
     if (auto p = getEnv("_NIX_TEST_GC_SYNC_1"))
@@ -584,8 +592,8 @@ void LocalStore::collectGarbage(const GCOptions & options, GCResults & results)
 
         results.bytesFreed += bytesFreed;
 
-        if (results.bytesFreed > options.maxFreed) {
-            printInfo("deleted more than %d bytes; stopping", options.maxFreed);
+        if (results.bytesFreed > maxFreed) {
+            printInfo("deleted more than %d bytes; stopping", maxFreed);
             throw GCLimitReached();
         }
     };
@@ -734,7 +742,7 @@ void LocalStore::collectGarbage(const GCOptions & options, GCResults & results)
             assert(dead.count(i));
         }
 
-    } else if (options.maxFreed > 0) {
+    } else if (maxFreed > 0) {
 
         if (shouldDelete)
             printInfo("deleting garbage...");
@@ -896,6 +904,18 @@ void LocalStore::autoGC(bool sync)
 
                 GCOptions options;
                 options.maxFreed = gcSettings.maxFree - avail;
+
+                /* Other processes may have collected garbage while
+                   we waited for the GC lock, so check again before
+                   deleting anything. */
+                options.maxFreedOnceLocked = [&]() -> std::optional<uint64_t> {
+                    auto availNow = getAvail();
+                    if (availNow >= gcSettings.minFree || availNow >= gcSettings.maxFree) {
+                        printInfo("skipping auto-GC: %d bytes free after waiting for the GC lock", availNow);
+                        return std::nullopt;
+                    }
+                    return gcSettings.maxFree - availNow;
+                };
 
                 printInfo("running auto-GC to free %d bytes", options.maxFreed);
 
