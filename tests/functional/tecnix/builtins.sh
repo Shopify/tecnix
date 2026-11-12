@@ -313,6 +313,77 @@ zone_source_types=$(tecnix_eval_json_with_settings '{ src = builtins.typeOf (bui
 assert_jq "$zone_source_types" '.src == "string" and .path == "path"' \
     "zone source builtins should preserve the resolver-facing string/path split"
 
+# The repo-accessor zone path holds what `git add --all` would commit. Git's
+# ignore rules, personal excludes included, apply to untracked files only.
+echo "Testing unsafeTectonixInternalRepoPath admits what git would commit..."
+REPO_PATH_WORLD="$TEST_ROOT/tecnix-repo-path-world"
+create_tecnix_builtin_test_world "$REPO_PATH_WORLD"
+web="$REPO_PATH_WORLD/areas/app/web"
+mkdir -p "$web/out" "$web/new/nested" "$REPO_PATH_WORLD/.git/info"
+printf 'out/\n' > "$web/.gitignore"
+printf '/areas/lib/\n' > "$REPO_PATH_WORLD/.gitignore"
+echo kept > "$web/out/tracked.txt"
+# A target that interpolates its own zone, as World's zone.src does.
+cat > "$web/targets.nix" << 'TARGETS_EOF'
+{ system }:
+{
+  zoneSource = {
+    name = "zoneSource";
+    drvPath = "/nix/store/00000000000000000000000000000000-zone-source.drv";
+    source = "${./.}";
+  };
+}
+TARGETS_EOF
+git -C "$REPO_PATH_WORLD" add .gitignore areas/app/web/.gitignore areas/app/web/targets.nix
+git -C "$REPO_PATH_WORLD" add -f areas/app/web/out/tracked.txt
+git -C "$REPO_PATH_WORLD" commit -q -m "Add ignore rules"
+echo ignored > "$web/out/ignored.txt"
+echo new > "$web/new/nested/file.txt"
+echo personal > "$web/personal.txt"
+echo personal.txt >> "$REPO_PATH_WORLD/.git/info/exclude"
+echo new > "$REPO_PATH_WORLD/areas/lib/shared/new.txt"
+REPO_PATH_SHA=$(get_head_sha "$REPO_PATH_WORLD")
+repo_path_eval() {
+    nix eval --json \
+        --extra-experimental-features 'nix-command' \
+        --option lazy-trees true \
+        --option tecnix-eval-cache false \
+        --option tectonix-git-dir "$REPO_PATH_WORLD/.git" \
+        --option tectonix-git-sha "$REPO_PATH_SHA" \
+        --option tectonix-checkout-path "$REPO_PATH_WORLD" \
+        --expr "$1"
+}
+# shellcheck disable=SC2016 # Nix, not shell
+repo_path_files=$(repo_path_eval 'let
+      files = p: builtins.concatLists (builtins.attrValues (builtins.mapAttrs
+        (n: t: if t == "directory" then map (f: "${n}/${f}") (files (p + "/${n}")) else [ n ])
+        (builtins.readDir p)));
+    in { web = files (builtins.unsafeTectonixInternalRepoPath "//areas/app/web");
+         shared = files (builtins.unsafeTectonixInternalRepoPath "//areas/lib/shared"); }')
+assert_jq "$repo_path_files" '.web | index("out/tracked.txt") and index("new/nested/file.txt") and (index("out/ignored.txt") | not) and (index("personal.txt") | not)' \
+    "the repo path should keep tracked and new files and drop ignored and excluded ones"
+assert_jq "$repo_path_files" '.shared | index("targets.nix") and (index("new.txt") | not)' \
+    "a zone ignored from above should keep its tracked files only"
+# Compare interpolated store paths: the accessor's mount point is random.
+repo_path_identity=$(repo_path_eval "$(cat << EOF
+{
+  target = (builtins.tecnixTargets {
+    gitDir = "$REPO_PATH_WORLD/.git";
+    resolver = "system/tectonix/resolve.nix";
+    args = { system = "test-system"; };
+    rev = "$REPO_PATH_SHA";
+    checkoutPath = "$REPO_PATH_WORLD";
+    targets = [ "//areas/app/web:zoneSource" ];
+  })."//areas/app/web:zoneSource".source;
+  builtin = "\${builtins.unsafeTectonixInternalRepoPath "//areas/app/web"}";
+}
+EOF
+)")
+assert_jq "$repo_path_identity" '.target == .builtin and (.builtin | endswith("-web"))' \
+    "the repo path should be the store path a tecnixTargets target gets for its zone"
+assert_jq "$(tecnix_eval_json_no_cache 'builtins.unsafeTectonixInternalRepoPath "//areas/app/web"')" '. == null' \
+    "without a checkout the repo path should be null rather than the bare commit"
+
 # Filtered source-path cache keys must not ignore the filter predicate. Use the
 # same path name for both filtered paths so a stale persistent hit would return
 # the first filter's store path for the second filter.
