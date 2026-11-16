@@ -72,6 +72,15 @@ struct ProtocolError : std::runtime_error
     using std::runtime_error::runtime_error;
 };
 
+/// The [`ProtocolError`] for a connection the daemon closed or reset: a write failed
+/// with `EPIPE`/`ECONNRESET`, or a read saw end-of-file or `ECONNRESET`. The daemon
+/// closes a connection that has had no request for its idle timeout (300 s), so a
+/// long evaluation can find its connection gone between two requests.
+struct ConnectionLost : ProtocolError
+{
+    using ProtocolError::ProtocolError;
+};
+
 /// One `zone_tree_shas` result: a zone's working-tree subtree oid. `treeSha` is
 /// `nullopt` when the zone is absent or hidden by scope (the daemon sends empty bytes),
 /// keeping the response one-to-one with the request.
@@ -96,6 +105,11 @@ struct ZoneDirty
 /// thread-safe: a connection multiplexes by request id, but this client issues one
 /// request and drains to its reply before the next, which is all Tectonix's
 /// memoized read methods need. Move-only (it owns the socket fd).
+///
+/// Every verb it speaks is a read. So when a call finds the connection lost
+/// ([`ConnectionLost`]), the client connects again to the same socket and sends the
+/// request once more. A second loss, a failed connect, or any other error goes to the
+/// caller.
 class Client
 {
 public:
@@ -124,7 +138,10 @@ public:
     std::vector<ZoneSha> zoneTreeShas(uint64_t ws, const std::vector<std::string> & zones);
 
 private:
-    explicit Client(int fd);
+    Client(int fd, std::string socketPath);
+
+    /// Replace the connection with a new one to `socketPath_`.
+    void reconnect();
 
     /// A single decoded reply frame addressed to our request (transport detail).
     struct RecvFrame
@@ -143,8 +160,13 @@ private:
     /// frame and any stray frame), returning it. Enforces the [`MAX_FRAME`] length cap.
     RecvFrame recvFor(uint64_t id);
 
+    /// `send` then `recvFor`, on the current connection.
+    RecvFrame roundTrip(const std::string & method, const std::string & payload);
+
     /// A **one-shot** call: issue `method`, return the single RESPONSE payload (throwing on
-    /// an ERROR reply / transport failure). For verbs the daemon does not stream.
+    /// an ERROR reply / transport failure). For verbs the daemon does not stream. Only for
+    /// read verbs: it sends the request again on a new connection after a
+    /// [`ConnectionLost`].
     std::string call(const std::string & method, const std::string & payload);
 
     void writeAll(const std::string & bytes);
@@ -157,6 +179,7 @@ private:
     std::string readN(uint64_t n);
 
     int fd_ = -1;
+    std::string socketPath_; ///< where `reconnect` connects
     uint64_t nextId_ = 1;
     std::string rbuf_; ///< bytes read from the socket but not yet consumed
     size_t rpos_ = 0;  ///< parse cursor into rbuf_
