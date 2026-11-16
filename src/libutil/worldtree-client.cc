@@ -215,13 +215,15 @@ RpcError::RpcError(ErrorCode code, const std::string & msg)
 
 // ---- connection lifecycle ---------------------------------------------------
 
-Client::Client(int fd)
+Client::Client(int fd, std::string socketPath)
     : fd_(fd)
+    , socketPath_(std::move(socketPath))
 {
 }
 
 Client::Client(Client && other) noexcept
     : fd_(other.fd_)
+    , socketPath_(std::move(other.socketPath_))
     , nextId_(other.nextId_)
     , rbuf_(std::move(other.rbuf_))
     , rpos_(other.rpos_)
@@ -235,6 +237,7 @@ Client & Client::operator=(Client && other) noexcept
         if (fd_ >= 0)
             ::close(fd_);
         fd_ = other.fd_;
+        socketPath_ = std::move(other.socketPath_);
         nextId_ = other.nextId_;
         rbuf_ = std::move(other.rbuf_);
         rpos_ = other.rpos_;
@@ -274,6 +277,14 @@ Client Client::connect(const std::string & socketPath)
     if (flags >= 0)
         ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 
+#ifdef SO_NOSIGPIPE
+    // A write to a connection the daemon closed must fail with EPIPE, not raise SIGPIPE,
+    // whatever the process does with that signal. Linux has no such option; `writeAll`
+    // passes `MSG_NOSIGNAL` there instead.
+    int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+
     // A receive timeout so a wedged daemon surfaces as a clean transport error rather than
     // an indefinite hang inside a build. Best-effort: a kernel that rejects the option
     // just leaves reads blocking, the prior behavior.
@@ -287,7 +298,13 @@ Client Client::connect(const std::string & socketPath)
         ::close(fd);
         throw ProtocolError("worldtree: connect(" + socketPath + "): " + std::strerror(e));
     }
-    return Client(fd);
+    return Client(fd, socketPath);
+}
+
+void Client::reconnect()
+{
+    std::string path = socketPath_;
+    *this = connect(path);
 }
 
 // ---- socket I/O -------------------------------------------------------------
@@ -296,10 +313,16 @@ void Client::writeAll(const std::string & bytes)
 {
     size_t off = 0;
     while (off < bytes.size()) {
+#ifdef MSG_NOSIGNAL
+        ssize_t n = ::send(fd_, bytes.data() + off, bytes.size() - off, MSG_NOSIGNAL);
+#else
         ssize_t n = ::write(fd_, bytes.data() + off, bytes.size() - off);
+#endif
         if (n < 0) {
             if (errno == EINTR)
                 continue;
+            if (errno == EPIPE || errno == ECONNRESET)
+                throw ConnectionLost(std::string("worldtree: write(): ") + std::strerror(errno));
             throw ProtocolError(std::string("worldtree: write(): ") + std::strerror(errno));
         }
         off += static_cast<size_t>(n);
@@ -324,10 +347,12 @@ void Client::refill()
             // unavailable" of a raw EAGAIN.
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 throw ProtocolError("worldtree: timed out waiting for the daemon to reply");
+            if (errno == ECONNRESET)
+                throw ConnectionLost(std::string("worldtree: read(): ") + std::strerror(errno));
             throw ProtocolError(std::string("worldtree: read(): ") + std::strerror(errno));
         }
         if (n == 0)
-            throw ProtocolError("worldtree: daemon closed the connection");
+            throw ConnectionLost("worldtree: daemon closed the connection");
         rbuf_.append(tmp, static_cast<size_t>(n));
         return;
     }
@@ -441,10 +466,24 @@ Client::RecvFrame Client::recvFor(uint64_t id)
     }
 }
 
+Client::RecvFrame Client::roundTrip(const std::string & method, const std::string & payload)
+{
+    return recvFor(send(method, payload));
+}
+
 std::string Client::call(const std::string & method, const std::string & payload)
 {
-    uint64_t id = send(method, payload);
-    RecvFrame fr = recvFor(id);
+    RecvFrame fr;
+    try {
+        fr = roundTrip(method, payload);
+    } catch (ConnectionLost &) {
+        // The daemon closes a connection that has had no request for its idle timeout
+        // (300 s), and an evaluation can go that long between two zone lookups. Every verb
+        // here is a read, so sending it again on a new connection is safe. Once only: a
+        // second loss is a real failure.
+        reconnect();
+        fr = roundTrip(method, payload);
+    }
     if (fr.kind == KIND_RESPONSE)
         return fr.havePayload ? fr.payload : std::string();
     if (fr.kind == KIND_ERROR)
