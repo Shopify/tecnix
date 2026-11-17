@@ -2,6 +2,8 @@
 ///@file
 
 #include "nix/store/store-api.hh"
+#include <functional>
+#include <optional>
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
 
@@ -62,6 +64,15 @@ struct GCOptions
      * Stop after at least `maxFreed` bytes have been freed.
      */
     uint64_t maxFreed{std::numeric_limits<uint64_t>::max()};
+
+    /**
+     * If set, called once the exclusive GC lock is held, before any
+     * roots are read. It returns the number of bytes to free, which
+     * replaces `maxFreed`, or `std::nullopt` to return without
+     * collecting. Auto-GC uses this to re-check free space, since
+     * other collections may have run while it waited for the lock.
+     */
+    std::function<std::optional<uint64_t>()> maxFreedOnceLocked;
 
     /**
      * Whether to hide potentially sensitive information about GC
