@@ -79,7 +79,7 @@ jobs:
             stdenv: stdenv
             cache: ubuntu-gcc
           - scenario: on macos
-            runs-on: macos-14
+            runs-on: macos-15
             os: darwin
             sanitizers: false
             primary: true
@@ -235,7 +235,7 @@ jobs:
             os: linux
             rust-installer: false
           - scenario: on macos
-            runs-on: macos-14
+            runs-on: macos-15
             os: darwin
             rust-installer: false
           - scenario: on ubuntu (rust)
@@ -243,7 +243,7 @@ jobs:
             os: linux
             rust-installer: true
           - scenario: on macos (rust)
-            runs-on: macos-14
+            runs-on: macos-15
             os: darwin
             rust-installer: true
     name: installer test ${{ matrix.scenario }}
