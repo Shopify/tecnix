@@ -91,7 +91,7 @@ suites = [
       'hash-convert.sh',
       'hash-path.sh',
       'gc-non-blocking.sh',
-      'gc-fetchTarball-pinned.sh',
+      'gc-held-store-paths.sh',
       'check.sh',
       'nix-shell.sh',
       'check-refs.sh',

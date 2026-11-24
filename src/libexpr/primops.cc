@@ -2009,8 +2009,12 @@ static void prim_storePath(EvalState & state, const PosIdx pos, Value ** args, V
     if (!state.store->isInStore(path.abs()))
         state.error<EvalError>("path '%1%' is not in the Nix store", path).atPos(pos).debugThrow();
     auto path2 = state.store->toStorePath(path.abs()).first;
-    if (!settings.readOnlyMode)
+    if (!settings.readOnlyMode) {
+        /* Evaluation can read files inside the path, so root it before
+           ensurePath checks it, or a concurrent GC can delete it. */
+        state.store->addTempRoot(path2);
         state.store->ensurePath(path2);
+    }
     context.insert(NixStringContextElem::Opaque{.path = path2});
     v.mkString(path.abs(), context, state.mem);
 }
@@ -2952,9 +2956,16 @@ static void addPath(
             });
 
         std::optional<StorePath> expectedStorePath;
-        if (expectedHash)
+        if (expectedHash) {
             expectedStorePath = state.store->makeFixedOutputPathFromCA(
                 name, ContentAddressWithReferences::fromParts(method, *expectedHash, {refs}));
+            /* If the path is already valid it is returned as is, so root it
+               before checking, or a concurrent GC can delete it while
+               evaluation reads it. A dry run, like fetchToStore's, adds
+               nothing and roots nothing. */
+            if (!settings.readOnlyMode)
+                state.store->addTempRoot(*expectedStorePath);
+        }
 
         if (!expectedHash || !state.store->isValidPath(*expectedStorePath)) {
             // FIXME: make this lazy?
