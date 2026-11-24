@@ -438,6 +438,13 @@ static void fetch(
 
         // Try to get the path from the local store or substituters
         try {
+            /* The path is returned as is, not copied, and evaluation goes on
+               reading files inside it. Root it first, as Input::getAccessor
+               does: without a temp root a concurrent GC deletes it and the
+               next read fails with "path '...' does not exist". The root must
+               come before the validity check in ensurePath, or the path can
+               be deleted between the two. */
+            state.store->addTempRoot(expectedPath);
             state.store->ensurePath(expectedPath);
             debug("using substituted/cached path '%s' for '%s'", state.store->printStorePath(expectedPath), *url);
             state.allowAndSetStorePathString(expectedPath, v);
